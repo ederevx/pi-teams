@@ -14,10 +14,13 @@ coordinate natively instead of through the shared tree.
   `127.0.0.1` with an ephemeral port and a random token, published
   atomically in `TEAM_ROOT/endpoint` (default `~/.local/state/
   pi-teams`). Every connection must present the token in a hello
-  handshake before any op. Agents register once, exchange JSON-lines
-  messages, discover each other, and are swept when their connection
-  goes idle past the heartbeat timeout. The registry is mirrored to
-  `registry.json` atomically for non-connected readers.
+  handshake before any op. A per-root broker lock (a `.broker.lock`
+  marker acquired atomically at start) guarantees a single broker even
+  when many sessions boot and race at once, so an in-place extension
+  reload never spawns one broker per session. Agents register once,
+  exchange JSON-lines messages, discover each other, and are swept when
+  their connection goes idle past the heartbeat timeout. The registry
+  is mirrored to `registry.json` atomically for non-connected readers.
 - **Client** (`src/team.py`): one persistent connection per agent is the
   endpoint; while it stays open the agent is reachable and relayed
   messages arrive on it. CLI: `team register`, `team ls`, `team send
@@ -31,11 +34,14 @@ coordinate natively instead of through the shared tree.
   client names pids, sends signals, or probes processes, which keeps
   the protocol OS-agnostic (POSIX and Windows).
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
-  keeps its endpoint open through a held connection that also watches
-  the pi pid, injects a compact teammates note before the first agent
-  run, and answers `/team ls|status|send|spawn|kill`. When a fork
-  starts, the pi child registers through the same extension and is
-  terminated with the parent.
+  keeps its endpoint open through a held connection, injects a compact
+  teammates note before the first agent run, and answers
+  `/team ls|status|send|spawn|kill`. Identity rides through CLI args
+  (`--id/--name/--role/--parent/--session`) because pi.exec does not
+  forward env, and the held connection exits on an EOF on its stdin
+  (a hosted session's PTY) so the endpoint dies with its pi instead of
+  pinging forever as an orphan. When a fork starts, the pi child
+  registers through the same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel.
