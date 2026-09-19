@@ -30,6 +30,7 @@ import json
 import os
 import pathlib
 import secrets
+import signal
 import socket
 import sys
 import threading
@@ -77,10 +78,19 @@ class TeamRoot:
 class TeamBroker:
     """Registry + relay for connected agents on one loopback endpoint."""
 
-    def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0):
+    def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
+                 fork_idle=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
+        # A spawned teammate (role "fork") with no work contact for this
+        # long is garbage-collected: its connection is closed, its
+        # owner process is signalled, and its entry is dropped. Owned by
+        # the broker; a busy teammate's heartbeats keep it alive.
+        self.fork_idle = float(
+            fork_idle if fork_idle is not None
+            else os.environ.get("PI_TEAMS_FORK_IDLE", "300")
+        )
         self.token = secrets.token_hex(16)
         self._registry = {}
         self._clients = {}
@@ -231,13 +241,18 @@ class TeamBroker:
             agent_id = self._register(conn, msg)
         elif op == "send":
             self._relay(msg, agent_id, conn)
+            self._touch(agent_id, work=True)
         elif op == "broadcast":
             self._broadcast(msg.get("kind"), msg.get("payload"),
                             exclude=agent_id)
+            self._touch(agent_id, work=True)
         elif op == "ls":
             self._reply(conn, op="registry", agents=self._snapshot())
         elif op == "ping":
-            self._touch(agent_id)
+            # A plain ping is the endpoint shim's keepalive; a busy ping
+            # marks the agent as actively working and keeps the fork's
+            # idle clock from firing.
+            self._touch(agent_id, work=msg.get("busy") is True)
             self._reply(conn, op="ack")
         elif op == "terminate":
             self._terminate(msg.get("to"), msg.get("why") or "requested")
@@ -264,8 +279,10 @@ class TeamBroker:
             "parent": msg.get("parent") or None,
             "cwd": str(msg.get("cwd") or os.getcwd()),
             "session": msg.get("session") or None,
+            "owner_pid": msg.get("owner_pid") or None,
             "since_ts": time.time(),
             "last_seen": time.time(),
+            "last_work": time.time(),
         }
         with self._lock:
             self._clients[agent_id] = conn
@@ -289,10 +306,12 @@ class TeamBroker:
         self.root.write_atomic(REGISTRY_NAME, data + "\n")
         self._broadcast("registry-change", self._snapshot())
 
-    def _touch(self, agent_id):
+    def _touch(self, agent_id, work=False):
         entry = self._registry.get(agent_id) if agent_id else None
         if entry is not None:
             entry["last_seen"] = time.time()
+            if work:
+                entry["last_work"] = time.time()
 
     def _drop_entry(self, agent_id):
         with self._lock:
@@ -336,13 +355,34 @@ class TeamBroker:
     def _terminate(self, agent_id, why):
         with self._lock:
             conn = self._clients.get(agent_id)
-        if conn is None:
-            return
-        self._write(conn, {
-            "op": "message", "from": "*", "kind": "terminate",
-            "payload": {"id": agent_id, "why": why},
-        })
+            entry = self._registry.get(agent_id)
+        if conn is not None:
+            self._write(conn, {
+                "op": "message", "from": "*", "kind": "terminate",
+                "payload": {"id": agent_id, "why": why},
+            })
+            try:
+                conn.close()
+            except OSError:
+                pass
+        if entry is not None:
+            self._kill_owner(entry, why)
         self._drop_entry(agent_id)
+
+    def _kill_owner(self, entry, why):
+        # GC enforcement: a spawned teammate's termination must reach the
+        # pi process it serves, not just its endpoint shim. Only forks
+        # ever carry an owner pid; a single portable signal works on
+        # POSIX (SIGTERM) and Windows (TerminateProcess).
+        if entry.get("role") != "fork":
+            return
+        owner = entry.get("owner_pid")
+        if not owner:
+            return
+        try:
+            os.kill(int(owner), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
 
     def _broadcast(self, kind, payload, exclude=None):
         envelope = {"op": "message", "from": "*", "kind": kind,
@@ -365,29 +405,47 @@ class TeamBroker:
     def _sweep(self):
         now = time.time()
         with self._lock:
-            doomed_parent_gone = []
+            doomed_fork = []
             doomed_idle = []
             for agent_id, entry in list(self._registry.items()):
                 parent = entry.get("parent")
-                if parent and parent not in self._registry:
-                    doomed_parent_gone.append(agent_id)
-                    continue
-                if entry.get("last_seen", 0) < now - self.idle_timeout:
+                parent_gone = bool(parent) and parent not in self._registry
+                is_fork = entry.get("role") == "fork"
+                work_idle = (
+                    is_fork and self.fork_idle > 0
+                    and entry.get("last_work", 0) < now - self.fork_idle
+                )
+                seen_idle = (
+                    entry.get("last_seen", 0) < now - self.idle_timeout
+                )
+                if is_fork and (parent_gone or work_idle or seen_idle):
+                    doomed_fork.append(agent_id)
+                elif seen_idle:
                     doomed_idle.append(agent_id)
-            if not doomed_parent_gone and not doomed_idle:
+            if not doomed_fork and not doomed_idle:
                 return
-            for agent_id in doomed_parent_gone + doomed_idle:
+            for agent_id in doomed_fork:
+                entry = self._registry.get(agent_id)
                 conn = self._clients.pop(agent_id, None)
                 self._registry.pop(agent_id, None)
-                if conn is not None and agent_id in doomed_parent_gone:
+                if conn is not None:
+                    why = "parent-gone" if (
+                        entry and entry.get("parent")
+                        and entry["parent"] not in self._registry
+                    ) else "idle-gc"
                     self._write(conn, {
-                        "op": "message", "from": "*", "kind": "terminate",
-                        "payload": {"id": agent_id, "why": "parent-gone"},
+                        "op": "message", "from": "*",
+                        "kind": "terminate",
+                        "payload": {"id": agent_id, "why": why},
                     })
                     try:
                         conn.close()
                     except OSError:
                         pass
+                self._kill_owner(entry or {}, "idle-gc")
+            for agent_id in doomed_idle:
+                self._clients.pop(agent_id, None)
+                self._registry.pop(agent_id, None)
         self._persist_and_notify()
 
     # -- low-level writes -------------------------------------------
@@ -439,6 +497,7 @@ def main(argv=None):
     )
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--idle-timeout", type=float, default=15.0)
+    parser.add_argument("--fork-idle", type=float, default=None)
     parser.add_argument("--sweep-interval", type=float, default=1.0)
     parser.add_argument("command", nargs="?", choices=["start", "stop"],
                         default="start")
@@ -448,7 +507,8 @@ def main(argv=None):
         _shutdown_via_endpoint(root)
         return 0
     TeamBroker(args.root, idle_timeout=args.idle_timeout,
-               sweep_interval=args.sweep_interval).run()
+               sweep_interval=args.sweep_interval,
+               fork_idle=args.fork_idle).run()
     return 0
 
 
