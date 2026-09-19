@@ -1,23 +1,26 @@
-"""Broker protocol tests: registration, relay, discovery, cleanup."""
+"""Broker protocol tests: handshake, registry, relay, liveness."""
 
+import json
 import shutil
-import subprocess
-import sys
+import socket
 import threading
 import unittest
 
-from harness import make_root, wait_sock, wait_until
+from harness import make_root, wait_endpoint, wait_until
 from team import TeamClient
 from teamd import TeamBroker
+
+IDLE_ROOMY = 30.0
 
 
 class BrokerProtocolTests(unittest.TestCase):
     def setUp(self):
         self.root = make_root()
-        self.broker = TeamBroker(self.root, sweep_interval=0.1)
+        self.broker = TeamBroker(self.root, idle_timeout=IDLE_ROOMY,
+                                 sweep_interval=0.2)
         self.thread = threading.Thread(target=self.broker.run, daemon=True)
         self.thread.start()
-        wait_sock(self.root)
+        wait_endpoint(self.root)
         self.checker = TeamClient(self.root)
         self.checker.id = "checker"
         self.checker.register()
@@ -41,6 +44,24 @@ class BrokerProtocolTests(unittest.TestCase):
         reply = client.register()
         self.assertIn(reply.get("op"), ("ack", "error"), reply)
         return client
+
+    def test_handshake_rejects_bad_token(self):
+        endpoint = self.broker.root.read_endpoint()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect((endpoint["host"], endpoint["port"]))
+        sock.sendall(
+            (json.dumps({"op": "hello", "token": "wrong"}) + "\n").encode()
+        )
+        reply = sock.recv(4096)
+        sock.close()
+        self.assertIn(b'"error":"bad-handshake"', reply)
+
+    def test_broker_publishes_endpoint(self):
+        endpoint = self.broker.root.read_endpoint()
+        self.assertEqual(endpoint["host"], "127.0.0.1")
+        self.assertTrue(endpoint["port"] > 0)
+        self.assertTrue(len(endpoint["token"]) >= 32)
 
     def test_register_and_discover(self):
         self._agent("alpha", role="main")
@@ -106,18 +127,40 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertNotIn("beta", agents)
         alpha.close()
 
-    def test_sweep_removes_dead_pid(self):
-        self._agent("ghost")
-        died = subprocess.Popen([sys.executable, "-c", "pass"])
-        died.wait(timeout=5)
-        ghost = TeamClient(self.root)
-        ghost.id = "ghost"
-        ghost.forced_pid = str(died.pid)
-        ghost.register()
+    def test_connection_close_drops_agent(self):
+        alpha = self._agent("alpha")
+        self.assertIn("alpha", self._agents())
+        alpha.close()
         self.assertTrue(
-            wait_until(lambda: "ghost" not in self._agents()),
-            "dead-pid agent was never swept",
+            wait_until(lambda: "alpha" not in self._agents()),
+            "closed connection was not swept",
         )
+
+    def test_idle_sweep(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=0.4, sweep_interval=0.1)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        try:
+            wait_endpoint(root)
+            ghost = TeamClient(root, heartbeat=None)
+            ghost.id = "ghost"
+            ghost.register()
+            self.assertTrue(
+                wait_until(lambda: "ghost" not in self._ids_via(root)),
+                "idle agent was never swept",
+            )
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _ids_via(self, root):
+        probe = TeamClient(root, heartbeat=None)
+        probe.id = "probe"
+        reply = probe.ls()
+        probe.close()
+        return {a["id"] for a in reply["agents"]}
 
 
 if __name__ == "__main__":

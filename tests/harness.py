@@ -1,5 +1,6 @@
-"""Test harness: temp team roots, broker processes, and client helpers."""
+"""Test harness: temp team roots, brokers, and client helpers."""
 
+import json
 import os
 import pathlib
 import socket
@@ -30,30 +31,33 @@ def make_root():
     ))
 
 
-def start_broker(root):
+def start_broker(root, idle_timeout=15.0):
     proc = subprocess.Popen(
-        [sys.executable, str(TEAMD), "--root", root, "start"],
+        [sys.executable, str(TEAMD), "--root", root,
+         "--idle-timeout", str(idle_timeout), "start"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    wait_sock(root)
+    wait_endpoint(root)
     return proc
 
 
-def wait_sock(root, timeout=5.0):
-    sock = pathlib.Path(root) / "teamd.sock"
+def read_endpoint(root):
+    return json.loads((pathlib.Path(root) / "endpoint").read_text())
+
+
+def wait_endpoint(root, timeout=5.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if sock.exists():
-            try:
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                probe.settimeout(0.5)
-                probe.connect(str(sock))
-                probe.close()
-                return True
-            except OSError:
-                pass
-        time.sleep(0.05)
+        try:
+            ep = read_endpoint(root)
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            probe.connect((ep["host"], ep["port"]))
+            probe.close()
+            return ep
+        except (KeyError, OSError, ValueError):
+            time.sleep(0.05)
     raise RuntimeError("broker did not come up at %s" % root)
 
 

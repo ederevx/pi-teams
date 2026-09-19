@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """team - the pi-teams client.
 
-Speaks the broker protocol over the team socket. Identity comes from the
-environment (TEAM_ID, TEAM_NAME, TEAM_ROLE, TEAM_PARENT_ID, TEAM_PID,
-TEAM_SESSION) or is derived from the process. One TeamClient holds one
-persistent connection: while it stays open the agent is reachable and
-broker relays arrive on it. The CLI offers register, ls, send, follow,
-terminate, fork, and a held child used by tests.
+Speaks the broker protocol over its loopback TCP endpoint. Identity
+comes from the environment (TEAM_ID, TEAM_NAME, TEAM_ROLE,
+TEAM_PARENT_ID, TEAM_SESSION) or is derived from the process. One
+TeamClient holds one persistent connection: while it stays open the
+agent is reachable and broker relays arrive on it. The CLI offers
+register, ls, send, follow, hold, terminate, fork, and deregister.
 
-A fork is a child process whose environment names this agent as its
-parent; the broker terminates a fork once the parent process dies, so a
-team cannot outlive the agent that spawned it. The broker (teamd) does
-the enforcement - no per-child watchdog process is needed.
+Liveness is connection-based on every platform: hold() keeps the
+endpoint open and exits when the broker closes it (deregister), a
+terminate notice arrives (parent gone or explicit kill), or the
+connection drops (broker down). Nothing here kills processes or names
+pids, so the client is portable across POSIX and Windows.
 """
 
 import argparse
@@ -21,24 +22,27 @@ import random
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from teamd import DEFAULT_ROOT, TeamRoot  # noqa: E402
 
+HEARTBEAT_DEFAULT = 6.0
+
 
 class TeamClient:
-    """One agent's persistent connection to the team socket."""
+    """One agent's persistent connection to the team endpoint."""
 
-    def __init__(self, root=None, timeout=2.0):
+    def __init__(self, root=None, timeout=2.0, heartbeat=HEARTBEAT_DEFAULT):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.timeout = timeout
+        self.heartbeat = heartbeat
         self.id = os.environ.get("TEAM_ID")
         self.name = os.environ.get("TEAM_NAME")
         self.role = os.environ.get("TEAM_ROLE")
         self.parent = os.environ.get("TEAM_PARENT_ID")
         self.session = os.environ.get("TEAM_SESSION")
-        self.forced_pid = os.environ.get("TEAM_PID")
         self._conn = None
         self._readbuf = b""
 
@@ -59,7 +63,6 @@ class TeamClient:
             "id": self.ensure_id(),
             "name": self.name,
             "role": self.role or "cli",
-            "pid": int(self.forced_pid or os.getpid()),
             "parent": self.parent,
             "cwd": os.getcwd(),
             "session": self.session,
@@ -70,9 +73,18 @@ class TeamClient:
     def connect(self):
         if self._conn is not None:
             return self._conn
-        self._conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._conn.settimeout(self.timeout)
-        self._conn.connect(str(self.root.sock))
+        endpoint = self.root.read_endpoint()
+        if not endpoint:
+            raise OSError("no teamd endpoint under %s" % self.root.base)
+        conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn.settimeout(self.timeout)
+        conn.connect((endpoint["host"], endpoint["port"]))
+        self._conn = conn
+        self._send_line({"op": "hello", "token": endpoint.get("token") or ""})
+        reply = self._read_line()
+        if not reply or reply.get("op") != "ack":
+            self.close()
+            raise OSError("teamd handshake failed: %r" % (reply,))
         return self._conn
 
     def close(self):
@@ -83,11 +95,11 @@ class TeamClient:
                 pass
             self._conn = None
 
-    def send(self, obj):
+    def _send_line(self, obj):
         data = json.dumps(obj, separators=(",", ":")) + "\n"
         self.connect().sendall(data.encode())
 
-    def recv(self):
+    def _read_line(self):
         while b"\n" not in self._readbuf:
             chunk = self.connect().recv(65536)
             if not chunk:
@@ -97,10 +109,13 @@ class TeamClient:
         self._readbuf = rest
         return json.loads(line.decode("utf-8"))
 
+    def send(self, obj):
+        self._send_line(obj)
+
     def request(self, op, expected=("ack", "error", "registry"), **fields):
-        self.send(dict(fields, op=op))
+        self._send_line(dict(fields, op=op))
         while True:
-            reply = self.recv()
+            reply = self._read_line()
             if reply is None:
                 return {"op": "error", "error": "closed"}
             if reply.get("op") in expected:
@@ -109,8 +124,11 @@ class TeamClient:
     # -- operations --------------------------------------------------
 
     def register(self):
-        return self.request("register", expected=("ack", "error"),
-                            **self.meta())
+        reply = self.request("register", expected=("ack", "error"),
+                             **self.meta())
+        if self.heartbeat and self._conn is not None:
+            threading.Thread(target=self._heartbeat, daemon=True).start()
+        return reply
 
     def send_msg(self, to, kind, payload):
         return self.request(
@@ -131,7 +149,16 @@ class TeamClient:
         self.close()
         return reply
 
-    # -- streaming / forking ------------------------------------------
+    # -- streaming ----------------------------------------------------
+
+    def _heartbeat(self):
+        while self._conn is not None:
+            time.sleep(self.heartbeat)
+            if self._conn is not None:
+                try:
+                    self._send_line({"op": "ping"})
+                except OSError:
+                    break
 
     def follow(self, on_message=None, ready=None):
         self.register()
@@ -140,7 +167,7 @@ class TeamClient:
         try:
             while True:
                 try:
-                    msg = self.recv()
+                    msg = self._read_line()
                 except socket.timeout:
                     continue
                 except OSError:
@@ -157,22 +184,22 @@ class TeamClient:
 
     def hold(self):
         self.register()
-        watch = os.environ.get("TEAM_WATCH_PID")
         try:
             while True:
-                if watch and not self._pid_alive(int(watch)):
+                try:
+                    msg = self._read_line()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if msg is None:
                     return
-                time.sleep(0.5)
+                if msg.get("kind") == "terminate":
+                    return
         finally:
             self.close()
 
-    @staticmethod
-    def _pid_alive(pid):
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+    # -- forking ------------------------------------------------------
 
     def fork(self, name, argv):
         self.register()
@@ -183,12 +210,10 @@ class TeamClient:
         child_env["TEAM_NAME"] = name or child_env["TEAM_ID"]
         child_env["TEAM_ROLE"] = "fork"
         child_env["TEAM_PARENT_ID"] = self.id
-        child_env.pop("TEAM_PID", None)
         if self.session:
             child_env["TEAM_SESSION"] = self.session
         if not argv:
-            argv = [sys.executable, os.path.abspath(__file__),
-                    "child", "--hold"]
+            argv = [sys.executable, os.path.abspath(__file__), "hold"]
         log = self.root.base / "forks" / ("%s.log" % child_env["TEAM_ID"])
         log.parent.mkdir(parents=True, exist_ok=True)
         logfile = open(str(log), "ab")
@@ -197,7 +222,6 @@ class TeamClient:
             env=child_env,
             stdout=logfile,
             stderr=logfile,
-            start_new_session=True,
         )
         return {"op": "forked", "id": child_env["TEAM_ID"], "pid": proc.pid,
                 "log": str(log)}
@@ -219,8 +243,7 @@ def main(argv=None):
     sub.add_parser("ls")
     sub.add_parser("deregister")
     sub.add_parser("follow")
-    p_child = sub.add_parser("child")
-    p_child.add_argument("mode", choices=["hold"])
+    sub.add_parser("hold")
     p_send = sub.add_parser("send")
     p_send.add_argument("to")
     p_send.add_argument("kind", nargs="?", default="text")
@@ -245,7 +268,7 @@ def main(argv=None):
         print(json.dumps(client.deregister()))
     elif args.command == "follow":
         client.follow()
-    elif args.command == "child":
+    elif args.command == "hold":
         client.hold()
     elif args.command == "send":
         print(json.dumps(
