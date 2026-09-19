@@ -155,6 +155,30 @@ class BrokerProtocolTests(unittest.TestCase):
             thread.join(timeout=3)
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_broker_lock_single_instance(self):
+        root = make_root()
+        first = TeamBroker(root, idle_timeout=IDLE_ROOMY, sweep_interval=0.2)
+        thread = threading.Thread(target=first.run, daemon=True)
+        thread.start()
+        ep = wait_endpoint(root)
+        loser_done = []
+        second = TeamBroker(root)
+        loser = threading.Thread(
+            target=lambda: loser_done.append(second.run()), daemon=True
+        )
+        loser.start()
+        loser.join(timeout=3)
+        self.assertTrue(loser_done,
+                        "losing broker must return without binding")
+        self.assertIsNone(second._server,
+                         "losing broker must not bind a socket")
+        published = TeamBroker(root).root.read_endpoint()
+        self.assertEqual(ep["port"], published["port"],
+                         "endpoint must still point at the winner")
+        first.stop()
+        thread.join(timeout=3)
+        shutil.rmtree(root, ignore_errors=True)
+
     def _ids_via(self, root):
         probe = TeamClient(root, heartbeat=None)
         probe.id = "probe"

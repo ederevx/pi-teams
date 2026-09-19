@@ -50,6 +50,29 @@ class ForkLifecycleTests(unittest.TestCase):
             },
         )
 
+    def test_hold_identity_args(self):
+        # pi.exec cannot forward env to the hold, so identity must ride
+        # in as CLI arguments and land in the registry verbatim.
+        holder = team_proc(
+            self.root,
+            ["hold", "--id", "ident-1", "--role", "fork",
+             "--parent", "p-9", "--name", "ident-one"],
+        )
+        try:
+            self.assertTrue(
+                wait_until(lambda: "ident-1" in self._ids(), timeout=3),
+                "hold with --id never registered",
+            )
+            _, out, _ = run_team(self.root, ["ls"])
+            entry = next(a for a in json.loads(out)["agents"]
+                         if a["id"] == "ident-1")
+            self.assertEqual(entry["role"], "fork")
+            self.assertEqual(entry["parent"], "p-9")
+            self.assertEqual(entry["name"], "ident-one")
+        finally:
+            run_team(self.root, ["terminate", "ident-1"])
+            holder.wait(timeout=5)
+
     def test_fork_lives_while_parent_connected(self):
         parent = self._parent("parent-1")
         child = self._spawn_fork("fork-1", "parent-1")

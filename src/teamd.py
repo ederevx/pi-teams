@@ -87,11 +87,58 @@ class TeamBroker:
         self._lock = threading.RLock()
         self._running = False
         self._server = None
+        self._lockpath = None
+
+    def _acquire_lock(self):
+        # One broker per root: a racing session (every hosted pi reloads
+        # extensions at once, and each could start a broker) loses the
+        # lock and waits for the winner's endpoint instead of binding a
+        # second socket over the same root.
+        lockbase = self.root.base / ".broker.lock"
+        try:
+            lockbase.mkdir()
+        except FileExistsError:
+            return False
+        try:
+            (lockbase / "pid").write_text("%d\n" % os.getpid())
+            self._lockpath = lockbase
+        except OSError:
+            try:
+                lockbase.rmdir()
+            except OSError:
+                pass
+            raise
+        return True
+
+    def _release_lock(self):
+        if self._lockpath is None:
+            return
+        try:
+            (self._lockpath / "pid").unlink()
+            self._lockpath.rmdir()
+        except OSError:
+            pass
+        self._lockpath = None
 
     # -- lifecycle ---------------------------------------------------
 
     def run(self):
         self.root.ensure()
+        if not self._acquire_lock():
+            # Another broker owns this root; wait briefly for it to
+            # publish its endpoint, then leave it to serve.
+            for _ in range(15):
+                if self.root.read_endpoint():
+                    return
+                time.sleep(0.1)
+            raise OSError("teamd: broker already starting at %s"
+                          % self.root.base)
+        try:
+            self._serve_forever()
+        finally:
+            self._release_lock()
+
+    def _serve_forever(self):
         self._running = True
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
