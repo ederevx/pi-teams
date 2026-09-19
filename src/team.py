@@ -26,7 +26,24 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from teamd import DEFAULT_ROOT, TeamRoot  # noqa: E402
+
+_teamd_dir = os.path.dirname(os.path.abspath(__file__))
+if os.path.exists(os.path.join(_teamd_dir, "teamd.py")):
+    from teamd import DEFAULT_ROOT, TeamRoot  # noqa: E402
+else:
+    # Installed layout names the broker binary `teamd` without a .py
+    # extension, which import machinery cannot load; load it by path.
+    import importlib.machinery
+    import importlib.util
+
+    _loader = importlib.machinery.SourceFileLoader(
+        "teamd", os.path.join(_teamd_dir, "teamd")
+    )
+    _spec = importlib.util.spec_from_loader("teamd", _loader)
+    _teamd = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_teamd)
+    DEFAULT_ROOT = _teamd.DEFAULT_ROOT
+    TeamRoot = _teamd.TeamRoot
 
 HEARTBEAT_DEFAULT = 6.0
 
