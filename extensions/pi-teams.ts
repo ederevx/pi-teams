@@ -51,7 +51,7 @@ class TeamAgent {
 	}
 
 	ensureBroker(): void {
-		if (existsSync(`${stateRoot}/teamd.sock`)) return;
+		if (existsSync(`${stateRoot}/endpoint`)) return;
 		// The broker never exits; fire and forget so the session stays
 		// responsive. It is reaped by pidfile at `teamd stop`.
 		void this.exec(python, [teamdBin, "--root", stateRoot, "start"]);
@@ -63,11 +63,9 @@ class TeamAgent {
 			TEAM_NAME: process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`,
 			TEAM_ROLE: process.env.TEAM_ID ? "fork" : "main",
 			TEAM_PARENT_ID: process.env.TEAM_PARENT_ID || "",
-			TEAM_PID: `${process.pid}`,
-			TEAM_WATCH_PID: `${process.pid}`,
 			TEAM_SESSION: process.env.PI_SESSION_FILE || "",
 		};
-		void this.exec(python, [teamBin, "--root", stateRoot, "child", "hold"], {
+		void this.exec(python, [teamBin, "--root", stateRoot, "hold"], {
 			env,
 		});
 	}
@@ -109,8 +107,7 @@ class TeamAgent {
 			TEAM_NAME: name || `fork-${process.pid}`,
 			TEAM_ROLE: "fork",
 			TEAM_PARENT_ID: this.id,
-			TEAM_PID: "",
-			TEAM_WATCH_PID: "",
+			TEAM_SESSION: process.env.PI_SESSION_FILE || "",
 			PI_SESSION_FILE: process.env.PI_SESSION_FILE || "",
 		};
 		const args = argv.length
@@ -125,7 +122,7 @@ class TeamAgent {
 
 	deregister(): void {
 		void this.exec(python, [teamBin, "--root", stateRoot, "deregister"], {
-			env: { TEAM_ID: this.id, TEAM_PID: `${process.pid}` },
+			env: { TEAM_ID: this.id },
 		});
 	}
 

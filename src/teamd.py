@@ -1,37 +1,42 @@
 #!/usr/bin/env python3
 """teamd - the pi-teams broker.
 
-Owns a team root (default ~/.local/state/pi-teams). Agents connect over
-a unix socket (teamd.sock), register once, then exchange JSON-lines
-messages. The broker relays to online recipients, broadcasts registry
-changes, and enforces fork lifetime: when the process that a registered
-agent names as its parent dies, the broker terminates that agent, so a
-fork goes away with the parent that spawned it.
+Serves one OS-agnostic endpoint: a loopback TCP listener on 127.0.0.1
+with an ephemeral port and a random token. The address and token are
+published atomically in the team root (endpoint), and every connection
+must present the token in a hello handshake before any other op. Agents
+register once, then exchange JSON-lines messages; the broker relays to
+online recipients, mirrors the registry, and enforces fork lifetime
+through connections only.
+
+There is no pid probing anywhere: liveness is connection liveness. A
+connection that closes (EOF) ends its agent; entries idle past the
+heartbeat timeout are swept. When a fork's parent entry disappears, the
+broker sends that fork a terminate notice on its connection and closes
+it, so a team cannot outlive the process that spawned it. Nothing here
+kills processes or names pids, which keeps the broker portable.
 
 Protocol (one JSON object per line, both directions):
-  register/{op:id,name,role,pid,parent,cwd,session}
-  send/{op,to,from,kind,payload,ts}
-  broadcast/{op,kind,payload,ts}
-  ls/{op}  terminate/{op,to,why}  deregister/{op}  shutdown/{op}
+  hello/{op, token}            mandatory first message; ack on success
+  register/{op,id,name,role,parent,cwd,session}
+  send/{op,to,from,kind,payload,ts}  ping/{op}  ls/{op}
+  terminate/{op,to,why}        deregister/{op}  shutdown/{op}
 Reply objects use op "ack", "error", "registry", "message",
-"registry-change", or "terminated".
-
-Broker state lives on the owning TeamBroker instance only; the registry
-is mirrored to disk atomically for non-connected readers.
+"registry-change", or "terminated". Notices use kind "terminate".
 """
 
 import argparse
 import json
 import os
 import pathlib
-import signal
+import secrets
 import socket
 import sys
 import threading
 import time
 
 DEFAULT_ROOT = os.path.join(os.path.expanduser("~"), ".local", "state", "pi-teams")
-SOCK_NAME = "teamd.sock"
+ENDPOINT_NAME = "endpoint"
 REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"
 
@@ -41,19 +46,20 @@ class TeamRoot:
 
     def __init__(self, root):
         self.base = pathlib.Path(root)
-        self.sock = self.base / SOCK_NAME
+        self.endpoint = self.base / ENDPOINT_NAME
         self.registry = self.base / REGISTRY_NAME
         self.pidfile = self.base / PID_NAME
 
     def ensure(self):
         self.base.mkdir(parents=True, exist_ok=True)
 
-    def write_atomic(self, relative, data):
+    def write_atomic(self, relative, data, mode=0o644):
         self.ensure()
         target = self.base / relative
         tmp = self.base / ("%s.tmp.%d" % (relative, os.getpid()))
         tmp.write_text(data)
         try:
+            os.chmod(str(tmp), mode)
             os.replace(str(tmp), str(target))
         except FileNotFoundError:
             # Mirror-only write: the owning root was removed (e.g. test
@@ -61,13 +67,21 @@ class TeamRoot:
             # in-memory registry remains authoritative.
             pass
 
+    def read_endpoint(self):
+        try:
+            return json.loads(self.endpoint.read_text())
+        except (OSError, ValueError):
+            return {}
+
 
 class TeamBroker:
-    """Registry + relay for connected agents on one socket."""
+    """Registry + relay for connected agents on one loopback endpoint."""
 
-    def __init__(self, root=None, sweep_interval=1.0):
+    def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0):
         self.root = TeamRoot(root or DEFAULT_ROOT)
+        self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
+        self.token = secrets.token_hex(16)
         self._registry = {}
         self._clients = {}
         self._lock = threading.RLock()
@@ -78,14 +92,23 @@ class TeamBroker:
 
     def run(self):
         self.root.ensure()
-        self._clear_stale_socket()
         self._running = True
-        self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server.bind(str(self.root.sock))
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind(("127.0.0.1", 0))
         self._server.listen(16)
+        port = self._server.getsockname()[1]
+        self.root.write_atomic(
+            ENDPOINT_NAME,
+            json.dumps(
+                {"host": "127.0.0.1", "port": port, "token": self.token},
+                indent=2,
+            )
+            + "\n",
+            mode=0o600,
+        )
         self.root.write_atomic(PID_NAME, "%d\n" % os.getpid())
-        sweeper = threading.Thread(target=self._sweep_loop, daemon=True)
-        sweeper.start()
+        threading.Thread(target=self._sweep_loop, daemon=True).start()
         try:
             while self._running:
                 try:
@@ -102,23 +125,6 @@ class TeamBroker:
             except OSError:
                 pass
 
-    def _clear_stale_socket(self):
-        if not self.root.sock.exists():
-            return
-        holder = None
-        if self.root.pidfile.exists():
-            try:
-                holder = int((self.root.pidfile.read_text() or "0").strip())
-            except ValueError:
-                holder = None
-        if holder and self._alive(holder):
-            raise OSError("teamd already running (pid %d) at %s"
-                          % (holder, self.root.sock))
-        try:
-            self.root.sock.unlink()
-        except OSError:
-            pass
-
     def stop(self):
         self._running = False
         try:
@@ -134,6 +140,7 @@ class TeamBroker:
             with conn:
                 conn.settimeout(0.5)
                 buf = b""
+                first = True
                 while self._running:
                     try:
                         chunk = conn.recv(65536)
@@ -152,10 +159,24 @@ class TeamBroker:
                             msg = json.loads(line.decode("utf-8"))
                         except ValueError:
                             self._reply(conn, op="error", error="bad-json")
+                            break
+                        if first:
+                            if not self._handshake(conn, msg):
+                                return
+                            first = False
                             continue
                         agent_id = self._handle(conn, msg, agent_id)
+                        if agent_id is None and not self._running:
+                            return
         finally:
-            self._unregister_conn(agent_id)
+            self._drop_conn(agent_id)
+
+    def _handshake(self, conn, msg):
+        if msg.get("op") != "hello" or msg.get("token") != self.token:
+            self._reply(conn, op="error", error="bad-handshake")
+            return False
+        self._reply(conn, op="ack", srv="teamd")
+        return True
 
     def _handle(self, conn, msg, agent_id):
         op = msg.get("op")
@@ -168,11 +189,15 @@ class TeamBroker:
                             exclude=agent_id)
         elif op == "ls":
             self._reply(conn, op="registry", agents=self._snapshot())
+        elif op == "ping":
+            self._touch(agent_id)
+            self._reply(conn, op="ack")
         elif op == "terminate":
             self._terminate(msg.get("to"), msg.get("why") or "requested")
+            self._reply(conn, op="ack")
         elif op == "deregister":
             if agent_id:
-                self._drop(agent_id)
+                self._drop_entry(agent_id)
             self._reply(conn, op="ack")
         elif op == "shutdown":
             self._reply(conn, op="ack")
@@ -185,16 +210,15 @@ class TeamBroker:
 
     def _register(self, conn, msg):
         agent_id = str(msg.get("id") or "anon-%d" % os.getpid())
-        pid = msg.get("pid") or os.getpid()
         entry = {
             "id": agent_id,
             "name": str(msg.get("name") or agent_id),
             "role": str(msg.get("role") or "agent"),
-            "pid": int(pid),
             "parent": msg.get("parent") or None,
             "cwd": str(msg.get("cwd") or os.getcwd()),
             "session": msg.get("session") or None,
             "since_ts": time.time(),
+            "last_seen": time.time(),
         }
         with self._lock:
             self._clients[agent_id] = conn
@@ -206,37 +230,39 @@ class TeamBroker:
     def _snapshot(self):
         with self._lock:
             return [
-                dict(entry, online=conn is not None)
-                for entry, conn in (
-                    (self._registry.get(i), self._clients.get(i))
-                    for i in self._registry
-                )
+                dict(entry, online=True)
+                for entry in self._registry.values()
             ]
 
     def _persist_and_notify(self):
-        import copy
         with self._lock:
             data = json.dumps(
-                {"ts": time.time(), "agents": copy.deepcopy(self._registry)},
-                indent=2,
+                {"ts": time.time(), "agents": self._registry}, indent=2
             )
         self.root.write_atomic(REGISTRY_NAME, data + "\n")
         self._broadcast("registry-change", self._snapshot())
 
-    def _drop(self, agent_id):
+    def _touch(self, agent_id):
+        entry = self._registry.get(agent_id) if agent_id else None
+        if entry is not None:
+            entry["last_seen"] = time.time()
+
+    def _drop_entry(self, agent_id):
         with self._lock:
             self._registry.pop(agent_id, None)
             self._clients.pop(agent_id, None)
         self._persist_and_notify()
 
-    def _unregister_conn(self, agent_id):
+    def _drop_conn(self, agent_id):
         if not agent_id:
             return
         with self._lock:
             conn = self._clients.get(agent_id)
             if conn is not None:
                 self._clients.pop(agent_id, None)
-        if conn is not None and self._registry.get(agent_id):
+            had_entry = agent_id in self._registry
+            self._registry.pop(agent_id, None)
+        if had_entry:
             self._persist_and_notify()
 
     # -- messaging ---------------------------------------------------
@@ -262,12 +288,14 @@ class TeamBroker:
 
     def _terminate(self, agent_id, why):
         with self._lock:
-            entry = self._registry.get(agent_id)
-        if entry is None:
+            conn = self._clients.get(agent_id)
+        if conn is None:
             return
-        self._kill(entry.get("pid"))
-        self._drop(agent_id)
-        self._broadcast("terminated", {"id": agent_id, "why": why})
+        self._write(conn, {
+            "op": "message", "from": "*", "kind": "terminate",
+            "payload": {"id": agent_id, "why": why},
+        })
+        self._drop_entry(agent_id)
 
     def _broadcast(self, kind, payload, exclude=None):
         envelope = {"op": "message", "from": "*", "kind": kind,
@@ -282,46 +310,37 @@ class TeamBroker:
 
     # -- liveness ----------------------------------------------------
 
-    def _alive(self, pid):
-        try:
-            os.kill(int(pid), 0)
-            return True
-        except (OSError, ProcessLookupError, PermissionError):
-            return os.path.exists("/proc/%d" % int(pid))
-
-    def _kill(self, pid):
-        try:
-            os.kill(int(pid), signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            pass
-
     def _sweep_loop(self):
         while self._running:
             time.sleep(self.sweep_interval)
             self._sweep()
 
     def _sweep(self):
+        now = time.time()
         with self._lock:
-            changed = False
-            for agent_id, entry in list(self._registry.items()):
-                if not self._alive(entry.get("pid")):
-                    self._registry.pop(agent_id, None)
-                    self._clients.pop(agent_id, None)
-                    changed = True
-            doomed = []
+            doomed_parent_gone = []
+            doomed_idle = []
             for agent_id, entry in list(self._registry.items()):
                 parent = entry.get("parent")
-                if not parent:
+                if parent and parent not in self._registry:
+                    doomed_parent_gone.append(agent_id)
                     continue
-                parent_entry = self._registry.get(parent)
-                if parent_entry is None or not self._alive(parent_entry.get("pid")):
-                    doomed.append(agent_id)
-        if not doomed and not changed:
-            return
-        for agent_id in doomed:
-            self._kill(self._registry.get(agent_id, {}).get("pid"))
-            self._registry.pop(agent_id, None)
-            self._clients.pop(agent_id, None)
+                if entry.get("last_seen", 0) < now - self.idle_timeout:
+                    doomed_idle.append(agent_id)
+            if not doomed_parent_gone and not doomed_idle:
+                return
+            for agent_id in doomed_parent_gone + doomed_idle:
+                conn = self._clients.pop(agent_id, None)
+                self._registry.pop(agent_id, None)
+                if conn is not None and agent_id in doomed_parent_gone:
+                    self._write(conn, {
+                        "op": "message", "from": "*", "kind": "terminate",
+                        "payload": {"id": agent_id, "why": "parent-gone"},
+                    })
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
         self._persist_and_notify()
 
     # -- low-level writes -------------------------------------------
@@ -348,10 +367,17 @@ class TeamBroker:
                 pass
 
 
-def _shutdown_via_socket(sock_path):
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+def _shutdown_via_endpoint(root):
+    endpoint = root.read_endpoint()
+    if not endpoint:
+        raise SystemExit("teamd: no endpoint at %s" % root.base)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(2)
     try:
-        sock.connect(sock_path)
+        sock.connect((endpoint["host"], endpoint["port"]))
+        sock.sendall((
+            json.dumps({"op": "hello", "token": endpoint["token"]}) + "\n"
+        ).encode())
         sock.sendall((json.dumps({"op": "shutdown"}) + "\n").encode())
     except OSError as exc:
         print("teamd: %s" % exc)
@@ -365,21 +391,17 @@ def main(argv=None):
         prog="teamd", description="pi-teams broker"
     )
     parser.add_argument("--root", default=DEFAULT_ROOT)
-    sub = parser.add_subparsers(dest="command")
-    sub.add_parser("start")
-    sub.add_parser("stop")
+    parser.add_argument("--idle-timeout", type=float, default=15.0)
+    parser.add_argument("--sweep-interval", type=float, default=1.0)
+    parser.add_argument("command", nargs="?", choices=["start", "stop"],
+                        default="start")
     args = parser.parse_args(argv)
     root = TeamRoot(args.root)
     if args.command == "stop":
-        if root.sock.exists():
-            _shutdown_via_socket(str(root.sock))
-        elif root.pidfile.exists():
-            pid = int((root.pidfile.read_text() or "0").strip())
-            os.kill(pid, signal.SIGTERM)
-        else:
-            print("teamd: not running at %s" % args.root)
+        _shutdown_via_endpoint(root)
         return 0
-    TeamBroker(args.root).run()
+    TeamBroker(args.root, idle_timeout=args.idle_timeout,
+               sweep_interval=args.sweep_interval).run()
     return 0
 
 

@@ -10,10 +10,13 @@ coordinate natively instead of through the shared tree.
 
 ## What it provides
 
-- **Broker** (`src/teamd.py`): a unix-socket registry and relay at
-  `TEAM_ROOT` (default `~/.local/state/pi-teams`). Agents register once,
-  exchange JSON-lines messages, discover each other, and are swept when
-  their pid dies. The registry is mirrored to
+- **Broker** (`src/teamd.py`): a loopback TCP registry and relay on
+  `127.0.0.1` with an ephemeral port and a random token, published
+  atomically in `TEAM_ROOT/endpoint` (default `~/.local/state/
+  pi-teams`). Every connection must present the token in a hello
+  handshake before any op. Agents register once, exchange JSON-lines
+  messages, discover each other, and are swept when their connection
+  goes idle past the heartbeat timeout. The registry is mirrored to
   `registry.json` atomically for non-connected readers.
 - **Client** (`src/team.py`): one persistent connection per agent is the
   endpoint; while it stays open the agent is reachable and relayed
@@ -21,9 +24,12 @@ coordinate natively instead of through the shared tree.
   <id> <kind> <text>`, `team follow`, `team terminate <id>`,
   `team fork --name <n> [-- argv...]`, `team deregister`.
 - **Fork lifetime**: a fork registers with its parent's team id in the
-  `parent` field. The broker terminates the fork by SIGTERM once the
-  parent process dies, so a team cannot outlive the agent that spawned
-  it. Forks of forks chain the same way.
+  `parent` field. Liveness is connection-based everywhere: when a
+  parent's connection closes, the broker sends that fork a terminate
+  notice and closes its connection, so the fork exits itself and a team
+  cannot outlive the process that spawned it. Nothing in the broker or
+  client names pids, sends signals, or probes processes, which keeps
+  the protocol OS-agnostic (POSIX and Windows).
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection that also watches
   the pi pid, injects a compact teammates note before the first agent
@@ -49,12 +55,14 @@ That chains, in order:
   trailing whitespace or tabs, balanced fences, required sections.
 - **OOP lint** (`tests/oop_lint.py`): no module-level mutable state, no
   `global`, no bare `except`, no `var` in the extension.
-- **Broker protocol tests** (`tests/broker_test.py`): registration and
-  discovery, relay delivery, undeliverable reports, deregistration, and
-  dead-pid sweeping.
+- **Broker protocol tests** (`tests/broker_test.py`): handshake token
+  rejection, endpoint publication, registration and discovery, relay
+  delivery, undeliverable reports, deregistration, connection-close
+  drop, and idle sweep.
 - **Fork lifecycle tests** (`tests/fork_test.py`): a fork stays alive
-  while its parent lives and is terminated (normal exit and SIGKILL)
-  when the parent dies; the registry is cleaned in both cases.
+  while its parent stays connected and exits on its own when the
+  parent's connection closes or an explicit terminate is issued; the
+  registry is cleaned in both cases.
 
 Tests run on isolated roots under `TMPDIR`
 (`~/tmp/pi-teams-sandbox`), never the system `/tmp`.
@@ -91,12 +99,14 @@ never the reverse.
 - **Task routing**: kind-based delivery (task/result/notice) with
   acknowledgement and retry.
 - **Broker upgrades**: spooling for offline recipients, authenticated
-  roots, and process-group termination for fork cleanup.
+  roots, and a tighter spawner tie so forks reap promptly when the
+  spawning pi process dies hard (currently bounded by the heartbeat
+  sweep) without any pid probing.
 
 ## Attribution
 
-- Messages are JSON objects exchanged over `TEAM_ROOT/teamd.sock`; the
-  broker relays `to`/`from` envelopes and keeps the registry.
+- Messages are JSON objects exchanged over the `TEAM_ROOT/endpoint`;
+  the broker relays `to`/`from` envelopes and keeps the registry.
 - Original work in this repository; no upstream code is imported.
 
 ## License
