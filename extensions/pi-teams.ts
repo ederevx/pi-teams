@@ -58,16 +58,26 @@ class TeamAgent {
 	}
 
 	hold(cwd?: string): void {
+		const name = process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`;
+		const role = process.env.TEAM_ID ? "fork" : "main";
+		const parent = process.env.TEAM_PARENT_ID || "";
+		const session = process.env.PI_SESSION_FILE || "";
 		const env = {
 			TEAM_ID: this.id,
-			TEAM_NAME: process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`,
-			TEAM_ROLE: process.env.TEAM_ID ? "fork" : "main",
-			TEAM_PARENT_ID: process.env.TEAM_PARENT_ID || "",
-			TEAM_SESSION: process.env.PI_SESSION_FILE || "",
+			TEAM_NAME: name,
+			TEAM_ROLE: role,
+			TEAM_PARENT_ID: parent,
+			TEAM_SESSION: session,
 		};
-		void this.exec(python, [teamBin, "--root", stateRoot, "hold"], {
-			env,
-		});
+		// pi.exec does not forward env, so identity rides in as args.
+		void this.exec(python, [
+			teamBin, "--root", stateRoot, "hold",
+			"--id", this.id,
+			"--name", name,
+			"--role", role,
+			"--parent", parent,
+			"--session", session,
+		], { env });
 	}
 
 	async snapshot(): Promise<AgentInfo[]> {

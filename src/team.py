@@ -85,6 +85,21 @@ class TeamClient:
             "session": self.session,
         }
 
+    def set_identity(self, agent_id=None, name=None, role=None, parent=None,
+                     session=None):
+        # Explicit identity from CLI arguments (pi.exec cannot pass env
+        # on Windows, so the extension hands identity over as args).
+        if agent_id:
+            self.id = agent_id
+        if name:
+            self.name = name
+        if role:
+            self.role = role
+        if parent:
+            self.parent = parent
+        if session:
+            self.session = session
+
     # -- transport ---------------------------------------------------
 
     def connect(self):
@@ -201,17 +216,38 @@ class TeamClient:
 
     def hold(self):
         self.register()
+        stdin_dead = threading.Event()
+
+        def watch_stdin():
+            # When the spawner hosts us on a pipe or a PTY, EOF on
+            # stdin means the hosting process is gone:
+            # exit so the endpoint dies with its pi instead of pinging
+            # forever as an orphan.
+            try:
+                while True:
+                    if not sys.stdin.read(4096):
+                        stdin_dead.set()
+                        return
+            except (OSError, ValueError):
+                stdin_dead.set()
+
+        if not sys.stdin.isatty():
+            threading.Thread(target=watch_stdin, daemon=True).start()
         try:
             while True:
                 try:
                     msg = self._read_line()
                 except socket.timeout:
+                    if stdin_dead.is_set():
+                        return
                     continue
                 except OSError:
                     break
                 if msg is None:
                     return
                 if msg.get("kind") == "terminate":
+                    return
+                if stdin_dead.is_set():
                     return
         finally:
             self.close()
@@ -251,16 +287,32 @@ def parse_payload(text):
         return text
 
 
+def add_identity_args(parser):
+    parser.add_argument("--id")
+    parser.add_argument("--name")
+    parser.add_argument("--role")
+    parser.add_argument("--parent")
+    parser.add_argument("--session")
+
+
+def apply_identity(client, args):
+    client.set_identity(args.id, args.name, args.role, args.parent,
+                        args.session)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="team", description="pi-teams client")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("register")
+    p_register = sub.add_parser("register")
+    add_identity_args(p_register)
     sub.add_parser("ls")
     sub.add_parser("deregister")
-    sub.add_parser("follow")
-    sub.add_parser("hold")
+    p_follow = sub.add_parser("follow")
+    add_identity_args(p_follow)
+    p_hold = sub.add_parser("hold")
+    add_identity_args(p_hold)
     p_send = sub.add_parser("send")
     p_send.add_argument("to")
     p_send.add_argument("kind", nargs="?", default="text")
@@ -277,6 +329,8 @@ def main(argv=None):
         parser.print_help()
         return 0
     client = TeamClient(args.root)
+    if args.command in ("register", "follow", "hold"):
+        apply_identity(client, args)
     if args.command == "register":
         print(json.dumps(client.register()))
     elif args.command == "ls":
