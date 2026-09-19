@@ -3,7 +3,10 @@
 import json
 import shutil
 import socket
+import subprocess
+import sys
 import threading
+import time
 import unittest
 
 from harness import make_root, wait_endpoint, wait_until
@@ -178,6 +181,95 @@ class BrokerProtocolTests(unittest.TestCase):
         first.stop()
         thread.join(timeout=3)
         shutil.rmtree(root, ignore_errors=True)
+
+    def test_fork_idle_gc_kills_owner(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
+                            sweep_interval=0.1)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"]
+        )
+        try:
+            wait_endpoint(root)
+            parent = TeamClient(root, heartbeat=None)
+            parent.id = "parent-x"
+            parent.role = "main"
+            parent.register()
+            fork = TeamClient(root, heartbeat=None)
+            fork.id = "fork-gc"
+            fork.name = "fork-gc"
+            fork.role = "fork"
+            fork.parent = "parent-x"
+            fork.owner_pid = str(dummy.pid)
+            self.assertIn(fork.register().get("op"), ("ack", "error"))
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=6),
+                "idle fork's owner was never garbage-collected",
+            )
+            self.assertTrue(
+                wait_until(lambda: "fork-gc" not in self._ids_via(root)),
+                "garbage-collected fork stays in the registry",
+            )
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_busy_ping_keeps_fork_alive(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.5,
+                            sweep_interval=0.1)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"]
+        )
+        try:
+            wait_endpoint(root)
+            parent = TeamClient(root, heartbeat=None)
+            parent.id = "parent-y"
+            parent.role = "main"
+            parent.register()
+            fork = TeamClient(root, heartbeat=None)
+            fork.id = "fork-busy"
+            fork.role = "fork"
+            fork.parent = "parent-y"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            stop_pings = threading.Event()
+
+            def ping_busy():
+                while not stop_pings.is_set():
+                    fork.send({"op": "ping", "busy": True})
+                    time.sleep(0.2)
+
+            pinger = threading.Thread(target=ping_busy, daemon=True)
+            pinger.start()
+            time.sleep(1.4)
+            self.assertIsNone(dummy.poll(),
+                              "busy fork was garbage-collected")
+            self.assertIn("fork-busy", self._ids_via(root))
+            stop_pings.set()
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=6),
+                "fork never GC'd after going idle",
+            )
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
 
     def _ids_via(self, root):
         probe = TeamClient(root, heartbeat=None)

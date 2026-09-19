@@ -16,7 +16,7 @@
  */
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 
 const home = process.env.HOME || ".";
 const stateRoot =
@@ -62,14 +62,20 @@ class TeamAgent {
 		const role = process.env.TEAM_ID ? "fork" : "main";
 		const parent = process.env.TEAM_PARENT_ID || "";
 		const session = process.env.PI_SESSION_FILE || "";
+		const busyFile = `${stateRoot}/${this.id}.busy`;
 		const env = {
 			TEAM_ID: this.id,
 			TEAM_NAME: name,
 			TEAM_ROLE: role,
 			TEAM_PARENT_ID: parent,
 			TEAM_SESSION: session,
+			TEAM_OWNER_PID: `${process.pid}`,
+			TEAM_BUSY_FILE: busyFile,
 		};
-		// pi.exec does not forward env, so identity rides in as args.
+		// pi.exec does not forward env, so identity rides in as args. The
+		// owner pid lets the broker GC a spawned teammate for real (it
+		// signals this pi), and the busy flag marks model activity so the
+		// fork idle clock does not fire mid-turn.
 		void this.exec(python, [
 			teamBin, "--root", stateRoot, "hold",
 			"--id", this.id,
@@ -77,7 +83,19 @@ class TeamAgent {
 			"--role", role,
 			"--parent", parent,
 			"--session", session,
+			"--owner-pid", `${process.pid}`,
+			"--busy-file", busyFile,
 		], { env });
+	}
+
+	setBusy(busy: boolean): void {
+		// The model's own lifecycle publishes busyness so the broker's
+		// fork idle GC keeps a working teammate alive.
+		try {
+			writeFileSync(`${stateRoot}/${this.id}.busy`, busy ? "1" : "0");
+		} catch {
+			// best effort: without the flag the fork is GC'd like an idle one
+		}
 	}
 
 	async snapshot(): Promise<AgentInfo[]> {
@@ -159,6 +177,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		app.ensureBroker();
 		app.hold(ctx.cwd);
+	});
+
+	pi.on("agent_start", async () => {
+		app.setBusy(true);
+	});
+
+	pi.on("agent_settled", async () => {
+		app.setBusy(false);
 	});
 
 	pi.on("before_agent_start", async (event, _ctx) => {

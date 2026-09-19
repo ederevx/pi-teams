@@ -26,13 +26,18 @@ coordinate natively instead of through the shared tree.
   messages arrive on it. CLI: `team register`, `team ls`, `team send
   <id> <kind> <text>`, `team follow`, `team terminate <id>`,
   `team fork --name <n> [-- argv...]`, `team deregister`.
-- **Fork lifetime**: a fork registers with its parent's team id in the
-  `parent` field. Liveness is connection-based everywhere: when a
-  parent's connection closes, the broker sends that fork a terminate
-  notice and closes its connection, so the fork exits itself and a team
-  cannot outlive the process that spawned it. Nothing in the broker or
-  client names pids, sends signals, or probes processes, which keeps
-  the protocol OS-agnostic (POSIX and Windows).
+- **Fork lifetime and GC**: a fork registers with its parent's team id
+  in the `parent` field and reports the pid of the pi it serves as its
+  owner. Liveness is connection-based everywhere: when a parent's
+  connection closes, or a fork goes idle (no work contact for
+  PI_TEAMS_FORK_IDLE, default 300s; zero disables), the broker closes
+  the fork's endpoint, drops the entry, and signals the owner pid, so
+  the forked pi dies for real instead of outliving its parent as a
+  hold-shim ghost. A working teammate stays alive: the extension
+  publishes busy state from pi's own lifecycle events
+  (agent_start/agent_settled) and the hold streams it in its heartbeat,
+  which resets the idle clock. Only forks are ever signalled; main
+  agents are never touched.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers

@@ -60,6 +60,8 @@ class TeamClient:
         self.role = os.environ.get("TEAM_ROLE")
         self.parent = os.environ.get("TEAM_PARENT_ID")
         self.session = os.environ.get("TEAM_SESSION")
+        self.owner_pid = os.environ.get("TEAM_OWNER_PID")
+        self.busy_file = os.environ.get("TEAM_BUSY_FILE")
         self._conn = None
         self._readbuf = b""
 
@@ -83,10 +85,11 @@ class TeamClient:
             "parent": self.parent,
             "cwd": os.getcwd(),
             "session": self.session,
+            "owner_pid": self.owner_pid,
         }
 
     def set_identity(self, agent_id=None, name=None, role=None, parent=None,
-                     session=None):
+                     session=None, owner_pid=None, busy_file=None):
         # Explicit identity from CLI arguments (pi.exec cannot pass env
         # on Windows, so the extension hands identity over as args).
         if agent_id:
@@ -99,6 +102,10 @@ class TeamClient:
             self.parent = parent
         if session:
             self.session = session
+        if owner_pid:
+            self.owner_pid = owner_pid
+        if busy_file:
+            self.busy_file = busy_file
 
     # -- transport ---------------------------------------------------
 
@@ -188,9 +195,18 @@ class TeamClient:
             time.sleep(self.heartbeat)
             if self._conn is not None:
                 try:
-                    self._send_line({"op": "ping"})
+                    self._send_line({"op": "ping", "busy": self._is_busy()})
                 except OSError:
                     break
+
+    def _is_busy(self):
+        if not self.busy_file:
+            return False
+        try:
+            with open(self.busy_file) as fh:
+                return fh.read().strip() == "1"
+        except (OSError, IOError):
+            return False
 
     def follow(self, on_message=None, ready=None):
         self.register()
@@ -293,11 +309,13 @@ def add_identity_args(parser):
     parser.add_argument("--role")
     parser.add_argument("--parent")
     parser.add_argument("--session")
+    parser.add_argument("--owner-pid")
+    parser.add_argument("--busy-file")
 
 
 def apply_identity(client, args):
     client.set_identity(args.id, args.name, args.role, args.parent,
-                        args.session)
+                        args.session, args.owner_pid, args.busy_file)
 
 
 def main(argv=None):
