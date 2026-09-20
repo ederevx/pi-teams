@@ -4,18 +4,25 @@
  * On session start this extension registers the running pi process with
  * the team broker (src/teamd.py) through a held connection, so the agent
  * gains an endpoint other agents can reach. A compact awareness note is
- * injected before the first agent run listing live teammates and the
+ * injected before the agent first runs, listing live teammates and the
  * commands used to reach or spawn them. A spawned fork runs a pi process
  * whose environment names this agent as its parent; the broker
  * terminates the fork when the parent process dies, so teammates cannot
  * outlive the agent that spawned them.
  *
+ * The held connection and the forked pi are launched with Node's
+ * child_process, not pi.exec: pi.exec opens the child's stdin to
+ * /dev/null and drops the env option, which would make the hold see EOF
+ * immediately and strip a fork of its identity. A stdin pipe owned by
+ * this process keeps the hold alive exactly as long as the pi runs.
+ *
  * The broker and client live in the pi-teams repository and are expected
- * at TEAM_ROOT (~/.local/state/pi-teams) and $HOME/.local/bin (or
- * PI_TEAMS_BIN). Override the pi binary for forks with PI_TEAMS_PI.
+ * at $HOME/.local/bin (or PI_TEAMS_BIN). Override the pi binary for
+ * forks with PI_TEAMS_PI.
  */
 
-import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 
 const home = process.env.HOME || ".";
@@ -37,33 +44,78 @@ interface AgentInfo {
 	online: boolean;
 }
 
-class TeamAgent {
-	readonly exec: (file: string, args: string[], options?: object) => Promise<unknown>;
+interface SpawnedProcess {
+	stdin: { end(): void } | null;
+	on(event: string, listener: () => void): void;
+	unref(): void;
+	kill(): void;
+}
+
+type ExecFn = (file: string, args: string[], options?: object) => Promise<unknown>;
+type SpawnFn = (
+	file: string,
+	args: string[],
+	options?: Record<string, unknown>,
+) => SpawnedProcess;
+
+export interface SpawnRequest {
+	name: string;
+	argv: string[];
+}
+
+export class TeamAgent {
+	readonly exec: ExecFn;
+	private readonly spawnProcess: SpawnFn;
 	id: string = "";
 	private announced = false;
+	private holdProc: SpawnedProcess | null = null;
 
-	constructor(
-		exec: (file: string, args: string[], options?: object) => Promise<unknown>,
-	) {
+	constructor(exec: ExecFn, spawnProcess: SpawnFn = nodeSpawn) {
 		this.exec = exec;
-		this.id = process.env.TEAM_ID ||
+		this.spawnProcess = spawnProcess;
+		this.id =
+			process.env.TEAM_ID ||
 			`pi-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
+	}
+
+	private launch(
+		file: string,
+		args: string[],
+		options: Record<string, unknown>,
+	): SpawnedProcess | null {
+		try {
+			const child = this.spawnProcess(file, args, options);
+			child.on("error", () => {
+				// A failed broker/hold/pi start must not crash the
+				// session; the next /team call retries.
+			});
+			return child;
+		} catch {
+			return null;
+		}
 	}
 
 	ensureBroker(): void {
 		if (existsSync(`${stateRoot}/endpoint`)) return;
-		// The broker never exits; fire and forget so the session stays
-		// responsive. It is reaped by pidfile at `teamd stop`.
-		void this.exec(python, [teamdBin, "--root", stateRoot, "start"]);
+		// The broker never exits; detach it so it outlives the session
+		// that happened to start it.
+		const child = this.launch(
+			python,
+			[teamdBin, "--root", stateRoot, "start"],
+			{ detached: true, stdio: "ignore" },
+		);
+		child?.unref();
 	}
 
 	hold(cwd?: string): void {
+		this.stopHold();
 		const name = process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`;
 		const role = process.env.TEAM_ID ? "fork" : "main";
 		const parent = process.env.TEAM_PARENT_ID || "";
 		const session = process.env.PI_SESSION_FILE || "";
 		const busyFile = `${stateRoot}/${this.id}.busy`;
 		const env = {
+			...process.env,
 			TEAM_ID: this.id,
 			TEAM_NAME: name,
 			TEAM_ROLE: role,
@@ -72,20 +124,30 @@ class TeamAgent {
 			TEAM_OWNER_PID: `${process.pid}`,
 			TEAM_BUSY_FILE: busyFile,
 		};
-		// pi.exec does not forward env, so identity rides in as args. The
-		// owner pid lets the broker GC a spawned teammate for real (it
-		// signals this pi), and the busy flag marks model activity so the
-		// fork idle clock does not fire mid-turn.
-		void this.exec(python, [
-			teamBin, "--root", stateRoot, "hold",
-			"--id", this.id,
-			"--name", name,
-			"--role", role,
-			"--parent", parent,
-			"--session", session,
-			"--owner-pid", `${process.pid}`,
-			"--busy-file", busyFile,
-		], { env });
+		// The client exits on stdin EOF, so the pipe must be owned by
+		// this process: closing it (when pi goes away) drops the
+		// endpoint instead of leaving an orphan pinging forever.
+		this.holdProc = this.launch(
+			python,
+			[teamBin, "--root", stateRoot, "hold"],
+			{ env, stdio: ["pipe", "ignore", "ignore"] },
+		);
+	}
+
+	stopHold(): void {
+		const proc = this.holdProc;
+		this.holdProc = null;
+		if (!proc) return;
+		try {
+			proc.stdin?.end();
+		} catch {
+			// already closed
+		}
+		try {
+			proc.kill();
+		} catch {
+			// already gone
+		}
 	}
 
 	setBusy(busy: boolean): void {
@@ -129,29 +191,53 @@ class TeamAgent {
 		);
 	}
 
+	parseSpawn(rest: string): SpawnRequest {
+		const trimmed = (rest || "").trim();
+		const nameMatch = /^--name\s+(\S+)/.exec(trimmed);
+		const name = nameMatch ? nameMatch[1] : "";
+		// The argv separator is a standalone "--"; the leading "--" of
+		// "--name" must never be mistaken for it.
+		const sep = /(?:^|\s)--(?:\s|$)/.exec(trimmed);
+		let argv: string[] = [];
+		if (sep) {
+			const after = trimmed.slice(sep.index + sep[0].length).trim();
+			argv = after ? after.split(/\s+/).filter(Boolean) : [];
+		}
+		return { name, argv };
+	}
+
 	spawn(name: string, argv: string[]): void {
-		const env = {
-			TEAM_ID: `fork-${process.pid}-${Math.random().toString(16).slice(2, 10)}`,
-			TEAM_NAME: name || `fork-${process.pid}`,
-			TEAM_ROLE: "fork",
-			TEAM_PARENT_ID: this.id,
-			TEAM_SESSION: process.env.PI_SESSION_FILE || "",
-			PI_SESSION_FILE: process.env.PI_SESSION_FILE || "",
-		};
+		const forkId =
+			`fork-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
 		const args = argv.length
 			? argv
 			: [piBin, "--no-session", "-p",
 				"You are a teammate of the agent that forked you. " +
 				"Check /team ls for teammates and use /team send " +
 				"to coordinate."];
+		const env = {
+			...process.env,
+			TEAM_ID: forkId,
+			TEAM_NAME: name || forkId,
+			TEAM_ROLE: "fork",
+			TEAM_PARENT_ID: this.id,
+			TEAM_SESSION: process.env.PI_SESSION_FILE || "",
+			PI_SESSION_FILE: process.env.PI_SESSION_FILE || "",
+		};
 		this.ensureBroker();
-		void this.exec(args[0], args.slice(1), { env });
+		// The child is its own pi; detach it so the broker, not process
+		// parentage, owns its lifetime. The environment carries the fork
+		// identity that pi.exec would have dropped.
+		const child = this.launch(args[0], args.slice(1), {
+			env,
+			detached: true,
+			stdio: "ignore",
+		});
+		child?.unref();
 	}
 
 	deregister(): void {
-		void this.exec(python, [teamBin, "--root", stateRoot, "deregister"], {
-			env: { TEAM_ID: this.id },
-		});
+		this.stopHold();
 	}
 
 	announce(agents: AgentInfo[]): { customType: string; content: string; display: boolean } | null {
@@ -227,13 +313,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (sub === "spawn") {
-				const nameMatch = /^--name\s+(\S+)/.exec(rest);
-				const name = nameMatch ? nameMatch[1] : undefined;
-				const argvIndex = rest.indexOf("--");
-				const argv = argvIndex >= 0
-					? rest.slice(argvIndex + 2).trim().split(/\s+/).filter(Boolean)
-					: [];
-				app.spawn(name || "", argv);
+				const { name, argv } = app.parseSpawn(rest);
+				app.spawn(name, argv);
 				ctx.ui.notify(
 					`pi-teams: spawned ${name || "fork"} ` +
 					`(${argv.length ? argv.join(" ") : piBin})`,

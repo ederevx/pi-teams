@@ -2,8 +2,8 @@
 """Run the pi-teams enforcement suite: lints then protocol tests.
 
 Sets TMPDIR under ~/tmp/pi-teams-sandbox so test roots never touch the
-system /tmp, then chains readme_lint, oop_lint, and the unittest suites
-(broker protocol + fork lifecycle).
+system /tmp, then chains readme_lint, oop_lint, the extension test, and
+the unittest suites (broker protocol + fork lifecycle).
 """
 
 import os
@@ -30,6 +30,8 @@ def main():
     steps = [
         [sys.executable, "tests/readme_lint.py"],
         [sys.executable, "tests/oop_lint.py"],
+        ["node", "--test", "--test-reporter=dot",
+         "tests/extension_test.mjs"],
     ]
     for step in steps:
         code = run_step(step)

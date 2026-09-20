@@ -41,11 +41,14 @@ coordinate natively instead of through the shared tree.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
-  `/team ls|status|send|spawn|kill`. Identity rides through CLI args
-  (`--id/--name/--role/--parent/--session`) because pi.exec does not
-  forward env, and the held connection exits on an EOF on its stdin
-  (a hosted session's PTY) so the endpoint dies with its pi instead of
-  pinging forever as an orphan. When a fork starts, the pi child
+  `/team ls|status|send|spawn|kill`. The hold and forked pi are
+  launched with Node's `child_process`, not `pi.exec`: `pi.exec` opens
+  a child's stdin to `/dev/null` and drops the `env` option, which
+  would make the hold exit on its first read and strip a fork of its
+  identity. A stdin pipe owned by the extension keeps the hold alive
+  exactly as long as its pi; identity and fork parentage ride in the
+  child environment, and EOF on that pipe (pi gone) drops the endpoint
+  instead of leaving an orphan. When a fork starts, the pi child
   registers through the same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
@@ -66,6 +69,10 @@ That chains, in order:
   trailing whitespace or tabs, balanced fences, required sections.
 - **OOP lint** (`tests/oop_lint.py`): no module-level mutable state, no
   `global`, no bare `except`, no `var` in the extension.
+- **Extension tests** (`tests/extension_test.mjs`): the hold owns a
+  stdin pipe and forwards identity, spawn detaches a fork with parent
+  identity in the environment, spawn parsing finds only a standalone
+  `--` separator, and the broker starts detached only when absent.
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
   delivery, undeliverable reports, deregistration, connection-close

@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import subprocess
 import time
 import unittest
 
@@ -40,6 +41,8 @@ class ForkLifecycleTests(unittest.TestCase):
         return parent
 
     def _spawn_fork(self, agent_id, parent_id):
+        # The hold inherits a stdin pipe from the spawner; the extension
+        # owns that pipe so the endpoint dies with the pi it serves.
         return team_proc(
             self.root,
             ["hold"],
@@ -72,6 +75,25 @@ class ForkLifecycleTests(unittest.TestCase):
         finally:
             run_team(self.root, ["terminate", "ident-1"])
             holder.wait(timeout=5)
+
+    def test_hold_exits_when_hosted_stdin_closes(self):
+        # The extension must own a stdin pipe for the hold: the client
+        # treats EOF on stdin as "the pi that hosted me is gone" and
+        # exits, so a hold launched with an already-closed stdin
+        # (pi.exec's /dev/null) must not linger as an orphan.
+        child = team_proc(
+            self.root,
+            ["hold", "--id", "detached-1", "--role", "main"],
+            stdin=subprocess.DEVNULL,
+        )
+        try:
+            child.wait(timeout=6)
+            self.assertIsNotNone(
+                child.poll(), "hold survived an already-closed stdin"
+            )
+        finally:
+            child.kill()
+            child.wait(timeout=5)
 
     def test_fork_lives_while_parent_connected(self):
         parent = self._parent("parent-1")

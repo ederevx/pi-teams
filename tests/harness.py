@@ -74,12 +74,13 @@ def stop_broker(root, proc):
         proc.wait(timeout=5)
 
 
-def team_proc(root, argv, env=None):
+def team_proc(root, argv, env=None, stdin=subprocess.PIPE):
     full = dict(os.environ)
     if env:
         full.update(env)
     return subprocess.Popen(
         [sys.executable, str(TEAM), "--root", root] + argv,
+        stdin=stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=full,
