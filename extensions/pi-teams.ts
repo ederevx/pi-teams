@@ -337,9 +337,34 @@ export class TeamAgent {
 	}
 }
 
+/** Records a one-line, truncated log entry for a team message. The
+ *  renderer below shows the preview, or the full payload when expanded. */
+export function logTeamMessage(
+	pi: ExtensionAPI,
+	direction: "sent" | "received",
+	message: TeamMessage,
+): void {
+	const payload =
+		typeof message.payload === "string"
+			? message.payload
+			: JSON.stringify(message.payload);
+	const preview = payload.length > 96
+		? `${payload.slice(0, 93)}...`
+		: payload;
+	pi.appendEntry("pi-teams-log", {
+		direction,
+		from: message.from,
+		to: message.to,
+		kind: message.kind,
+		preview,
+		payload,
+	});
+}
+
 /** Surfaces an inbound team message to the agent as a custom message.
  *  Registered as the TeamAgent's deliver callback. */
 function deliverToAgent(pi: ExtensionAPI, message: TeamMessage): void {
+	logTeamMessage(pi, "received", message);
 	const payload =
 		typeof message.payload === "string"
 			? message.payload
@@ -360,6 +385,25 @@ export default function (pi: ExtensionAPI) {
 		undefined,
 		(message) => deliverToAgent(pi, message),
 	);
+
+	pi.registerEntryRenderer("pi-teams-log", (entry, options, theme) => {
+		const data = entry.data as {
+			direction?: string;
+			from?: string;
+			kind?: string;
+			preview?: string;
+			payload?: string;
+		} | undefined;
+		const arrow = data?.direction === "sent" ? "->" : "<-";
+		const head = `[pi-teams] ${arrow} ${data?.from ?? "?"} ` +
+			`(${data?.kind ?? "text"})`;
+		const lines = options.expanded && data?.payload
+			? [theme.fg("dim", head)]
+				.concat(data.payload.split("\n").map((line) =>
+					theme.fg("dim", `  ${line}`)))
+			: [theme.fg("dim", `${head}: ${data?.preview ?? ""}`)];
+		return { render: () => lines, invalidate() {} };
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		app.ensureBroker();
@@ -409,8 +453,11 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("usage: /team send <id> [kind] <text>", "warning");
 					return;
 				}
-				const reply = await app.send(
-					m[1], m[2] || "text", m[3]);
+				const kind = m[2] || "text";
+				const reply = await app.send(m[1], kind, m[3]);
+				logTeamMessage(pi, "sent", {
+					from: app.id, to: m[1], kind, payload: m[3],
+				});
 				ctx.ui.notify(`pi-teams: ${reply}`, "info");
 				return;
 			}

@@ -60,7 +60,9 @@ coordinate natively instead of through the shared tree.
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the
   agent as `pi-teams` custom messages, so a teammate can report a
-  result back and the parent sees it without polling.
+  result back and the parent sees it without polling. Every sent and
+  received message also appends a one-line `[pi-teams]` log entry with
+  a truncated preview, expandable to the full payload.
 
 ## Validation
 
@@ -113,15 +115,6 @@ never the reverse.
 
 ## Roadmap
 
-- **Notification previews in the logs**: surface inbound team messages
-  as collapsed one-line previews that peek on demand instead of
-  growing the transcript. Research note: pi-tui has no built-in
-  expand/collapse component; the pattern is a collapsed row that
-  toggles by swapping the component's rendered lines and calling
-  `tui.requestRender()`, or a peeking overlay mounted through
-  `ctx.ui.custom(..., { overlay: true })` with `overlayOptions` sizing
-  and a `visible(termWidth, termHeight)` guard. See
-  `ctx.ui.setWidget`/`setStatus` for the persistent surface.
 - **Task routing**: kind-based delivery (task/result/notice) with
   acknowledgement and retry.
 - **Broker upgrades**: spooling for offline recipients, authenticated
