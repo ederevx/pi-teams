@@ -94,6 +94,40 @@ type SpawnFn = (
 ) => SpawnedProcess;
 type DeliverFn = (message: TeamMessage) => void;
 
+/** Splits a command tail into argv, honoring single and double quotes so
+ *  a teammate can be given a multi-word prompt. */
+function splitArgs(text: string): string[] {
+	const args: string[] = [];
+	let current = "";
+	let quote = "";
+	let started = false;
+	for (const ch of text) {
+		if (quote) {
+			if (ch === quote) quote = "";
+			else current += ch;
+			started = true;
+			continue;
+		}
+		if (ch === "'" || ch === "\"") {
+			quote = ch;
+			started = true;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			if (started) {
+				args.push(current);
+				current = "";
+				started = false;
+			}
+			continue;
+		}
+		current += ch;
+		started = true;
+	}
+	if (started) args.push(current);
+	return args;
+}
+
 export interface SpawnRequest {
 	name: string;
 	argv: string[];
@@ -269,7 +303,7 @@ export class TeamAgent {
 		let argv: string[] = [];
 		if (sep) {
 			const after = trimmed.slice(sep.index + sep[0].length).trim();
-			argv = after ? after.split(/\s+/).filter(Boolean) : [];
+			argv = after ? splitArgs(after) : [];
 		}
 		return { name, argv };
 	}
