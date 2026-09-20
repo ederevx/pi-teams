@@ -71,9 +71,18 @@ interface AgentInfo {
 
 interface SpawnedProcess {
 	stdin: { end(): void } | null;
+	stdout: { on(event: string, listener: (chunk: unknown) => void): void } | null;
 	on(event: string, listener: () => void): void;
 	unref(): void;
 	kill(): void;
+}
+
+export interface TeamMessage {
+	from: string;
+	to: string;
+	kind: string;
+	payload: unknown;
+	ts?: number;
 }
 
 type ExecFn = (file: string, args: string[], options?: object) => Promise<unknown>;
@@ -82,6 +91,7 @@ type SpawnFn = (
 	args: string[],
 	options?: Record<string, unknown>,
 ) => SpawnedProcess;
+type DeliverFn = (message: TeamMessage) => void;
 
 export interface SpawnRequest {
 	name: string;
@@ -91,15 +101,17 @@ export interface SpawnRequest {
 export class TeamAgent {
 	readonly exec: ExecFn;
 	private readonly spawnProcess: SpawnFn;
+	private readonly deliver: DeliverFn;
 	id: string = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
 	private sessionFile = "";
 	private sessionDir = "";
 
-	constructor(exec: ExecFn, spawnProcess: SpawnFn = nodeSpawn) {
+	constructor(exec: ExecFn, spawnProcess: SpawnFn = nodeSpawn, deliver: DeliverFn = () => {}) {
 		this.exec = exec;
 		this.spawnProcess = spawnProcess;
+		this.deliver = deliver;
 		this.id =
 			process.env.TEAM_ID ||
 			`pi-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
@@ -153,12 +165,40 @@ export class TeamAgent {
 		};
 		// The client exits on stdin EOF, so the pipe must be owned by
 		// this process: closing it (when pi goes away) drops the
-		// endpoint instead of leaving an orphan pinging forever.
-		this.holdProc = this.launch(
+		// endpoint instead of leaving an orphan pinging forever. Its
+		// stdout carries inbound messages for the agent.
+		const proc = this.launch(
 			python,
 			[teamBin, "--root", stateRoot, "hold"],
-			{ env, stdio: ["pipe", "ignore", "ignore"] },
+			{ env, stdio: ["pipe", "pipe", "ignore"] },
 		);
+		this.holdProc = proc;
+		if (proc?.stdout) this.forwardMessages(proc.stdout);
+	}
+
+	private forwardMessages(
+		stdout: { on(event: string, listener: (chunk: unknown) => void): void },
+	): void {
+		let buffer = "";
+		stdout.on("data", (chunk) => {
+			buffer += String(chunk);
+			let newline = buffer.indexOf("\n");
+			while (newline >= 0) {
+				const line = buffer.slice(0, newline).trim();
+				buffer = buffer.slice(newline + 1);
+				if (line) this.deliverMessage(line);
+				newline = buffer.indexOf("\n");
+			}
+		});
+	}
+
+	private deliverMessage(line: string): void {
+		try {
+			this.deliver(JSON.parse(line) as TeamMessage);
+		} catch {
+			// The hold prints one JSON object per line; a malformed line
+			// is dropped rather than crashing the session.
+		}
 	}
 
 	stopHold(): void {
@@ -297,8 +337,29 @@ export class TeamAgent {
 	}
 }
 
+/** Surfaces an inbound team message to the agent as a custom message.
+ *  Registered as the TeamAgent's deliver callback. */
+function deliverToAgent(pi: ExtensionAPI, message: TeamMessage): void {
+	const payload =
+		typeof message.payload === "string"
+			? message.payload
+			: JSON.stringify(message.payload);
+	void pi.sendMessage(
+		{
+			customType: "pi-teams",
+			content: `pi-teams ${message.kind} from ${message.from}:\n${payload}`,
+			display: true,
+		},
+		{ triggerTurn: true, deliverAs: "steer" },
+	);
+}
+
 export default function (pi: ExtensionAPI) {
-	const app = new TeamAgent((file, args, options) => pi.exec(file, args, options));
+	const app = new TeamAgent(
+		(file, args, options) => pi.exec(file, args, options),
+		undefined,
+		(message) => deliverToAgent(pi, message),
+	);
 
 	pi.on("session_start", async (_event, ctx) => {
 		app.ensureBroker();

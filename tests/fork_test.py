@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+import threading
 import time
 import unittest
 
@@ -75,6 +76,36 @@ class ForkLifecycleTests(unittest.TestCase):
         finally:
             run_team(self.root, ["terminate", "ident-1"])
             holder.wait(timeout=5)
+
+    def test_hold_surfaces_inbound_messages(self):
+        # A relayed message must reach the hosting extension (the client
+        # prints it on stdout), so a teammate can report back to the
+        # parent instead of messages being silently dropped.
+        parent = self._parent("parent-m")
+        child = self._spawn_fork("fork-m", "parent-m")
+        try:
+            self.assertTrue(
+                wait_until(lambda: "fork-m" in self._ids(), timeout=3),
+                "fork never registered",
+            )
+            run_team(self.root, ["send", "fork-m", "result", "report"])
+            lines = []
+            reader = threading.Thread(
+                target=lambda: lines.append(child.stdout.readline()),
+                daemon=True,
+            )
+            reader.start()
+            reader.join(timeout=3)
+            self.assertTrue(lines, "hold did not surface the message")
+            msg = json.loads(lines[0])
+            self.assertEqual(msg["op"], "message")
+            self.assertEqual(msg["to"], "fork-m")
+            self.assertEqual(msg["kind"], "result")
+            self.assertEqual(msg["payload"], "report")
+        finally:
+            child.kill()
+            child.wait(timeout=5)
+            parent.close()
 
     def test_hold_exits_when_hosted_stdin_closes(self):
         # The extension must own a stdin pipe for the hold: the client

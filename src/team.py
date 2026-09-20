@@ -263,6 +263,11 @@ class TeamClient:
                     return
                 if msg.get("kind") == "terminate":
                     return
+                if msg.get("op") == "message" and msg.get("kind") != "registry-change":
+                    # Surface inbound traffic on stdout for the hosting
+                    # extension to forward to its agent. Registry churn is
+                    # internal bookkeeping, never agent-facing.
+                    print(json.dumps(msg, separators=(",", ":")), flush=True)
                 if stdin_dead.is_set():
                     return
         finally:

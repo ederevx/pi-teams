@@ -68,6 +68,11 @@ function makeSpawn() {
 					record.stdinEnded = true;
 				},
 			},
+			stdout: {
+				on(event, listener) {
+					record["stdout:" + event] = listener;
+				},
+			},
 			on(event, _listener) {
 				record["on:" + event] = true;
 			},
@@ -82,10 +87,10 @@ function makeSpawn() {
 	return { calls, spawnProcess };
 }
 
-function makeAgent() {
+function makeAgent(deliver = () => {}) {
 	const { calls, spawnProcess } = makeSpawn();
 	const exec = () => Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	return { agent: new TeamAgent(exec, spawnProcess), calls };
+	return { agent: new TeamAgent(exec, spawnProcess, deliver), calls };
 }
 
 function publishEndpoint(present) {
@@ -105,7 +110,7 @@ test("hold forwards identity and owns the held connection's stdin", () => {
 	const call = calls[0];
 	assert.equal(call.file, process.env.PYTHON || "python3");
 	assert.deepEqual(call.args, [`${binDir}/team`, "--root", stateRoot, "hold"]);
-	assert.deepEqual(call.options.stdio, ["pipe", "ignore", "ignore"]);
+	assert.deepEqual(call.options.stdio, ["pipe", "pipe", "ignore"]);
 	assert.equal(call.options.env.TEAM_ID, agent.id);
 	assert.equal(call.options.env.TEAM_OWNER_PID, String(process.pid));
 	assert.equal(call.options.env.TEAM_NAME, "pi@/work");
@@ -125,6 +130,31 @@ test("hold replaces a previous held connection", () => {
 	assert.equal(calls[1].killed, false);
 	agent.stopHold();
 	assert.equal(calls[1].killed, true);
+});
+
+test("hold forwards inbound messages to the agent", () => {
+	const received = [];
+	const { agent, calls } = makeAgent((message) => received.push(message));
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	assert.equal(typeof onData, "function");
+
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "result", payload: "done",
+	}) + "\n");
+	assert.equal(received.length, 1);
+	assert.deepEqual(received[0], {
+		from: "kid", to: agent.id, kind: "result", payload: "done",
+	});
+
+	// A partial line waits for its newline, then delivers.
+	onData('{"from":"kid","to":"p","kind":"text"');
+	assert.equal(received.length, 1);
+	onData(',"payload":"x"}\n');
+	assert.equal(received.length, 2);
+	assert.equal(received[1].payload, "x");
+
+	agent.stopHold();
 });
 
 test("spawn detaches the teammate with fork identity in the environment", () => {
