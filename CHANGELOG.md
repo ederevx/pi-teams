@@ -4,6 +4,12 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.0 — 2026-09-20
+
+- Release pi-teams 0.3.0.
+- Watch stdin for EOF unless stdin is a real interactive console.
+- Read teammate-session markers as bytes so a sweep survives any locale.
+
 ## v0.2.0 — 2026-09-20
 
 - GC stale teammate busy-state files.
