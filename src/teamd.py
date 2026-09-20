@@ -206,41 +206,49 @@ class TeamBroker:
     # -- connection handling ----------------------------------------
 
     def _serve(self, conn):
+        # Framing lives in _messages; this loop only handshakes once and
+        # dispatches each parsed message.
         agent_id = None
         try:
             with conn:
-                conn.settimeout(0.5)
-                buf = b""
                 first = True
-                while self._running:
-                    try:
-                        chunk = conn.recv(65536)
-                    except socket.timeout:
-                        continue
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        if not line.strip():
-                            continue
-                        try:
-                            msg = json.loads(line.decode("utf-8"))
-                        except ValueError:
-                            self._reply(conn, op="error", error="bad-json")
-                            break
-                        if first:
-                            if not self._handshake(conn, msg):
-                                return
-                            first = False
-                            continue
-                        agent_id = self._handle(conn, msg, agent_id)
-                        if agent_id is None and not self._running:
+                for msg in self._messages(conn):
+                    if first:
+                        if not self._handshake(conn, msg):
                             return
+                        first = False
+                        continue
+                    agent_id = self._handle(conn, msg, agent_id)
+                    if agent_id is None and not self._running:
+                        return
         finally:
             self._drop_conn(agent_id)
+
+    def _messages(self, conn):
+        # Yields one decoded JSON object per line until the peer closes,
+        # the broker stops, or a malformed line is answered and dropped.
+        conn.settimeout(0.5)
+        buf = b""
+        while self._running:
+            try:
+                chunk = conn.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if not chunk:
+                return
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    msg = json.loads(line.decode("utf-8"))
+                except ValueError:
+                    self._reply(conn, op="error", error="bad-json")
+                    break
+                yield msg
 
     def _handshake(self, conn, msg):
         if msg.get("op") != "hello" or msg.get("token") != self.token:
@@ -374,10 +382,14 @@ class TeamBroker:
         self._write(conn, envelope)
         self._reply(sender_conn, op="ack")
 
-    def _terminate(self, agent_id, why):
+    def _evict(self, agent_id, why):
+        # Drop an agent's endpoint and entry, tell its connection why, and
+        # signal the fork process it serves. The caller decides whether
+        # to persist: terminate does, a sweep persists once for the batch.
         with self._lock:
-            conn = self._clients.get(agent_id)
             entry = self._registry.get(agent_id)
+            conn = self._clients.pop(agent_id, None)
+            self._registry.pop(agent_id, None)
         if conn is not None:
             self._write(conn, {
                 "op": "message", "from": "*", "kind": "terminate",
@@ -387,9 +399,11 @@ class TeamBroker:
                 conn.close()
             except OSError:
                 pass
-        if entry is not None:
-            self._kill_owner(entry, why)
-        self._drop_entry(agent_id)
+        self._kill_owner(entry or {}, why)
+
+    def _terminate(self, agent_id, why):
+        self._evict(agent_id, why)
+        self._persist_and_notify()
 
     def _kill_owner(self, entry, why):
         # GC enforcement: a spawned teammate's termination must reach the
@@ -461,21 +475,7 @@ class TeamBroker:
     def _reap_fork(self, agent_id, why):
         # A fork: terminate its endpoint, drop its entry, and signal the
         # pi process it serves. Only forks are ever signalled.
-        with self._lock:
-            entry = self._registry.get(agent_id)
-            conn = self._clients.pop(agent_id, None)
-            self._registry.pop(agent_id, None)
-        if conn is not None:
-            self._write(conn, {
-                "op": "message", "from": "*",
-                "kind": "terminate",
-                "payload": {"id": agent_id, "why": why},
-            })
-            try:
-                conn.close()
-            except OSError:
-                pass
-        self._kill_owner(entry or {}, why)
+        self._evict(agent_id, why)
 
     def _forget(self, agent_id):
         with self._lock:

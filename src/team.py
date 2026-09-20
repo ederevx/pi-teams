@@ -116,16 +116,22 @@ class TeamClient:
         endpoint = self.root.read_endpoint()
         if not endpoint:
             raise OSError("no teamd endpoint under %s" % self.root.base)
+        self._conn = self._open(endpoint)
+        self._handshake(endpoint)
+        return self._conn
+
+    def _open(self, endpoint):
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn.settimeout(self.timeout)
         conn.connect((endpoint["host"], endpoint["port"]))
-        self._conn = conn
+        return conn
+
+    def _handshake(self, endpoint):
         self._send_line({"op": "hello", "token": endpoint.get("token") or ""})
         reply = self._read_line()
         if not reply or reply.get("op") != "ack":
             self.close()
             raise OSError("teamd handshake failed: %r" % (reply,))
-        return self._conn
 
     def close(self):
         if self._conn is not None:
@@ -240,25 +246,36 @@ class TeamClient:
         finally:
             self.close()
 
-    def hold(self):
-        self.register()
-        stdin_dead = threading.Event()
+    def _watch_stdin(self):
+        # When the spawner hosts us on a pipe or a PTY, EOF on stdin
+        # means the hosting process is gone: exit so the endpoint dies
+        # with its pi instead of pinging forever as an orphan.
+        dead = threading.Event()
 
-        def watch_stdin():
-            # When the spawner hosts us on a pipe or a PTY, EOF on
-            # stdin means the hosting process is gone:
-            # exit so the endpoint dies with its pi instead of pinging
-            # forever as an orphan.
+        def watch():
             try:
                 while True:
                     if not sys.stdin.read(4096):
-                        stdin_dead.set()
+                        dead.set()
                         return
             except (OSError, ValueError):
-                stdin_dead.set()
+                dead.set()
 
         if not sys.stdin.isatty():
-            threading.Thread(target=watch_stdin, daemon=True).start()
+            threading.Thread(target=watch, daemon=True).start()
+        return dead
+
+    def _emit(self, msg):
+        # Surface inbound relayed traffic on stdout for the hosting
+        # extension to forward to its agent. Registry churn is internal
+        # bookkeeping, never agent-facing.
+        if msg.get("op") != "message" or msg.get("kind") == "registry-change":
+            return
+        print(json.dumps(msg, separators=(",", ":")), flush=True)
+
+    def hold(self):
+        self.register()
+        stdin_dead = self._watch_stdin()
         try:
             while True:
                 try:
@@ -269,15 +286,9 @@ class TeamClient:
                     continue
                 except OSError:
                     break
-                if msg is None:
+                if msg is None or msg.get("kind") == "terminate":
                     return
-                if msg.get("kind") == "terminate":
-                    return
-                if msg.get("op") == "message" and msg.get("kind") != "registry-change":
-                    # Surface inbound traffic on stdout for the hosting
-                    # extension to forward to its agent. Registry churn is
-                    # internal bookkeeping, never agent-facing.
-                    print(json.dumps(msg, separators=(",", ":")), flush=True)
+                self._emit(msg)
                 if stdin_dead.is_set():
                     return
         finally:

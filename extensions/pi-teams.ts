@@ -196,18 +196,8 @@ export class TeamAgent {
 		const name = process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`;
 		const role = process.env.TEAM_ID ? "fork" : "main";
 		const parent = process.env.TEAM_PARENT_ID || "";
-		const session = this.sessionFile;
 		const busyFile = join(stateRoot, `${this.id}.busy`);
-		const env = {
-			...process.env,
-			TEAM_ID: this.id,
-			TEAM_NAME: name,
-			TEAM_ROLE: role,
-			TEAM_PARENT_ID: parent,
-			TEAM_SESSION: session,
-			TEAM_OWNER_PID: `${process.pid}`,
-			TEAM_BUSY_FILE: busyFile,
-		};
+		const env = this.holdEnv(name, role, parent, busyFile);
 		// The client exits on stdin EOF, so the pipe must be owned by
 		// this process: closing it (when pi goes away) drops the
 		// endpoint instead of leaving an orphan pinging forever. Its
@@ -219,6 +209,26 @@ export class TeamAgent {
 		);
 		this.holdProc = proc;
 		if (proc?.stdout) this.forwardMessages(proc.stdout);
+	}
+
+	/** The hold's environment: this agent's identity plus the busy file
+	 *  the heartbeat reads for its run-state. */
+	private holdEnv(
+		name: string,
+		role: string,
+		parent: string,
+		busyFile: string,
+	): Record<string, string | undefined> {
+		return {
+			...process.env,
+			TEAM_ID: this.id,
+			TEAM_NAME: name,
+			TEAM_ROLE: role,
+			TEAM_PARENT_ID: parent,
+			TEAM_SESSION: this.sessionFile,
+			TEAM_OWNER_PID: `${process.pid}`,
+			TEAM_BUSY_FILE: busyFile,
+		};
 	}
 
 	private forwardMessages(
@@ -391,10 +401,20 @@ export class TeamAgent {
 			throw new Error(
 				"cannot inherit context: this session has no file to fork");
 		}
-		// The teammate is a persistent headless pi session, not a one-shot
-		// `pi -p` task: the extension owns the whole launch and delivers the
-		// task as an RPC prompt, so the teammate stays alive to be messaged.
-		const args = [
+		const args = this.teammateArgs(session, options, inherit);
+		this.launchTeammate(forkId, session, args, this.taskPrompt(session, task));
+		return { id: forkId, session };
+	}
+
+	/** The spawn argv for a teammate: a headless RPC session, not a
+	 *  one-shot `pi -p`, that inherits the parent's session directory,
+	 *  provider, model, and thinking level. */
+	private teammateArgs(
+		session: string,
+		options: SpawnOptions,
+		inherit: boolean,
+	): string[] {
+		return [
 			"--mode", "rpc",
 			...(inherit ? ["--fork", this.sessionFile] : []),
 			...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
@@ -403,8 +423,6 @@ export class TeamAgent {
 			...(options.model ? ["--model", options.model] : []),
 			...(options.thinking ? ["--thinking", options.thinking] : []),
 		];
-		this.launchTeammate(forkId, session, args, this.taskPrompt(session, task));
-		return { id: forkId, session };
 	}
 
 	private makeForkId(): string {
@@ -434,22 +452,7 @@ export class TeamAgent {
 		prompt: string,
 	): void {
 		const invocation = piInvocation();
-		// A teammate is its own root session, not a nested view of the
-		// parent: drop every inherited variable that binds a process to a
-		// parent session or host, whichever layer set it, then hand the
-		// child this fork's own identity below. Pi removes its session
-		// variables for child shells the same way.
-		const env: Record<string, string | undefined> = { ...process.env };
-		for (const key of Object.keys(env)) {
-			if (/^(PI|TEAM)_(SESSION|HOST)/.test(key)) delete env[key];
-		}
-		Object.assign(env, {
-			TEAM_ID: forkId,
-			TEAM_NAME: session,
-			TEAM_ROLE: "fork",
-			TEAM_PARENT_ID: this.id,
-			TEAM_ROOT: stateRoot,
-		});
+		const env = this.teammateEnv(forkId, session);
 		this.ensureBroker();
 		// The extension holds the teammate's RPC stdin open: the teammate
 		// stays alive for messages and exits when this pi goes away (the
@@ -472,6 +475,28 @@ export class TeamAgent {
 			}
 		}
 		child.unref();
+	}
+
+	/** A teammate's environment: drop every inherited variable that binds
+	 *  a process to a parent session or host, whichever layer set it,
+	 *  then set the fork's own identity. Pi removes its session variables
+	 *  for child shells the same way. */
+	private teammateEnv(
+		forkId: string,
+		session: string,
+	): Record<string, string | undefined> {
+		const env: Record<string, string | undefined> = { ...process.env };
+		for (const key of Object.keys(env)) {
+			if (/^(PI|TEAM)_(SESSION|HOST)/.test(key)) delete env[key];
+		}
+		Object.assign(env, {
+			TEAM_ID: forkId,
+			TEAM_NAME: session,
+			TEAM_ROLE: "fork",
+			TEAM_PARENT_ID: this.id,
+			TEAM_ROOT: stateRoot,
+		});
+		return env;
 	}
 
 	private stopTeammates(): void {
