@@ -256,98 +256,76 @@ test("hold forwards inbound messages to the agent", () => {
 	agent.stopHold();
 });
 
-test("team_wait resolves on the result without double delivery", async () => {
+test("a result is delivered as a message, not held by a waiter", () => {
 	const received = [];
 	const { agent, calls } = makeAgent((message) => received.push(message));
 	agent.hold("/work");
 	const onData = calls[0]["stdout:data"];
-	const waiting = agent.waitForResult("kid", 5000);
-	onData(JSON.stringify({
-		from: "kid", to: agent.id, kind: "notice", payload: "session x",
-	}) + "\n");
-	onData(JSON.stringify({
-		from: "kid", to: agent.id, kind: "text", payload: "working",
-	}) + "\n");
 	onData(JSON.stringify({
 		from: "kid", to: agent.id, kind: "result", payload: "done",
 	}) + "\n");
-	const message = await waiting;
-	assert.equal(message.kind, "result");
-	assert.equal(message.payload, "done");
-	// Notices and progress still reach the agent; the awaited result was
-	// consumed by the wait alone, so it is not delivered a second time.
-	assert.deepEqual(received.map((m) => m.kind), ["notice", "text"]);
+	// Waiting is passive: nothing consumes the report, so the agent sees
+	// it as an ordinary message.
+	assert.deepEqual(received.map((m) => m.payload), ["done"]);
 	agent.stopHold();
 });
 
-test("team_wait resolves null on timeout and on abort", async () => {
-	const { agent } = makeAgent();
-	assert.equal(await agent.waitForResult("nobody", 10), null);
-	const controller = new AbortController();
-	const waiting = agent.waitForResult("nobody", 5000, controller.signal);
-	controller.abort();
-	assert.equal(await waiting, null);
+test("requireSameTeam lets a root reach any agent", async () => {
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	assert.equal(agent.hasParent(), false);
+	await assert.doesNotReject(() => agent.requireSameTeam("outsider"));
 });
 
-test("deregister resolves a pending wait instead of hanging it", async () => {
-	const { agent } = makeAgent();
-	const waiting = agent.waitForResult("kid", 5000);
-	agent.deregister();
-	assert.equal(await waiting, null);
-});
-
-test("team_wait returns a result that arrived before the call", async () => {
-	const received = [];
-	const { agent, calls } = makeAgent((message) => received.push(message));
+test("requireSameTeam is team-scoped for a teammate", async () => {
+	const { runner } = makeRunner((file, args) => {
+		if (args.includes("ls")) {
+			return Promise.resolve({ stdout: JSON.stringify({ agents: [
+				{ id: "root", name: "r", role: "main", pid: 1, parent: null,
+				  session: null, online: true },
+				{ id: "sibling", name: "s", role: "fork", pid: 2,
+				  parent: "root", session: null, online: true },
+				{ id: "outsider", name: "o", role: "main", pid: 3,
+				  parent: null, session: null, online: true },
+			] }), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	onData(JSON.stringify({
-		from: "kid", to: agent.id, kind: "result", payload: "early",
-	}) + "\n");
-	// The early result is delivered as usual and also remembered, so a
-	// wait that starts after it returns it instead of timing out.
-	assert.equal(received.length, 1);
-	const message = await agent.waitForResult("kid", 5000);
-	assert.equal(message.payload, "early");
+	await agent.attachTo("root", "me");
+	await assert.doesNotReject(() => agent.requireSameTeam("sibling"));
+	await assert.rejects(() => agent.requireSameTeam("outsider"),
+		/outside your team/);
 	agent.stopHold();
 });
 
-test("one result resolves every concurrent wait for a teammate", async () => {
-	const { agent, calls } = makeAgent();
+test("attach refuses a target that already has a parent", async () => {
+	const { runner } = makeRunner((file, args) => {
+		if (args.includes("ls")) {
+			return Promise.resolve({ stdout: JSON.stringify({ agents: [
+				{ id: "taken", name: "t", role: "fork", pid: 1,
+				  parent: "p", session: null, online: true },
+			] }), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	await assert.rejects(() => agent.attach("taken", "x"), /one team/);
+});
+
+test("attachTo refuses a second parent", async () => {
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	const first = agent.waitForResult("kid", 5000);
-	const second = agent.waitForResult("kid", 5000);
-	onData(JSON.stringify({
-		from: "kid", to: agent.id, kind: "result", payload: "shared",
-	}) + "\n");
-	const [a, b] = await Promise.all([first, second]);
-	assert.equal(a.payload, "shared");
-	assert.equal(b.payload, "shared");
+	await agent.attachTo("root", "me");
+	await assert.rejects(() => agent.attachTo("other"), /one team/);
 	agent.stopHold();
-});
-
-test("team_wait can wait on several teammates at once", async () => {
-	const { agent, calls } = makeAgent();
-	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	const waiting = agent.waitForResults(["kid-a", "kid-b"], 5000);
-	onData(JSON.stringify({
-		from: "kid-a", to: agent.id, kind: "result", payload: "A",
-	}) + "\n");
-	onData(JSON.stringify({
-		from: "kid-b", to: agent.id, kind: "result", payload: "B",
-	}) + "\n");
-	const results = await waiting;
-	assert.equal(results.get("kid-a").payload, "A");
-	assert.equal(results.get("kid-b").payload, "B");
-	agent.stopHold();
-});
-
-test("team_wait reports a per-teammate timeout", async () => {
-	const { agent } = makeAgent();
-	const results = await agent.waitForResults(["gone"], 10);
-	assert.equal(results.get("gone"), null);
 });
 
 test("setState publishes busy, waiting, and idle to the busy file", () => {

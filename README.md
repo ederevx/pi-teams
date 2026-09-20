@@ -62,11 +62,13 @@ coordinate natively instead of through the shared tree.
 - **Attach an existing session**: any running pi session that is not
   already a teammate can become one without spawning a new process.
   `team_attach` (or `/team attach <parent> [name]`) asks the target
-  agent to re-register under a fork id of the requester, so `team_wait`
-  blocks for its reports and the broker GCs it with the parent.
-  `/team detach` returns the session to a plain main agent so it is no
-  longer reaped. A teammate cannot be re-attached. The session file is
-  preserved, so an attached session stays in `/resume`.
+  agent to re-register under a fork id of the requester, so it reports
+  to the requester and the broker GCs it with the parent. An agent
+  belongs to one team: a target that already has a parent is refused,
+  and a parent with no parent of its own may be attached and become a
+  teammate too. `/team detach` returns the session to a plain main agent
+  so it is no longer reaped. The session file is preserved, so an
+  attached session stays in `/resume`.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
@@ -100,19 +102,17 @@ coordinate natively instead of through the shared tree.
   still retains it (same model, within its TTL). GC reaps only the
   process, leaving the session file for later resumption. When a fork
   starts, the pi child registers through the same extension.
-  `team_wait` optionally blocks for one or more teammate reports and
-  returns them as the tool result; while blocked the extension
-  publishes the agent as waiting, which the broker treats as
-  not-working but keeps exempt from fork idle GC. A skipped or
-  timed-out wait still receives each report as a message.
+  `team_wait` is passive: it never blocks, so a waiting agent stays
+  idle and keeps receiving messages; each report arrives as an ordinary
+  pi-teams message that starts a new turn. Idle waiting keeps fork idle
+  GC in force.
 - **Tools**: the extension exposes `team_ls`, `team_send`,
   `team_spawn`, `team_wait`, `team_attach`, and `team_peer` as agent
-  tools. Sending and waiting are member-only: a session is a team member
-  once it is attached, spawned, or has spawned or attached a teammate,
-  and `team_send`/`team_wait` refuse otherwise with a pointer to
-  `team_attach`. Listing, spawning, attaching, and peer linking stay
-  open, so a session can join a team and link peers without a shell or
-  raw `ssh`.
+  tools. Sending and waiting are member-only, and a teammate may only
+  message its own team - to reach an outsider it asks its parent to
+  attach that agent; a root is unrestricted. Listing, spawning,
+  attaching, and peer linking stay open, so a session can join a team
+  and link peers without a shell or raw `ssh`.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the
@@ -192,11 +192,12 @@ That chains, in order:
   tunnel and a tunnel exit prunes the broker link; every outbound
   `send` carries this agent's id so a peer's reply and a remote fork's
   parent reach the real agent; a remembered peer is rebuilt on the next
-  session; `team_wait` resolves
-  one or several awaited results without a second delivery and on
-  timeout, abort, or shutdown; an attach re-registers the session as a
-  fork and notifies the parent, an inbound attach request converts the
-  session and acks the requester, and detach restores a main identity; a
+  session; a report is delivered as a message rather than held by a
+  waiter; a teammate may only reach its own team while a root is
+  unrestricted; an attach re-registers the session as a fork and
+  notifies the parent, an inbound attach request converts the session
+  and acks the requester, an already-attached target and a second parent
+  are refused, and detach restores a main identity; a
   password-only or unknown host fails
   with the one-line setup guidance and no tunnel; the broker starts
   detached only when absent.
