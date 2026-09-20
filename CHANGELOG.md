@@ -4,6 +4,10 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.10 — 2026-09-20
+
+- Spawning a teammate now implies team membership for the spawner.
+
 ## v0.3.9 — 2026-09-20
 
 - Gate `team_send` and `team_wait` on team membership.
