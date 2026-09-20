@@ -182,6 +182,19 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertTrue(endpoint.get("version"),
                         "the endpoint must carry a source stamp")
 
+    def test_restart_policy_uses_the_idle_window(self):
+        broker = TeamBroker(self.root, restart_grace=10)
+        now = time.time()
+        broker.last_active = now
+        broker.version = "older-source"
+        self.assertFalse(broker._should_restart(now),
+                         "recent activity must not restart")
+        self.assertTrue(broker._should_restart(now + 11),
+                        "an idle stale broker must restart")
+        broker.version = broker._source_version()
+        self.assertFalse(broker._should_restart(now + 11),
+                         "a matching source must not restart")
+
     def test_register_and_discover(self):
         self._agent("alpha", role="main")
         agents = self._agents()
