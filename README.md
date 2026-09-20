@@ -56,9 +56,14 @@ coordinate natively instead of through the shared tree.
   default store), so it appears in `/resume`; `--no-session` is refused
   and custom args inherit the parent's directory and a display name.
   `/team spawn` reports the session it created, and the fork's own
-  `notice` records the exact session file. GC reaps only the process,
-  leaving the session file for later resumption. When a fork starts,
-  the pi child registers through the same extension.
+  `notice` records the exact session file. Agents spawn teammates
+  directly with the `team_spawn` tool, giving only a task (and an
+  optional name); the extension supplies the session, inherits the
+  current model and thinking level, and prepends the report-back
+  instruction, so no wrapper script or command line is needed. GC
+  reaps only the process, leaving the session file for later
+  resumption. When a fork starts, the pi child registers through the
+  same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the
@@ -83,9 +88,11 @@ That chains, in order:
 - **OOP lint** (`tests/oop_lint.py`): no module-level mutable state, no
   `global`, no bare `except`, no `var` in the extension.
 - **Extension tests** (`tests/extension_test.mjs`): the hold owns a
-  stdin pipe and forwards identity, spawn detaches a fork with parent
-  identity in the environment, spawn parsing finds only a standalone
-  `--` separator, and the broker starts detached only when absent.
+  stdin pipe and forwards identity and inbound messages, sent/received
+  log entries are recorded, spawn detaches a fork with parent identity,
+  `--no-session` is refused, `spawnTask` builds the teammate template
+  from a task alone, spawn parsing honors quotes, and the broker starts
+  detached only when absent.
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
   delivery, undeliverable reports, deregistration, connection-close

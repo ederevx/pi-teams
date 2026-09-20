@@ -150,6 +150,17 @@ export interface SpawnRequest {
 	argv: string[];
 }
 
+export interface SpawnOptions {
+	provider?: string;
+	model?: string;
+	thinking?: string;
+}
+
+export interface TeammateRef {
+	id: string;
+	session: string;
+}
+
 export class TeamAgent {
 	readonly exec: ExecFn;
 	private readonly spawnProcess: SpawnFn;
@@ -327,18 +338,54 @@ export class TeamAgent {
 		return { name, argv };
 	}
 
-	spawn(name: string, argv: string[]): string {
-		const forkId =
-			`fork-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
-		const sessionName = name || forkId;
+	spawn(name: string, argv: string[]): TeammateRef {
+		const forkId = this.makeForkId();
+		const session = name || forkId;
+		this.launchTeammate(forkId, session, this.sessionArgs(argv, session));
+		return { id: forkId, session };
+	}
+
+	/** The common teammate template: the caller supplies only the task and
+	 *  an optional name; session, model, and the report-back instruction
+	 *  are supplied here. */
+	spawnTask(name: string, task: string, options: SpawnOptions = {}): TeammateRef {
+		const forkId = this.makeForkId();
+		const session = name || forkId;
+		const args = [
+			...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
+			"--name", session,
+			...(options.provider ? ["--provider", options.provider] : []),
+			...(options.model ? ["--model", options.model] : []),
+			...(options.thinking ? ["--thinking", options.thinking] : []),
+			"-p", this.taskPrompt(session, task),
+		];
+		this.launchTeammate(forkId, session, args);
+		return { id: forkId, session };
+	}
+
+	private makeForkId(): string {
+		return `fork-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
+	}
+
+	private taskPrompt(session: string, task: string): string {
+		return (
+			`You are "${session}", a teammate spawned by a parent pi session ` +
+			`to do one task. Do the task, then report the outcome to your ` +
+			`parent by running this bash command:\n` +
+			`  team --root "$TEAM_ROOT" send "$TEAM_PARENT_ID" result "<report>"\n` +
+			`Do not write memory. Task:\n${task}`
+		);
+	}
+
+	private launchTeammate(forkId: string, session: string, args: string[]): void {
 		const invocation = piInvocation();
-		const args = this.sessionArgs(argv, sessionName);
 		const env = {
 			...process.env,
 			TEAM_ID: forkId,
-			TEAM_NAME: sessionName,
+			TEAM_NAME: session,
 			TEAM_ROLE: "fork",
 			TEAM_PARENT_ID: this.id,
+			TEAM_ROOT: stateRoot,
 		};
 		// The child is its own session; never hand it the parent's session
 		// identity through the environment.
@@ -354,7 +401,6 @@ export class TeamAgent {
 			{ env, detached: true, stdio: "ignore", windowsHide: true },
 		);
 		child?.unref();
-		return sessionName;
 	}
 
 	/** Teammates must be persistent, named sessions so /resume can find
@@ -427,8 +473,8 @@ export class TeamAgent {
 		const content =
 			`## pi-teams teammates (broker: ${stateRoot})\n` +
 			`${lines.join("\n") || "- none live yet"}\n` +
-			`Spawn a teammate that dies with you: /team spawn --name <n> -- <pi args>` +
-			`; list: /team ls; send: /team send <id> <kind> <text>.`;
+			`Spawn a teammate that lives in its own session: team_spawn ` +
+			`(task, name); list: /team ls; send: /team send <id> <kind> <text>.`;
 		return { customType: "pi-teams", content, display: false };
 	}
 }
@@ -478,7 +524,7 @@ function deliverToAgent(pi: ExtensionAPI, message: TeamMessage): void {
 	);
 }
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
 	const app = new TeamAgent(
 		(file, args, options) => pi.exec(file, args, options),
 		undefined,
@@ -502,6 +548,49 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("dim", `  ${line}`)))
 			: [theme.fg("dim", `${head}: ${data?.preview ?? ""}`)];
 		return { render: () => lines, invalidate() {} };
+	});
+
+	// -- agent-facing teammate spawn -------------------------------------
+	// The teammate template lives here: the agent names a task and gets a
+	// separate, resumable pi session back. No wrapper script or command
+	// line is needed.
+	const { Type } = await import("typebox");
+	pi.registerTool({
+		name: "team_spawn",
+		label: "spawn teammate",
+		description:
+			"Spawn a pi-teams teammate that runs in its own persistent, " +
+			"resumable pi session and reports its result back as a team " +
+			"message. Give it exactly one task.",
+		promptSnippet:
+			"Spawn a pi-teams teammate to do a task in its own session",
+		promptGuidelines: [
+			"Use team_spawn to delegate a bounded task to a teammate: it " +
+				"runs as a separate pi session with its own /resume entry and " +
+				"sends its result back as a pi-teams message.",
+		],
+		parameters: Type.Object({
+			task: Type.String({ description: "The task the teammate must do" }),
+			name: Type.Optional(Type.String({
+				description: "Teammate and session name",
+			})),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const model = ctx?.model;
+			const ref = app.spawnTask(params.name || "", params.task, {
+				provider: model?.provider,
+				model: model?.id,
+				thinking: ctx?.thinkingLevel,
+			});
+			return {
+				content: [{
+					type: "text",
+					text: `spawned teammate ${ref.id} as session ` +
+						`"${ref.session}"; it reports back as a pi-teams message.`,
+				}],
+				details: ref,
+			};
+		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -566,10 +655,10 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "spawn") {
 				const { name, argv } = app.parseSpawn(rest);
 				try {
-					const sessionName = app.spawn(name, argv);
+					const ref = app.spawn(name, argv);
 					ctx.ui.notify(
-						`pi-teams: teammate "${sessionName}" started as ` +
-						`session "${sessionName}" in ${app.sessionDirLabel()}; ` +
+						`pi-teams: teammate "${ref.session}" started as ` +
+						`session "${ref.session}" in ${app.sessionDirLabel()}; ` +
 						"it will appear in /resume once it writes",
 						"info",
 					);
