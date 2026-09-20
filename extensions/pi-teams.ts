@@ -39,7 +39,7 @@ import { spawn as nodeSpawn, spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const home = homedir();
@@ -56,6 +56,20 @@ function bundledSrcDir(): string {
 		const here = dirname(fileURLToPath(import.meta.url));
 		const candidate = join(here, "..", "src");
 		if (existsSync(join(candidate, "teamd.py"))) return candidate;
+	} catch {
+		// not loaded as an ES module with a URL
+	}
+	return "";
+}
+/** The package's bundled scripts/ (the user-run setup helper), when
+ *  loaded from a pi package. An explicit PI_TEAMS_BIN wins. */
+function bundledScriptsDir(): string {
+	try {
+		const here = dirname(fileURLToPath(import.meta.url));
+		const candidate = join(here, "..", "scripts");
+		if (existsSync(join(candidate, "peer-ssh-setup.sh"))) {
+			return candidate;
+		}
 	} catch {
 		// not loaded as an ES module with a URL
 	}
@@ -86,6 +100,10 @@ const teamdBin = bundled
 const teamBin = bundled
 	? join(bundled, "team.py")
 	: join(binDir, "team");
+const bundledScripts = process.env.PI_TEAMS_BIN ? "" : bundledScriptsDir();
+const peerSetupScript = bundledScripts
+	? join(bundledScripts, "peer-ssh-setup.sh")
+	: join(binDir, "peer-ssh-setup");
 
 /** Default bound for team_wait, overridable with PI_TEAMS_WAIT. */
 const DEFAULT_WAIT_SECONDS = 300;
@@ -276,6 +294,43 @@ export interface PeerBridge {
 
 export type BridgeFactory = (sshTarget: string, label: string) => PeerBridge;
 
+/** Single-quote a value for POSIX sh, escaping embedded quotes. */
+function quoteShell(value: string): string {
+	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Builds the one-line, user-run setup command for a password-only host.
+ * It owns the script location and the guidance text, so the SSH bridge
+ * can report exactly what the user must run without knowing packaging.
+ */
+export class SshSetupGuide {
+	private readonly script: string;
+
+	constructor(script: string = peerSetupScript) {
+		this.script = script;
+	}
+
+	/** Shell-quotes the script and target so the printed command is safe
+	 *  to paste even if either contains spaces or quotes. */
+	command(sshTarget: string): string {
+		// A pi session's shell is Git Bash on Windows, where Windows
+		// backslash paths are not understood; emit forward slashes.
+		const script = this.script.split(sep).join("/");
+		return `sh ${quoteShell(script)} ${quoteShell(sshTarget)}`;
+	}
+
+	/** The error the agent should relay to the user for a failure that a
+	 *  one-time interactive setup fixes. */
+	needed(sshTarget: string, detail: string): Error {
+		const reason = detail.trim() || "ssh could not authenticate";
+		return new Error(
+			`SSH to ${sshTarget} is not usable non-interactively (${reason}). ` +
+			`Do not ask for a password; ask the user to run this one line in ` +
+			`their terminal, then retry team_peer:\n  ${this.command(sshTarget)}`);
+	}
+}
+
 /**
  * The SSH implementation of PeerBridge. It reads the peer broker's
  * loopback endpoint over an existing SSH session, forwards that port to
@@ -288,15 +343,22 @@ export class SshPeerBridge implements PeerBridge {
 	private readonly sshTarget: string;
 	private readonly runner: ProcessHost;
 	private readonly remoteState: string;
+	private readonly guide: SshSetupGuide;
 	private tunnel: SpawnedProcess | null = null;
 	private exitCallback: (() => void) | null = null;
 	private closed = false;
 
-	constructor(sshTarget: string, label: string, runner: ProcessHost) {
+	constructor(
+		sshTarget: string,
+		label: string,
+		runner: ProcessHost,
+		guide: SshSetupGuide = new SshSetupGuide(),
+	) {
 		this.sshTarget = sshTarget;
 		this.label = label;
 		this.name = label || sshTarget;
 		this.runner = runner;
+		this.guide = guide;
 		this.remoteState = process.env.PI_TEAMS_REMOTE_STATE
 			|| "$HOME/.local/state/pi-teams";
 	}
@@ -306,7 +368,12 @@ export class SshPeerBridge implements PeerBridge {
 		this.name = this.label || endpoint.name || this.sshTarget;
 		const port = await this.reservePort();
 		const tunnel = this.runner.spawnHidden("ssh", [
-			"-N", "-L",
+			"-N",
+			"-o", "BatchMode=yes",
+			"-o", "ExitOnForwardFailure=yes",
+			"-o", "ServerAliveInterval=15",
+			"-o", "ServerAliveCountMax=3",
+			"-L",
 			`127.0.0.1:${port}:127.0.0.1:${endpoint.port}`,
 			this.sshTarget,
 		], { stdio: "ignore", detached: true });
@@ -349,13 +416,40 @@ export class SshPeerBridge implements PeerBridge {
 		token: string;
 		name?: string;
 	}> {
-		const result = await this.runner.run("ssh",
-			[this.sshTarget, "cat", `${this.remoteState}/endpoint`]);
-		return JSON.parse(result.stdout.trim()) as {
-			port: number;
-			token: string;
-			name?: string;
-		};
+		// BatchMode fails fast instead of prompting for a password or a
+		// host key; with no TTY a prompt would otherwise hang the call.
+		const result = await this.runner.run("ssh", [
+			"-o", "BatchMode=yes",
+			"-o", "ConnectTimeout=10",
+			"-o", "ConnectionAttempts=1",
+			this.sshTarget, "cat", `${this.remoteState}/endpoint`,
+		]);
+		if (result.code !== 0) {
+			throw this.guide.needed(
+				this.sshTarget, this.classify(result.stderr));
+		}
+		try {
+			return JSON.parse(result.stdout.trim()) as {
+				port: number;
+				token: string;
+				name?: string;
+			};
+		} catch {
+			throw this.guide.needed(this.sshTarget,
+				"the endpoint file could not be read");
+		}
+	}
+
+	/** Turns an ssh failure's stderr into a short human reason. */
+	private classify(stderr: string): string {
+		if (/host key verification failed/i.test(stderr)) {
+			return "the host key is not known or has changed";
+		}
+		if (/permission denied \(/i.test(stderr)) {
+			return "the host needs a password or a different key";
+		}
+		const line = stderr.split("\n").find((l) => l.trim() !== "");
+		return line ? line.trim() : "";
 	}
 
 	/** A loopback port reserved and released at once: ssh binds it when
@@ -1271,6 +1365,9 @@ export default async function (pi: ExtensionAPI) {
 			"Call team_peer add <ssh-host> once to enable cross-host " +
 				"teammates. After that, team_spawn with host=<label> spawns " +
 				"on that host and messages route both ways.",
+			"If team_peer add reports that SSH is not usable " +
+				"non-interactively, do not ask for a password: tell the user " +
+				"to run the one-line setup command from the error, then retry.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([

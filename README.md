@@ -128,6 +128,13 @@ and messages cross both ways.
   connection-based GC. Removing a peer closes its ssh tunnel, and a
   tunnel that dies on its own prunes the broker's link instead of
   pointing at a dead port. Pid signalling never crosses hosts.
+- **Password-only hosts**: the peer path is non-interactive, so a host
+  that needs a password or has an unknown key fails closed with a
+  guided error instead of hanging. The agent then tells the user to run
+  one line in their terminal (printed in the error, e.g. `sh
+  .../peer-ssh-setup.sh user@host`): it trusts the host key once and
+  installs a local key, prompting for the password only. `team_peer
+  add` then succeeds unattended.
 
 Usage: on host A run `team_peer add B`, then `team_spawn` with
 `host="B"` and `team_wait(id)`. `team_peer remove B` unlinks. The peer
@@ -157,8 +164,12 @@ That chains, in order:
   the tunnel, and reaps it on close; a failed peer-add closes its
   tunnel and a tunnel exit prunes the broker link; `team_wait` resolves
   one or several awaited results without a second delivery and on
-  timeout, abort, or shutdown; the broker starts detached only when
-  absent.
+  timeout, abort, or shutdown; a password-only or unknown host fails
+  with the one-line setup guidance and no tunnel; the broker starts
+  detached only when absent.
+- **Setup-script tests** (`tests/setup_script_test.py`): the user-run
+  script's help, argument errors, and `--dry-run` plan; dry-run prints
+  the commands and changes nothing.
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
   delivery, undeliverable reports, deregistration, connection-close
@@ -197,7 +208,8 @@ below. The broker still starts on demand, one per `TEAM_ROOT`.
 ### Manual install
 
 `scripts/install.sh` copies `src/teamd.py` and `src/team.py` into
-`$HOME/.local/bin`, installs the extension into the pi agent home
+`$HOME/.local/bin` (plus `scripts/peer-ssh-setup.sh` as the
+`peer-ssh-setup` helper), installs the extension into the pi agent home
 extensions dir, and records installed bytes in a manifest;
 `scripts/uninstall.sh` removes exactly what was installed. Both stage
 every write through a same-directory temp file before the atomic move.

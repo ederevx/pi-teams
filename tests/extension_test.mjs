@@ -50,8 +50,8 @@ process.env.PYTHON = process.env.PYTHON || "python3";
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
-const { TeamAgent, ProcessRunner, SshPeerBridge, logTeamMessage } =
-	await import("../extensions/pi-teams.ts");
+const { TeamAgent, ProcessRunner, SshPeerBridge, SshSetupGuide,
+	logTeamMessage } = await import("../extensions/pi-teams.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -527,19 +527,72 @@ test("SshPeerBridge reads the endpoint, tunnels it, and reaps on close", async (
 	assert.equal(ep.token, "tok");
 	assert.equal(ep.name, "hz");
 	assert.ok(ep.port > 0);
-	assert.deepEqual(runCalls[0].args.slice(0, 2),
-		["peer.example", "cat"]);
+	assert.ok(runCalls[0].args.includes("BatchMode=yes"));
+	assert.ok(runCalls[0].args.includes("peer.example"));
+	assert.ok(runCalls[0].args.includes("cat"));
 	const tunnel = calls.find((c) => c.file === "ssh");
 	assert.ok(tunnel, "no ssh tunnel was spawned");
-	assert.deepEqual(tunnel.args.slice(0, 2), ["-N", "-L"]);
-	assert.ok(tunnel.args[2].endsWith(":127.0.0.1:5555"));
-	assert.equal(tunnel.args[3], "peer.example");
+	assert.ok(tunnel.args.includes("-N"));
+	assert.ok(tunnel.args.includes("ExitOnForwardFailure=yes"));
+	const forward = tunnel.args[tunnel.args.indexOf("-L") + 1];
+	assert.ok(forward.endsWith(":127.0.0.1:5555"));
+	assert.equal(tunnel.args[tunnel.args.length - 1], "peer.example");
 	assert.equal(tunnel.options.detached, true);
 	assert.equal(tunnel.unrefed, true);
 	bridge.close();
 	assert.equal(tunnel.killed, true);
 	bridge.close();
 	assert.equal(tunnel.killed, true);
+});
+
+test("SshPeerBridge guides a password-only host to the one-line setup", async () => {
+	const { calls, runner } = makeRunner(() => Promise.resolve({
+		stdout: "", stderr: "Permission denied (publickey,password).",
+		code: 255,
+	}));
+	const bridge = new SshPeerBridge("peer.example", "", runner);
+	await assert.rejects(() => bridge.connect(), (err) => {
+		assert.match(err.message, /not usable non-interactively/);
+		assert.match(err.message, /password/);
+		assert.match(err.message, /peer-ssh-setup/);
+		assert.match(err.message, /peer.example/);
+		return true;
+	});
+	assert.equal(calls.find((c) => c.file === "ssh"), undefined,
+		"no tunnel must spawn when auth fails");
+});
+
+test("SshPeerBridge classifies an unknown host key", async () => {
+	const { runner } = makeRunner(() => Promise.resolve({
+		stdout: "", stderr: "Host key verification failed.", code: 255,
+	}));
+	const bridge = new SshPeerBridge("host", "", runner);
+	await assert.rejects(() => bridge.connect(), /host key is not known/);
+});
+
+test("SshPeerBridge rejects an unreadable endpoint with guidance", async () => {
+	const { runner } = makeRunner(() => Promise.resolve({
+		stdout: "welcome banner\n", stderr: "", code: 0,
+	}));
+	const bridge = new SshPeerBridge("host", "", runner);
+	await assert.rejects(() => bridge.connect(),
+		/endpoint file could not be read/);
+});
+
+test("the setup command shell-quotes the script and target", () => {
+	const guide = new SshSetupGuide("/opt/pi-teams/peer-ssh-setup.sh");
+	const command = guide.command("weird host'o");
+	assert.ok(command.startsWith("sh '/opt/pi-teams/peer-ssh-setup.sh' "));
+	assert.ok(command.includes("'weird host'\\''o'"));
+});
+
+test("peerAdd surfaces setup guidance and spawns no tunnel", async () => {
+	const { calls, runner } = makeRunner(() => Promise.resolve({
+		stdout: "", stderr: "Permission denied (publickey).", code: 255,
+	}));
+	const agent = new TeamAgent(runner, () => {});
+	await assert.rejects(() => agent.peerAdd("host", "h"), /peer-ssh-setup/);
+	assert.equal(calls.find((c) => c.file === "ssh"), undefined);
 });
 
 test("ProcessRunner hides every child console", async () => {

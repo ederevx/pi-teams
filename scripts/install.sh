@@ -27,6 +27,7 @@ install_script() {
 
 install_script "$repo_root/src/teamd.py" "$bin_dir/teamd"
 install_script "$repo_root/src/team.py" "$bin_dir/team"
+install_script "$repo_root/scripts/peer-ssh-setup.sh" "$bin_dir/peer-ssh-setup"
 install_script "$repo_root/extensions/pi-teams.ts" "$agent_dir/extensions/pi-teams.ts"
 
 cat > "$manifest.tmp.$$" <<EOF
@@ -36,6 +37,7 @@ cat > "$manifest.tmp.$$" <<EOF
   "files": [
     "$bin_dir/teamd",
     "$bin_dir/team",
+    "$bin_dir/peer-ssh-setup",
     "$agent_dir/extensions/pi-teams.ts"
   ]
 }
