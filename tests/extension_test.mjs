@@ -289,6 +289,29 @@ test("one result resolves every concurrent wait for a teammate", async () => {
 	agent.stopHold();
 });
 
+test("team_wait can wait on several teammates at once", async () => {
+	const { agent, calls } = makeAgent();
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const waiting = agent.waitForResults(["kid-a", "kid-b"], 5000);
+	onData(JSON.stringify({
+		from: "kid-a", to: agent.id, kind: "result", payload: "A",
+	}) + "\n");
+	onData(JSON.stringify({
+		from: "kid-b", to: agent.id, kind: "result", payload: "B",
+	}) + "\n");
+	const results = await waiting;
+	assert.equal(results.get("kid-a").payload, "A");
+	assert.equal(results.get("kid-b").payload, "B");
+	agent.stopHold();
+});
+
+test("team_wait reports a per-teammate timeout", async () => {
+	const { agent } = makeAgent();
+	const results = await agent.waitForResults(["gone"], 10);
+	assert.equal(results.get("gone"), null);
+});
+
 test("setState publishes busy, waiting, and idle to the busy file", () => {
 	mkdirSync(stateRoot, { recursive: true });
 	const { agent } = makeAgent();
