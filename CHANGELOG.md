@@ -4,6 +4,13 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.12 — 2026-09-20
+
+- Keep an attached session's transcript when its remote parent is reaped.
+- Give a dropped peer link a reconnect grace before reaping its forks.
+- Reject a peer whose host label collides with this host.
+- Detect a peer partition in about ten seconds instead of forty-five.
+
 ## v0.3.11 — 2026-09-20
 
 - Scope teammate messaging to its team; one parent per agent.
