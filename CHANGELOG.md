@@ -4,6 +4,11 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.11 — 2026-09-20
+
+- Scope teammate messaging to its team; one parent per agent.
+- Make `team_wait` passive so a waiting agent stays idle and receiving.
+
 ## v0.3.10 — 2026-09-20
 
 - Spawning a teammate now implies team membership for the spawner.
