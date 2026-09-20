@@ -4,6 +4,11 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.1 — 2026-09-20
+
+- Mark the pi-bundled peers optional so a git install does not vendor them.
+- Keep the cloned package free of npm lockfiles.
+
 ## v0.3.0 — 2026-09-20
 
 - Release pi-teams 0.3.0.
