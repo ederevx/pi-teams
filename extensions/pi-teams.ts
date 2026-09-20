@@ -360,6 +360,18 @@ export class TeamAgent {
 		});
 	}
 
+	/** Waits for every listed teammate; each entry resolves to its result
+	 *  or null on timeout/abort. One signal and bound cover them all. */
+	async waitForResults(
+		agentIds: string[],
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<Map<string, TeamMessage | null>> {
+		const results = await Promise.all(
+			agentIds.map((id) => this.waitForResult(id, timeoutMs, signal)));
+		return new Map(agentIds.map((id, i) => [id, results[i]]));
+	}
+
 	async terminate(agentId: string): Promise<void> {
 		await this.exec(
 			this.python,
@@ -529,8 +541,9 @@ export class TeamAgent {
 			`## pi-teams teammates (broker: ${stateRoot})\n` +
 			`${lines.join("\n") || "- none live yet"}\n` +
 			`Spawn a teammate that lives in its own session: team_spawn ` +
-			`(task, name); wait for a report: team_wait (id); list: ` +
-			`/team ls; send: /team send <id> <kind> <text>.`;
+			`(task, name); block for its report with team_wait (id), or let ` +
+			`it arrive as a message; list: /team ls; send: ` +
+			`/team send <id> <kind> <text>.`;
 		return { customType: "pi-teams", content, display: false };
 	}
 }
@@ -617,8 +630,10 @@ export default async function (pi: ExtensionAPI) {
 		description:
 			"Spawn a pi-teams teammate that runs in its own persistent, " +
 			"resumable pi session and reports its result back as a team " +
-			"message. Give it exactly one task. The teammate is fresh by " +
-			"default (smallest context and cost); set context to inherit " +
+			"message. Give it exactly one task. Wait for the report with " +
+			"team_wait when you want to block; otherwise keep working and " +
+			"the report arrives as a pi-teams message. The teammate is fresh " +
+			"by default (smallest context and cost); set context to inherit " +
 			"only when the task depends on this conversation, which forks " +
 			"the parent session and can reuse its warm prompt cache.",
 		promptSnippet:
@@ -628,7 +643,9 @@ export default async function (pi: ExtensionAPI) {
 				"runs as a separate pi session with its own /resume entry and " +
 				"sends its result back as a pi-teams message. Pass a " +
 				"self-contained task; only set context=inherit when the " +
-				"teammate must see this conversation.",
+				"teammate must see this conversation. Call team_wait to block " +
+				"for the report when you want to, or continue with other work " +
+				"and let it arrive as a pi-teams message.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "The task the teammate must do" }),
@@ -657,7 +674,9 @@ export default async function (pi: ExtensionAPI) {
 				content: [{
 					type: "text",
 					text: `spawned teammate ${ref.id} as session ` +
-						`"${ref.session}"; it reports back as a pi-teams message.`,
+						`"${ref.session}"; wait with team_wait id ` +
+						`"${ref.id}", or continue and it reports as a ` +
+						`pi-teams message.`,
 				}],
 				details: ref,
 			};
@@ -670,56 +689,68 @@ export default async function (pi: ExtensionAPI) {
 	// waiting agent is not working), then restores its busy state.
 	pi.registerTool({
 		name: "team_wait",
-		label: "wait for teammate",
+		label: "wait for teammates",
 		description:
-			"Block until a teammate sends its result, then return that " +
-			"report as the tool result. While blocked the agent is idle. " +
-			"Times out after the wait bound; the result is then still " +
-			"delivered as a pi-teams message.",
-		promptSnippet: "Wait for a teammate's report",
+			"Wait for one or more teammates to report, when you want to " +
+			"block. Pass the id or ids returned by team_spawn; returns each " +
+			"report as the tool result once every teammate has reported or " +
+			"the wait bound elapses. While blocked the agent is idle. If you " +
+			"have other work, skip this: the teammate still reports as a " +
+			"pi-teams message.",
+		promptSnippet: "Wait for teammate reports when you choose to",
 		promptGuidelines: [
-			"After team_spawn, call team_wait with the returned id to block " +
-				"until the teammate reports instead of polling /team ls. If it " +
-				"times out, the result still arrives as a pi-teams message.",
+			"Use team_wait only when you want to block for teammate " +
+				"results: pass the id or ids from team_spawn, and one call can " +
+				"wait on several. If you have other work, continue instead; " +
+				"every teammate reports as a pi-teams message. A timed-out " +
+				"teammate still reports later.",
 		],
 		parameters: Type.Object({
-			id: Type.String({
-				description: "Teammate id returned by team_spawn",
-			}),
+			id: Type.Optional(Type.String({
+				description: "One teammate id returned by team_spawn",
+			})),
+			ids: Type.Optional(Type.Array(Type.String(), {
+				description: "Several teammate ids returned by team_spawn",
+			})),
 			wait: Type.Optional(Type.Number({
 				description: "Seconds to wait (default PI_TEAMS_WAIT or 300)",
 			})),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+			const targetIds = (params.ids && params.ids.length > 0)
+				? params.ids
+				: params.id ? [params.id] : [];
+			if (targetIds.length === 0) {
+				throw new Error("team_wait needs at least one teammate id");
+			}
 			const bound = waitSeconds(params.wait);
 			// A waiting agent is idle, not working: publish that for the
 			// block, then restore the turn's busy state. The broker keeps a
 			// waiting fork exempt from idle GC.
 			app.setState("waiting");
 			try {
-				const message = await app.waitForResult(
-					params.id, bound * 1000, signal);
-				if (!message) {
-					return {
-						content: [{
-							type: "text",
-							text: `no result from ${params.id} within ${bound}s; ` +
-								`it is still running and will report as a message.`,
-						}],
-						details: { id: params.id },
-					};
+				const results = await app.waitForResults(
+					targetIds, bound * 1000, signal);
+				const parts: string[] = [];
+				const details: unknown[] = [];
+				for (const [id, message] of results) {
+					if (!message) {
+						parts.push(`no result from ${id} within ${bound}s; ` +
+							`it is still running and will report as a message.`);
+						details.push({ id, message: null });
+						continue;
+					}
+					logTeamMessage(pi, "received", message);
+					const payload = typeof message.payload === "string"
+						? message.payload
+						: JSON.stringify(message.payload);
+					parts.push(`pi-teams ${message.kind} from ` +
+						`${message.from}:\n${payload}`);
+					details.push(message);
 				}
-				logTeamMessage(pi, "received", message);
-				const payload = typeof message.payload === "string"
-					? message.payload
-					: JSON.stringify(message.payload);
 				return {
-					content: [{
-						type: "text",
-						text: `pi-teams ${message.kind} from ` +
-							`${message.from}:\n${payload}`,
-					}],
-					details: message,
+					content: [{ type: "text", text: parts.join("\n\n") }],
+					details,
 				};
 			} finally {
 				app.setBusy(true);

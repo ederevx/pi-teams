@@ -72,11 +72,11 @@ coordinate natively instead of through the shared tree.
   still retains it (same model, within its TTL). GC reaps only the
   process, leaving the session file for later resumption. When a fork
   starts, the pi child registers through the same extension.
-  `team_wait` then blocks until the teammate reports, returning the
-  report as the tool result; while blocked the extension publishes the
-  agent as waiting, which the broker treats as not-working but keeps
-  exempt from fork idle GC. A timed-out wait still receives the report
-  as a message.
+  `team_wait` optionally blocks for one or more teammate reports and
+  returns them as the tool result; while blocked the extension
+  publishes the agent as waiting, which the broker treats as
+  not-working but keeps exempt from fork idle GC. A skipped or
+  timed-out wait still receives each report as a message.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the
@@ -105,8 +105,8 @@ That chains, in order:
   log entries are recorded, `spawnTask` builds the teammate template
   from a task alone, resolves pi from the running runtime, refuses an
   inherit request without a parent session, and no custom spawn path
-  exists; `team_wait` resolves on the awaited result without a second
-  delivery and on timeout, abort, or shutdown; the broker starts
+  exists; `team_wait` resolves one or several awaited results without a
+  second delivery and on timeout, abort, or shutdown; the broker starts
   detached only when absent.
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
