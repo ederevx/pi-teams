@@ -274,6 +274,9 @@ class TeamBroker:
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind(("127.0.0.1", 0))
         self._server.listen(16)
+        # A timeout lets the loop notice stop() promptly; closing a
+        # listening socket does not reliably wake a blocked accept().
+        self._server.settimeout(0.5)
         port = self._server.getsockname()[1]
         self.root.write_atomic(
             ENDPOINT_NAME,
@@ -292,6 +295,8 @@ class TeamBroker:
             while self._running:
                 try:
                     conn, _ = self._server.accept()
+                except socket.timeout:
+                    continue
                 except OSError:
                     break
                 threading.Thread(
@@ -525,7 +530,7 @@ class TeamBroker:
         if peer is not None and peer.connected:
             rid = secrets.token_hex(8)
             with self._lock:
-                self._peer_pending[rid] = (sender_conn, peer.host)
+                self._peer_pending[rid] = (sender_conn, peer, time.time())
             sent = peer.send({
                 "op": "peer-relay", "id": rid, "to": target,
                 "from": msg.get("from") or sender_id,
@@ -597,6 +602,7 @@ class TeamBroker:
             self._sweep()
 
     def _sweep(self):
+        self._expire_peer_relays()
         doomed_fork, doomed_idle = self._classify(time.time())
         if not doomed_fork and not doomed_idle:
             return
@@ -636,9 +642,16 @@ class TeamBroker:
         self._evict(agent_id, why)
 
     def _forget(self, agent_id):
+        # An idle non-fork is dropped and its socket closed so the serve
+        # thread ends instead of looping on an open connection forever.
         with self._lock:
-            self._clients.pop(agent_id, None)
+            conn = self._clients.pop(agent_id, None)
             self._registry.pop(agent_id, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     # -- peer federation ---------------------------------------------
 
@@ -651,17 +664,24 @@ class TeamBroker:
 
     def _parent_gone(self, parent):
         # A parent is gone when it is neither a live local entry nor a
-        # connected peer's agent. A peer parent keeps its forks alive
-        # until that peer link drops (connection-based cross-host GC).
+        # live agent on a connected peer. For a peer parent the peer's
+        # registry snapshot is the liveness signal, so a remote fork is
+        # reaped when its requesting agent disconnects, not only when the
+        # whole peer link drops.
         if not parent:
             return False
         if parent in self._registry:
             return False
         host = self._parent_host(parent)
-        if host != self.host:
-            with self._lock:
-                return host not in self._peers
-        return True
+        if host == self.host:
+            return True
+        with self._lock:
+            if host not in self._peers:
+                return True
+            agents = self._remote.get(host)
+        if agents is None:
+            return False
+        return not any(a.get("id") == parent for a in agents)
 
     def _snapshot_all(self):
         agents = self._snapshot()
@@ -711,11 +731,15 @@ class TeamBroker:
 
     def _remove_peer(self, host):
         with self._lock:
-            peer = self._peers.pop(host, None)
-            self._remote.pop(host, None)
+            peer = self._peers.get(host)
         if peer is not None:
+            # Drop in place so _peer_down still sees it as current and
+            # reaps that host's forks and pending relays.
             peer.endpoint = {}
             peer.drop()
+        else:
+            with self._lock:
+                self._remote.pop(host, None)
         self._persist_peers()
 
     def _peer_message(self, peer, msg):
@@ -726,7 +750,7 @@ class TeamBroker:
         elif op == "peer-relay":
             self._deliver_peer(peer, msg)
         elif op == "peer-ack":
-            self._finish_peer_relay(msg)
+            self._finish_peer_relay(peer, msg)
 
     def _deliver_peer(self, peer, msg):
         target = msg.get("to")
@@ -744,20 +768,25 @@ class TeamBroker:
         peer.send({"op": "peer-ack", "id": msg.get("id"),
                    "ok": conn is not None})
 
-    def _finish_peer_relay(self, msg):
+    def _finish_peer_relay(self, peer, msg):
+        # Only the peer the relay went to may answer it; another peer's
+        # ack must not clear a different host's pending relay.
+        rid = msg.get("id")
         with self._lock:
-            entry = self._peer_pending.pop(msg.get("id"), None)
-        if entry is None:
-            return
-        sender, _host = entry
+            entry = self._peer_pending.get(rid)
+            if entry is None or entry[1] is not peer:
+                return
+            del self._peer_pending[rid]
+        sender = entry[0]
         if msg.get("ok"):
             self._reply(sender, op="ack")
         else:
             self._reply(sender, op="error", error="undeliverable")
 
     def _peer_down(self, peer):
-        # A replaced link must not reap: only the peer that is still the
-        # current link owns its host's remote forks and registry view.
+        # A replaced link must not reap live forks: only the current link
+        # owns its host's remote view and reaping. Pending relays are
+        # keyed by identity, so they are purged for every dropped link.
         with self._lock:
             was_current = self._peers.get(peer.host) is peer
             if was_current:
@@ -769,15 +798,29 @@ class TeamBroker:
             stale = [
                 (rid, entry)
                 for rid, entry in self._peer_pending.items()
-                if entry[1] == peer.host
-            ] if was_current else []
+                if entry[1] is peer
+            ]
             for rid, _entry in stale:
                 self._peer_pending.pop(rid, None)
-        if not was_current:
-            return
-        for _rid, (sender, _host) in stale:
-            self._reply(sender, op="error", error="undeliverable")
-        self._reap_peer(peer.host)
+        for _rid, entry in stale:
+            self._reply(entry[0], op="error", error="undeliverable")
+        if was_current:
+            self._reap_peer(peer.host)
+
+    def _expire_peer_relays(self):
+        # A peer that never answers must not leak the pending relay or
+        # hang the sender: answer undeliverable after the idle window.
+        now = time.time()
+        with self._lock:
+            stale = [
+                (rid, entry)
+                for rid, entry in self._peer_pending.items()
+                if now - entry[2] > self.idle_timeout
+            ]
+            for rid, _entry in stale:
+                self._peer_pending.pop(rid, None)
+        for _rid, entry in stale:
+            self._reply(entry[0], op="error", error="undeliverable")
 
     def _reap_peer(self, host):
         doomed = []
