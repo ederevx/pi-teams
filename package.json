@@ -1,6 +1,6 @@
 {
   "name": "pi-teams",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "Cross-agent communication, self-forks, and SSH-tunneled cross-host peers for the pi coding agent.",
   "license": "MIT",
