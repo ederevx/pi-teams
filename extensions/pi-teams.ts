@@ -111,16 +111,6 @@ const peerSetupScript = bundledScripts
 	? join(bundledScripts, "peer-ssh-setup.sh")
 	: join(binDir, "peer-ssh-setup");
 
-/** Default bound for team_wait, overridable with PI_TEAMS_WAIT. */
-const DEFAULT_WAIT_SECONDS = 300;
-
-/** Resolves the team_wait bound from the call, then the environment. */
-function waitSeconds(requested?: number): number {
-	if (typeof requested === "number" && requested > 0) return requested;
-	const env = Number(process.env.PI_TEAMS_WAIT);
-	return Number.isFinite(env) && env > 0 ? env : DEFAULT_WAIT_SECONDS;
-}
-
 /**
  * How to launch another pi without a shell. Reusing the running runtime
  * avoids spawning a Windows launcher shim (pi.cmd/pi.ps1) directly,
@@ -764,6 +754,7 @@ export class TeamAgent {
 	private parent = "";
 	private attachedName = "";
 	private teamOwner = false;
+	private closed = false;
 	private cwd = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
@@ -772,9 +763,6 @@ export class TeamAgent {
 	private readonly peersFile: string;
 	private readonly directory: AgentDirectory;
 	private readonly spawnRouter: SpawnRouter;
-	private readonly waiters =
-		new Map<string, Set<(message: TeamMessage | null) => void>>();
-	private readonly recentResults = new Map<string, TeamMessage>();
 	private readonly pendingSpawns =
 		new Map<string, (ref: TeammateRef | null) => void>();
 	private readonly pendingAttaches =
@@ -958,22 +946,9 @@ export class TeamAgent {
 			this.handleAttachRequest(message);
 			return;
 		}
-		if (message.kind !== "result" || message.to !== this.id) {
-			this.deliver(message);
-			return;
-		}
-		// A pending wait consumes the awaited result and surfaces it as the
-		// tool's result, so it is not also delivered as a steered turn.
-		const waiting = this.waiters.get(message.from);
-		if (waiting && waiting.size > 0) {
-			this.waiters.delete(message.from);
-			for (const settle of waiting) settle(message);
-			return;
-		}
-		// Nobody is waiting yet: remember it so a wait that starts just
-		// after the report returns it instead of timing out, and deliver it
-		// the ordinary way for an agent that was not waiting at all.
-		this.recentResults.set(message.from, message);
+		// Reports and every other non-control message are delivered as
+		// messages: waiting is passive, so nothing is consumed into a
+		// blocking tool call and the agent keeps receiving.
 		this.deliver(message);
 	}
 
@@ -1070,56 +1045,58 @@ export class TeamAgent {
 			`team_attach or /team attach <parent>`);
 	}
 
-	/** Blocks until the awaited teammate (by id) sends a `result`, the
-	 *  bound elapses, or the signal aborts; resolves null in the latter
-	 *  two. A result that already arrived is returned at once. Several
-	 *  waits for one teammate all resolve on its single result. */
-	async waitForResult(
-		agentId: string,
-		timeoutMs: number,
-		signal?: AbortSignal,
-	): Promise<TeamMessage | null> {
-		const buffered = this.recentResults.get(agentId);
-		if (buffered) {
-			this.recentResults.delete(agentId);
-			return buffered;
-		}
-		// A bound of zero still cannot hang: fall back to the default.
-		const effective = timeoutMs > 0 ? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
-		return new Promise((resolve) => {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const settle = (message: TeamMessage | null): void => {
-				if (timer) clearTimeout(timer);
-				signal?.removeEventListener("abort", onAbort);
-				const set = this.waiters.get(agentId);
-				if (set) {
-					set.delete(settle);
-					if (set.size === 0) this.waiters.delete(agentId);
-				}
-				resolve(message);
-			};
-			const onAbort = (): void => settle(null);
-			const set = this.waiters.get(agentId) ?? new Set();
-			set.add(settle);
-			this.waiters.set(agentId, set);
-			timer = setTimeout(() => settle(null), effective);
-			if (signal) {
-				if (signal.aborted) settle(null);
-				else signal.addEventListener("abort", onAbort, { once: true });
-			}
-		});
+	/** Whether this session is itself a teammate of another agent (has a
+	 *  parent), as opposed to a team root. */
+	hasParent(): boolean {
+		return this.parent !== "";
 	}
 
-	/** Waits for every listed teammate; each entry resolves to its result
-	 *  or null on timeout/abort. One signal and bound cover them all. */
-	async waitForResults(
-		agentIds: string[],
-		timeoutMs: number,
-		signal?: AbortSignal,
-	): Promise<Map<string, TeamMessage | null>> {
-		const results = await Promise.all(
-			agentIds.map((id) => this.waitForResult(id, timeoutMs, signal)));
-		return new Map(agentIds.map((id, i) => [id, results[i]]));
+	/** The id of the team root that owns `agentId`, walking the parent
+	 *  chain in the registry. A missing or cyclic chain resolves to the
+	 *  last known id rather than throwing. */
+	async teamRootOf(agentId: string): Promise<string> {
+		const agents = await this.snapshot();
+		const byId = new Map(agents.map((a) => [a.id, a]));
+		let current = agentId;
+		const seen = new Set<string>();
+		while (current && !seen.has(current)) {
+			seen.add(current);
+			const entry = byId.get(current);
+			if (!entry || !entry.parent) return current;
+			current = entry.parent;
+		}
+		return agentId;
+	}
+
+	/** Whether two agents share one team root. */
+	async sameTeam(a: string, b: string): Promise<boolean> {
+		const rootA = await this.teamRootOf(a);
+		const rootB = await this.teamRootOf(b);
+		return rootA === rootB;
+	}
+
+	/** A teammate may only reach agents in its own team; to reach an
+	 *  outsider it must ask its parent to attach that agent. A root (no
+	 *  parent) is unrestricted. */
+	async requireSameTeam(target: string): Promise<void> {
+		if (!this.hasParent()) return;
+		if (await this.sameTeam(this.parent, target)) return;
+		throw new Error(
+			`${target} is outside your team; ask your parent ${this.parent} ` +
+			`to attach it (team_attach) before messaging it.`);
+	}
+
+	/** A team has one parent per agent: refuse to attach a target that is
+	 *  already a teammate. A parent agent with no parent of its own may
+	 *  still be attached, becoming a teammate as well. */
+	private async requireAttachable(target: string): Promise<void> {
+		const agents = await this.snapshot();
+		const entry = agents.find((a) => a.id === target);
+		if (entry && entry.parent) {
+			throw new Error(
+				`${target} is already a teammate of ${entry.parent}; ` +
+				`an agent belongs to one team.`);
+		}
 	}
 
 	/** Spawns a teammate on `host` (empty or this host = local) behind a
@@ -1142,6 +1119,10 @@ export class TeamAgent {
 		timeoutMs: number,
 	): Promise<TeammateRef | null> {
 		return new Promise((resolve) => {
+			if (this.closed) {
+				resolve(null);
+				return;
+			}
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const settle = (ref: TeammateRef | null): void => {
 				if (timer) clearTimeout(timer);
@@ -1196,6 +1177,11 @@ export class TeamAgent {
 	 *  marker), so it stays in `/resume` after the fork is reaped. */
 	async attachTo(parent: string, name?: string): Promise<TeammateRef> {
 		if (!parent) throw new Error("attach needs a parent agent id");
+		if (this.hasParent()) {
+			throw new Error(
+				"already a teammate; an agent belongs to one team, " +
+				"detach first to change parents");
+		}
 		const previousBusy = this.busyFile();
 		const forkId = this.makeForkId();
 		const session = name || this.attachedName || this.id;
@@ -1241,6 +1227,8 @@ export class TeamAgent {
 		target: string,
 		name?: string,
 	): Promise<TeammateRef | null> {
+		await this.requireAttachable(target);
+		if (this.closed) return null;
 		const requestId =
 			`attach-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 		const pending = this.waitForAttach(requestId, 15000);
@@ -1253,6 +1241,10 @@ export class TeamAgent {
 		timeoutMs: number,
 	): Promise<TeammateRef | null> {
 		return new Promise((resolve) => {
+			if (this.closed) {
+				resolve(null);
+				return;
+			}
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const settle = (ref: TeammateRef | null): void => {
 				if (timer) clearTimeout(timer);
@@ -1285,9 +1277,9 @@ export class TeamAgent {
 		const payload = (message.payload ?? {}) as {
 			name?: string; requestId?: string;
 		};
-		if (this.role === "fork") {
+		if (this.hasParent()) {
 			void this.send(message.from, "attach-error", JSON.stringify({
-				requestId: payload.requestId,
+				requestId: payload.requestId, why: "already-a-teammate",
 			}));
 			return;
 		}
@@ -1588,11 +1580,9 @@ export class TeamAgent {
 	}
 
 	private cancelWaits(): void {
-		for (const set of [...this.waiters.values()]) {
-			for (const settle of [...set]) settle(null);
-		}
-		this.waiters.clear();
-		this.recentResults.clear();
+		// Deregister is terminal: a race that registers a pending request
+		// after this point must resolve at once instead of leaking a timer.
+		this.closed = true;
 		for (const settle of [...this.pendingSpawns.values()]) settle(null);
 		this.pendingSpawns.clear();
 		for (const settle of [...this.pendingAttaches.values()]) settle(null);
@@ -1638,11 +1628,12 @@ export class TeamAgent {
 		const content =
 			`## pi-teams teammates (broker: ${stateRoot})\n` +
 			`${lines.join("\n") || "- none live yet"}\n` +
-			`Spawn a teammate that lives in its own session: team_spawn ` +
-			`(task, name). Messaging and waiting require a team member: ` +
-			`attach first with team_attach or /team attach <parent>, then ` +
-			`team_send and team_wait work (peer hosts: team_peer add ` +
-			`<ssh-host>, then team_spawn host=<label>). list: /team ls.`;
+			`Spawn a teammate: team_spawn (task, name). Messaging and ` +
+			`waiting require a team member; attach with team_attach or ` +
+			`/team attach <parent>. A teammate may only message its own ` +
+			`team, so ask your parent to attach an outsider first, and an ` +
+			`agent belongs to one team. Peer hosts: team_peer add ` +
+			`<ssh-host>, then team_spawn host=<label>. list: /team ls.`;
 		return { customType: "pi-teams", content, display: false };
 	}
 }
@@ -1803,8 +1794,10 @@ export default async function (pi: ExtensionAPI) {
 			"Attach an existing live pi agent (by id) as this agent's " +
 			"teammate. The target re-registers as a fork of this agent, so " +
 			"team_wait can block for its reports and the broker reaps it " +
-			"when this agent goes away. Use team_spawn to create a new " +
-			"teammate instead.",
+			"when this agent goes away. An agent belongs to one team, so a " +
+			"target that already has a parent is refused; a parent with no " +
+			"parent of its own may be attached and become a teammate too. " +
+			"Use team_spawn to create a new teammate instead.",
 		parameters: Type.Object({
 			target: Type.String({
 				description: "Agent id to attach, from /team ls or team_wait",
@@ -1832,28 +1825,23 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing teammate wait --------------------------------------
-	// Blocks until the teammate reports, so the parent needs neither to
-	// poll nor to end its turn. The wait publishes the agent as idle (a
-	// waiting agent is not working), then restores its busy state.
+	// Waiting is passive: this tool never blocks. It confirms membership
+	// and returns at once; each report arrives as an ordinary pi-teams
+	// message, so the agent stays idle and keeps receiving while it waits.
 	pi.registerTool({
 		name: "team_wait",
 		label: "wait for teammates",
 		description:
-			"Wait for one or more teammates to report, when you want to " +
-			"block. Requires this session to be a team member (attached or " +
-			"spawned); attach first with team_attach. Pass the id or ids " +
-			"returned by team_spawn; returns each " +
-			"report as the tool result once every teammate has reported or " +
-			"the wait bound elapses. While blocked the agent is idle. If you " +
-			"have other work, skip this: the teammate still reports as a " +
-			"pi-teams message.",
-		promptSnippet: "Wait for teammate reports when you choose to",
+			"Mark that you are waiting for one or more teammates. This " +
+			"never blocks: the agent stays idle and keeps receiving " +
+			"messages, and each report arrives as a pi-teams message that " +
+			"starts a new turn. Requires this session to be a team member. " +
+			"Pass the ids returned by team_spawn or team_attach.",
+		promptSnippet: "Wait idly for teammate reports; never blocks",
 		promptGuidelines: [
-			"Use team_wait only when you want to block for teammate " +
-				"results: pass the id or ids from team_spawn, and one call can " +
-				"wait on several. If you have other work, continue instead; " +
-				"every teammate reports as a pi-teams message. A timed-out " +
-				"teammate still reports later.",
+			"Call team_wait with the teammate ids, then end your turn: " +
+				"waiting is passive and the report arrives as a message. " +
+				"Do not poll the teammate.",
 		],
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({
@@ -1862,11 +1850,8 @@ export default async function (pi: ExtensionAPI) {
 			ids: Type.Optional(Type.Array(Type.String(), {
 				description: "Several teammate ids returned by team_spawn",
 			})),
-			wait: Type.Optional(Type.Number({
-				description: "Seconds to wait (default PI_TEAMS_WAIT or 300)",
-			})),
 		}),
-		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			await app.requireTeammate("team_wait");
 			const targetIds = (params.ids && params.ids.length > 0)
 				? params.ids
@@ -1874,38 +1859,15 @@ export default async function (pi: ExtensionAPI) {
 			if (targetIds.length === 0) {
 				throw new Error("team_wait needs at least one teammate id");
 			}
-			const bound = waitSeconds(params.wait);
-			// A waiting agent is idle, not working: publish that for the
-			// block, then restore the turn's busy state. The broker keeps a
-			// waiting fork exempt from idle GC.
-			app.setState("waiting");
-			try {
-				const results = await app.waitForResults(
-					targetIds, bound * 1000, signal);
-				const parts: string[] = [];
-				const details: unknown[] = [];
-				for (const [id, message] of results) {
-					if (!message) {
-						parts.push(`no result from ${id} within ${bound}s; ` +
-							`it is still running and will report as a message.`);
-						details.push({ id, message: null });
-						continue;
-					}
-					logTeamMessage(pi, "received", message);
-					const payload = typeof message.payload === "string"
-						? message.payload
-						: JSON.stringify(message.payload);
-					parts.push(`pi-teams ${message.kind} from ` +
-						`${message.from}:\n${payload}`);
-					details.push(message);
-				}
-				return {
-					content: [{ type: "text", text: parts.join("\n\n") }],
-					details,
-				};
-			} finally {
-				app.setBusy(true);
-			}
+			return {
+				content: [{
+					type: "text",
+					text: `pi-teams: waiting idly for ${targetIds.join(", ")}; ` +
+						`each report arrives as a message, so end your turn ` +
+						`and keep receiving.`,
+				}],
+				details: { ids: targetIds },
+			};
 		},
 	});
 
@@ -1918,7 +1880,8 @@ export default async function (pi: ExtensionAPI) {
 		description:
 			"Send a pi-teams message to a live agent id, local or on a " +
 			"linked peer host. Requires this session to be a team member " +
-			"(attached or spawned); attach first with team_attach. The " +
+			"(attached or spawned), and a teammate may only message its " +
+			"own team - ask your parent to attach an outsider first. The " +
 			"broker relays it, so peer hosts work through the existing " +
 			"SSH tunnel. Returns the broker's ack.",
 		parameters: Type.Object({
@@ -1930,6 +1893,7 @@ export default async function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			await app.requireTeammate("team_send");
+			await app.requireSameTeam(params.to);
 			const reply = await app.send(
 				params.to, params.kind || "text", params.text);
 			return {
@@ -2097,6 +2061,12 @@ export default async function (pi: ExtensionAPI) {
 				if (!m || !m[1]) {
 					ctx.ui.notify("usage: /team attach <parent> [name]",
 						"warning");
+					return;
+				}
+				if (app.hasParent()) {
+					ctx.ui.notify(
+						"pi-teams: already a teammate; an agent belongs " +
+						"to one team (detach first)", "warning");
 					return;
 				}
 				const ref = await app.attachTo(m[1], m[2] || "");
