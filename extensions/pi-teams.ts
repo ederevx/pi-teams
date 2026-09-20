@@ -607,6 +607,10 @@ export class TeamAgent {
 	private readonly python: string;
 	private readonly windowless: InterpreterResolver;
 	id: string = "";
+	private role: string;
+	private parent = "";
+	private attachedName = "";
+	private cwd = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
 	private readonly teammates = new Set<SpawnedProcess>();
@@ -616,6 +620,8 @@ export class TeamAgent {
 		new Map<string, Set<(message: TeamMessage | null) => void>>();
 	private readonly recentResults = new Map<string, TeamMessage>();
 	private readonly pendingSpawns =
+		new Map<string, (ref: TeammateRef | null) => void>();
+	private readonly pendingAttaches =
 		new Map<string, (ref: TeammateRef | null) => void>();
 	readonly host: string;
 	private sessionFile = "";
@@ -637,9 +643,15 @@ export class TeamAgent {
 		this.windowless = windowlessFactory(this.python);
 		this.peersFile = join(stateRoot, "peers-ssh.json");
 		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
-		this.id =
-			process.env.TEAM_ID ||
-			`${this.host}:pi-${process.pid}-` +
+		this.id = process.env.TEAM_ID || this.makeMainId();
+		this.role = process.env.TEAM_ID ? "fork" : "main";
+		this.parent = process.env.TEAM_PARENT_ID || "";
+	}
+
+	/** A fresh main-agent id. The host label makes the id globally
+	 *  unique so peers can route by its prefix. */
+	private makeMainId(): string {
+		return `${this.host}:pi-${process.pid}-` +
 			Math.random().toString(16).slice(2, 10);
 	}
 
@@ -699,12 +711,12 @@ export class TeamAgent {
 	}
 
 	hold(cwd?: string): void {
+		if (cwd) this.cwd = cwd;
 		this.stopHold();
-		const name = process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`;
-		const role = process.env.TEAM_ID ? "fork" : "main";
-		const parent = process.env.TEAM_PARENT_ID || "";
+		const name = this.attachedName || process.env.TEAM_NAME
+			|| `pi@${this.cwd || process.cwd()}`;
 		const busyFile = this.busyFile();
-		const env = this.holdEnv(name, role, parent, busyFile);
+		const env = this.holdEnv(name, this.role, this.parent, busyFile);
 		// The client exits on stdin EOF, so the pipe must be owned by
 		// this process: closing it (when pi goes away) drops the
 		// endpoint instead of leaving an orphan pinging forever. Its
@@ -769,6 +781,14 @@ export class TeamAgent {
 		}
 		if (message.kind === "spawn") {
 			this.handleSpawnRequest(message);
+			return;
+		}
+		if (message.kind === "attach-ack" || message.kind === "attach-error") {
+			this.resolveAttach(message);
+			return;
+		}
+		if (message.kind === "attach") {
+			this.handleAttachRequest(message);
 			return;
 		}
 		if (message.kind !== "result" || message.to !== this.id) {
@@ -984,6 +1004,122 @@ export class TeamAgent {
 		}
 	}
 
+	/** Re-registers this running session as a teammate of `parent`. The
+	 *  broker then treats it as a fork, so it can be waited on and is
+	 *  GC'd with the parent. The session file is left intact (no spawn
+	 *  marker), so it stays in `/resume` after the fork is reaped. */
+	async attachTo(parent: string, name?: string): Promise<TeammateRef> {
+		if (!parent) throw new Error("attach needs a parent agent id");
+		const previousBusy = this.busyFile();
+		const forkId = this.makeForkId();
+		const session = name || this.attachedName || this.id;
+		this.id = forkId;
+		this.role = "fork";
+		this.parent = parent;
+		this.attachedName = session;
+		try {
+			unlinkSync(previousBusy);
+		} catch {
+			// absent, or the broker's orphan sweep reaps it
+		}
+		this.hold(this.cwd);
+		this.announced = false;
+		await this.send(parent, "notice",
+			`attached ${forkId} (${session})`);
+		return { id: forkId, session };
+	}
+
+	/** Returns an attached teammate to a plain main agent so it is no
+	 *  longer reaped with a parent. */
+	detach(): string {
+		const previousBusy = this.busyFile();
+		this.id = this.makeMainId();
+		this.role = "main";
+		this.parent = "";
+		this.attachedName = "";
+		try {
+			unlinkSync(previousBusy);
+		} catch {
+			// absent, or already swept
+		}
+		this.hold(this.cwd);
+		this.announced = false;
+		return this.id;
+	}
+
+	/** Asks a live agent to re-register itself as this agent's teammate;
+	 *  the target owns the identity change and reports its new fork id. */
+	async attachRemote(
+		target: string,
+		name?: string,
+	): Promise<TeammateRef | null> {
+		const requestId =
+			`attach-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+		const pending = this.waitForAttach(requestId, 15000);
+		await this.send(target, "attach", JSON.stringify({ requestId, name }));
+		return pending;
+	}
+
+	private waitForAttach(
+		requestId: string,
+		timeoutMs: number,
+	): Promise<TeammateRef | null> {
+		return new Promise((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const settle = (ref: TeammateRef | null): void => {
+				if (timer) clearTimeout(timer);
+				this.pendingAttaches.delete(requestId);
+				resolve(ref);
+			};
+			this.pendingAttaches.set(requestId, settle);
+			timer = setTimeout(() => settle(null), timeoutMs);
+		});
+	}
+
+	private resolveAttach(message: TeamMessage): void {
+		const payload = (message.payload ?? {}) as {
+			requestId?: string; id?: string; session?: string;
+		};
+		if (!payload.requestId) return;
+		const settle = this.pendingAttaches.get(payload.requestId);
+		if (!settle) return;
+		this.pendingAttaches.delete(payload.requestId);
+		if (message.kind === "attach-ack" && payload.id) {
+			settle({ id: payload.id, session: payload.session || payload.id });
+		} else {
+			settle(null);
+		}
+	}
+
+	/** Another agent asked this running session to become its teammate:
+	 *  this session owns the identity change. */
+	private handleAttachRequest(message: TeamMessage): void {
+		const payload = (message.payload ?? {}) as {
+			name?: string; requestId?: string;
+		};
+		if (this.role === "fork") {
+			void this.send(message.from, "attach-error", JSON.stringify({
+				requestId: payload.requestId,
+			}));
+			return;
+		}
+		void this.attachTo(message.from, payload.name)
+			.then((ref) => {
+				this.deliver({
+					from: message.from, to: ref.id, kind: "text",
+					payload: `You are now a teammate of ${message.from}. ` +
+						`Report results by running: ${this.reportCommand()}`,
+				});
+				return this.send(message.from, "attach-ack",
+					JSON.stringify({
+						requestId: payload.requestId, id: ref.id,
+						session: ref.session,
+					}));
+			})
+			.catch(() => this.send(message.from, "attach-error",
+				JSON.stringify({ requestId: payload.requestId })));
+	}
+
 	async terminate(agentId: string): Promise<void> {
 		await this.runner.run(
 			this.python,
@@ -1040,15 +1176,22 @@ export class TeamAgent {
 		// `team` name on PATH: a shebang script is not executable on
 		// Windows, and binDir may not be on PATH. The teammate runs this
 		// through its shell tool, where the $TEAM_* variables expand.
-		const send =
-			`"${this.python}" "${teamBin}" --root "$TEAM_ROOT" ` +
-			`send "$TEAM_PARENT_ID" result "<report>"`;
+		const send = this.reportCommand();
 		return (
 			`You are "${session}", a teammate spawned by a parent pi session ` +
 			`to do one task. Do the task, then report the outcome to your ` +
 			`parent by running this command:\n  ${send}\n` +
 			`Do not write memory. Task:\n${task}`
 		);
+	}
+
+	/** The teammate report-back command, run through the interpreter on
+	 *  the absolute client path (a shebang script is not executable on
+	 *  Windows, and binDir may not be on PATH). Shared by the spawn
+	 *  prompt and an attached teammate. */
+	private reportCommand(): string {
+		return `"${this.python}" "${teamBin}" --root "$TEAM_ROOT" ` +
+			`send "$TEAM_PARENT_ID" result "<report>"`;
 	}
 
 	private launchTeammate(
@@ -1470,6 +1613,44 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
+	// -- agent-facing teammate attach ------------------------------------
+	// Turns an existing live agent into a teammate without spawning a new
+	// session: it re-registers under a fork id of this agent.
+	pi.registerTool({
+		name: "team_attach",
+		label: "attach a teammate",
+		description:
+			"Attach an existing live pi agent (by id) as this agent's " +
+			"teammate. The target re-registers as a fork of this agent, so " +
+			"team_wait can block for its reports and the broker reaps it " +
+			"when this agent goes away. Use team_spawn to create a new " +
+			"teammate instead.",
+		parameters: Type.Object({
+			target: Type.String({
+				description: "Agent id to attach, from /team ls or team_wait",
+			}),
+			name: Type.Optional(Type.String({
+				description: "Teammate name; defaults to the target's id",
+			})),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const ref = await app.attachRemote(
+				params.target, params.name || "");
+			if (!ref) {
+				throw new Error(`could not attach ${params.target}`);
+			}
+			return {
+				content: [{
+					type: "text",
+					text: `attached ${params.target} as teammate ` +
+						`${ref.id}; call team_wait with id "${ref.id}" to ` +
+						`block for its report.`,
+				}],
+				details: ref,
+			};
+		},
+	});
+
 	// -- agent-facing teammate wait --------------------------------------
 	// Blocks until the teammate reports, so the parent needs neither to
 	// poll nor to end its turn. The wait publishes the agent as idle (a
@@ -1632,7 +1813,8 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.registerCommand("team", {
 		description:
-			"pi-teams: ls|status|send <id> [kind] <text>|kill <id>",
+			"pi-teams: ls|status|send <id> [kind] <text>|attach <parent>" +
+			" [name]|detach|kill <id>",
 		handler: async (args, ctx) => {
 			const parts = (args || "").trim().split(/\s+/).filter(Boolean);
 			const sub = parts.shift() || "status";
@@ -1663,6 +1845,23 @@ export default async function (pi: ExtensionAPI) {
 				ctx.ui.notify(`pi-teams: ${reply}`, "info");
 				return;
 			}
+			if (sub === "attach") {
+				const m = /^(\S+)(?:\s+(\S+))?$/.exec(rest);
+				if (!m || !m[1]) {
+					ctx.ui.notify("usage: /team attach <parent> [name]",
+						"warning");
+					return;
+				}
+				const ref = await app.attachTo(m[1], m[2] || "");
+				ctx.ui.notify(
+					`pi-teams: attached as teammate ${ref.id}`, "info");
+				return;
+			}
+			if (sub === "detach") {
+				const id = app.detach();
+				ctx.ui.notify(`pi-teams: detached; now ${id}`, "info");
+				return;
+			}
 			if (sub === "kill") {
 				const target = rest.trim();
 				if (!target) {
@@ -1675,7 +1874,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			ctx.ui.notify(
 				"pi-teams: subcommands: ls | status | send <id> [kind] " +
-				"<text> | kill <id>",
+					"<text> | attach <parent> [name] | detach | kill <id>",
 				"warning",
 			);
 		},
