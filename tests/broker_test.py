@@ -12,7 +12,7 @@ import unittest
 
 from harness import make_root, wait_endpoint, wait_until
 from team import TeamClient
-from teamd import PeerLink, TeamBroker
+from teamd import TEAMMATE_MARKER, PeerLink, TeamBroker
 
 IDLE_ROOMY = 30.0
 
@@ -20,8 +20,13 @@ IDLE_ROOMY = 30.0
 class BrokerProtocolTests(unittest.TestCase):
     def setUp(self):
         self.root = make_root()
+        self.sessions_root = os.path.join(self.root, "sessions")
+        os.makedirs(self.sessions_root, exist_ok=True)
         self.broker = TeamBroker(self.root, idle_timeout=IDLE_ROOMY,
-                                 sweep_interval=0.2, busy_grace=0.3)
+                                 sweep_interval=0.2, busy_grace=0.3,
+                                 sessions_root=self.sessions_root,
+                                 session_grace=0.3)
+        self.broker._session_sweep_interval = 0.2
         self.thread = threading.Thread(target=self.broker.run, daemon=True)
         self.thread.start()
         wait_endpoint(self.root)
@@ -59,6 +64,73 @@ class BrokerProtocolTests(unittest.TestCase):
         reply = client.register()
         self.assertIn(reply.get("op"), ("ack", "error"), reply)
         return client
+
+    def _write_session(self, path, marker=True):
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "session", "id": path,
+                                 "cwd": self.root}) + "\n")
+            if marker:
+                fh.write(json.dumps({"type": "message", "role": "user",
+                                     "content": TEAMMATE_MARKER}) + "\n")
+
+    def test_fork_session_removed_on_deregister(self):
+        path = os.path.join(self.sessions_root, "fork-a.jsonl")
+        self._write_session(path, marker=True)
+        client = TeamClient(self.root)
+        client.id = "beta:fork-a"
+        client.role = "fork"
+        client.parent = "checker"
+        client.session = path
+        client.register()
+        client.deregister()
+        self.assertFalse(os.path.exists(path))
+
+    def test_main_session_file_is_not_removed(self):
+        path = os.path.join(self.sessions_root, "main-a.jsonl")
+        self._write_session(path, marker=True)
+        client = TeamClient(self.root)
+        client.id = "alpha:main-a"
+        client.role = "main"
+        client.session = path
+        client.register()
+        client.deregister()
+        self.assertTrue(os.path.exists(path),
+                        "a main agent's session file must never be removed")
+
+    def test_orphan_teammate_session_is_swept(self):
+        path = os.path.join(self.sessions_root, "orphan.jsonl")
+        self._write_session(path, marker=True)
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        self.assertTrue(
+            wait_until(lambda: not os.path.exists(path)),
+            "old teammate session file was not swept",
+        )
+
+    def test_non_teammate_session_is_kept(self):
+        path = os.path.join(self.sessions_root, "plain.jsonl")
+        self._write_session(path, marker=False)
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        time.sleep(0.6)
+        self.assertTrue(os.path.exists(path),
+                        "a non-teammate session file must not be swept")
+
+    def test_live_fork_session_survives_sweep(self):
+        path = os.path.join(self.sessions_root, "live-fork.jsonl")
+        self._write_session(path, marker=True)
+        client = TeamClient(self.root)
+        client.id = "beta:live-fork"
+        client.role = "fork"
+        client.parent = "checker"
+        client.session = path
+        client.register()
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        time.sleep(0.6)
+        self.assertTrue(os.path.exists(path),
+                        "a live fork's session file must not be swept")
+        client.deregister()
 
     def test_deregister_removes_busy_file(self):
         path = os.path.join(self.root, "busy-a.busy")

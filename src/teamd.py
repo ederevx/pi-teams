@@ -44,6 +44,9 @@ REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"
 PEERS_NAME = "peers.json"
 BUSY_SUFFIX = ".busy"
+# The extension's spawn prompt marks a forked teammate session; the broker
+# uses it to tell teammate sessions apart from a user's own sessions.
+TEAMMATE_MARKER = "a teammate spawned by a parent pi session"
 
 
 class TeamRoot:
@@ -192,7 +195,8 @@ class TeamBroker:
     """Registry + relay for connected agents on one loopback endpoint."""
 
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
-                 fork_idle=None, busy_grace=None, host=None):
+                 fork_idle=None, busy_grace=None, sessions_root=None,
+                 session_grace=None, host=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
@@ -216,6 +220,24 @@ class TeamBroker:
             busy_grace if busy_grace is not None
             else os.environ.get("PI_TEAMS_BUSY_GRACE", "120")
         )
+        # A teammate's pi session file is removed when the fork is reaped,
+        # and any teammate-marked session file whose agent is not live and
+        # whose mtime is older than this grace is swept. This keeps old
+        # forks out of pi's /resume list.
+        agent_dir = os.environ.get("PI_CODING_AGENT_DIR") or os.path.join(
+            os.path.expanduser("~"), ".pi", "agent")
+        self.sessions_root = pathlib.Path(
+            sessions_root or os.environ.get("PI_TEAMS_SESSIONS_ROOT")
+            or os.path.join(agent_dir, "sessions")
+        )
+        self.session_grace = float(
+            session_grace if session_grace is not None
+            else os.environ.get("PI_TEAMS_SESSION_GRACE", "3600")
+        )
+        self._session_sweep_interval = float(
+            os.environ.get("PI_TEAMS_SESSION_SWEEP_INTERVAL", "300")
+        )
+        self._last_session_sweep = 0.0
         self.token = secrets.token_hex(16)
         self._registry = {}
         self._clients = {}
@@ -506,6 +528,7 @@ class TeamBroker:
             entry = self._registry.pop(agent_id, None)
             self._clients.pop(agent_id, None)
         self._remove_busy_file(entry)
+        self._remove_session_file(entry)
         self._persist_and_notify()
 
     def _drop_conn(self, agent_id):
@@ -575,6 +598,7 @@ class TeamBroker:
             except OSError:
                 pass
         self._remove_busy_file(entry)
+        self._remove_session_file(entry)
         self._kill_owner(entry or {}, why)
 
     def _terminate(self, agent_id, why):
@@ -617,6 +641,10 @@ class TeamBroker:
     def _sweep(self):
         self._expire_peer_relays()
         self._gc_orphan_busy_files(time.time())
+        now = time.time()
+        if now - self._last_session_sweep >= self._session_sweep_interval:
+            self._last_session_sweep = now
+            self._gc_orphan_session_files(now)
         doomed_fork, doomed_idle = self._classify(time.time())
         if not doomed_fork and not doomed_idle:
             return
@@ -667,6 +695,7 @@ class TeamBroker:
             except OSError:
                 pass
         self._remove_busy_file(entry)
+        self._remove_session_file(entry)
 
     # -- busy-file GC ------------------------------------------------
 
@@ -700,6 +729,63 @@ class TeamBroker:
         path = (entry or {}).get("busy_file")
         if path:
             self._unlink_under_root(path)
+
+    def _gc_orphan_session_files(self, now):
+        # Every teammate is a pi session that shows up in /resume. Remove
+        # teammate-marked session files whose agent is not live and whose
+        # mtime is older than the grace. A user's own session is never
+        # marked, and a live fork's file is skipped regardless of mtime.
+        try:
+            files = list(self.sessions_root.glob("**/*.jsonl"))
+        except OSError:
+            return
+        with self._lock:
+            live = {
+                str(pathlib.Path(entry["session"]).resolve())
+                for entry in self._registry.values()
+                if entry.get("session")
+            }
+        for path in files:
+            try:
+                if str(path.resolve()) in live:
+                    continue
+                if path.stat().st_mtime > now - self.session_grace:
+                    continue
+            except OSError:
+                continue
+            if self._is_teammate_session(path):
+                self._unlink_session(str(path))
+
+    def _remove_session_file(self, entry):
+        if (entry or {}).get("role") != "fork":
+            return
+        path = (entry or {}).get("session")
+        if path:
+            self._unlink_session(path)
+
+    def _is_teammate_session(self, path):
+        # The marker sits in the first user turn; scan only the head so a
+        # large transcript is never fully read during a sweep.
+        try:
+            with open(path) as fh:
+                for index, line in enumerate(fh):
+                    if TEAMMATE_MARKER in line:
+                        return True
+                    if index >= 50:
+                        break
+        except OSError:
+            return False
+        return False
+
+    def _unlink_session(self, path):
+        try:
+            target = pathlib.Path(path).resolve()
+            root = self.sessions_root.resolve()
+            if root != target.parent and root not in target.parents:
+                return
+            target.unlink()
+        except OSError:
+            pass
 
     def _unlink_under_root(self, path):
         # Guard the delete to the broker's own root so a malformed or
