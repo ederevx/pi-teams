@@ -125,7 +125,9 @@ and messages cross both ways.
   back. Local `/team send`, `team_wait`, and reports are unchanged.
 - **Lifetime**: a teammate spawned for a remote parent is kept alive
   until the peer link drops, then reaped on its own host by
-  connection-based GC. Pid signalling never crosses hosts.
+  connection-based GC. Removing a peer closes its ssh tunnel, and a
+  tunnel that dies on its own prunes the broker's link instead of
+  pointing at a dead port. Pid signalling never crosses hosts.
 
 Usage: on host A run `team_peer add B`, then `team_spawn` with
 `host="B"` and `team_wait(id)`. `team_peer remove B` unlinks. The peer
@@ -147,14 +149,16 @@ That chains, in order:
   trailing whitespace or tabs, balanced fences, required sections.
 - **OOP lint** (`tests/oop_lint.py`): no module-level mutable state, no
   `global`, no bare `except`, no `var` in the extension.
-- **Extension tests** (`tests/extension_test.mjs`): the hold owns a
-  stdin pipe and forwards identity and inbound messages, sent/received
-  log entries are recorded, `spawnTask` builds the teammate template
-  from a task alone, resolves pi from the running runtime, refuses an
-  inherit request without a parent session, and no custom spawn path
-  exists; `team_wait` resolves one or several awaited results without a
-  second delivery and on timeout, abort, or shutdown; the broker starts
-  detached only when absent.
+- **Extension tests** (`tests/extension_test.mjs`): every child launch
+  goes through ProcessRunner with `windowsHide` set, `spawnTask` builds
+  the teammate template from a task alone, resolves pi from the running
+  runtime, refuses an inherit request without a parent session, and no
+  custom spawn path exists; `SshPeerBridge` reads the endpoint, opens
+  the tunnel, and reaps it on close; a failed peer-add closes its
+  tunnel and a tunnel exit prunes the broker link; `team_wait` resolves
+  one or several awaited results without a second delivery and on
+  timeout, abort, or shutdown; the broker starts detached only when
+  absent.
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
   delivery, undeliverable reports, deregistration, connection-close

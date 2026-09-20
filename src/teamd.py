@@ -1029,6 +1029,10 @@ class TeamBroker:
     def _load_peers(self):
         for host, endpoint in self.root.read_peers().items():
             self.link_peer(host, endpoint, persist=False)
+        # Garbage-collect persisted peers that no longer open: their
+        # loopback tunnel is owned by an extension, so an entry that
+        # cannot reconnect is dead weight, not a peer to retry forever.
+        self._persist_peers()
 
     def _persist_peers(self):
         with self._lock:
