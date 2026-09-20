@@ -218,8 +218,9 @@ test("spawn detaches the teammate with fork identity in the environment", () => 
 	try {
 		const { agent, calls } = makeAgent();
 		agent.rememberSession(join(sessionDir, "sess.jsonl"));
-		const sessionName = agent.spawn("worker", ["--model", "x", "-p", "hi"]);
-		assert.equal(sessionName, "worker");
+		const ref = agent.spawn("worker", ["--model", "x", "-p", "hi"]);
+		assert.equal(ref.session, "worker");
+		assert.ok(ref.id.startsWith("fork-"));
 		assert.equal(calls.length, 1);
 		const call = calls[0];
 		assert.equal(call.file, "pi-test");
@@ -238,6 +239,35 @@ test("spawn detaches the teammate with fork identity in the environment", () => 
 		assert.equal(call.options.env.TEAM_SESSION, undefined);
 		assert.equal(call.options.env.PI_SESSION_FILE, undefined);
 		assert.equal(call.unrefed, true);
+	} finally {
+		delete process.env.PI_TEAMS_PI;
+	}
+});
+
+test("spawnTask builds the teammate template from a task alone", () => {
+	publishEndpoint(true);
+	process.env.PI_TEAMS_PI = "pi-test";
+	try {
+		const { agent, calls } = makeAgent();
+		agent.rememberSession(join(sessionDir, "sess.jsonl"));
+		const ref = agent.spawnTask("worker", "summarize the diff", {
+			provider: "openrouter", model: "m", thinking: "low",
+		});
+		assert.equal(ref.session, "worker");
+		assert.ok(ref.id.startsWith("fork-"));
+		const call = calls[0];
+		assert.deepEqual(call.args.slice(0, 4), [
+			"--session-dir", sessionDir, "--name", "worker",
+		]);
+		assert.ok(call.args.includes("--provider"));
+		assert.ok(call.args.includes("--model"));
+		assert.ok(call.args.includes("--thinking"));
+		const prompt = call.args[call.args.indexOf("-p") + 1];
+		assert.match(prompt, /summarize the diff/);
+		assert.match(prompt, /TEAM_PARENT_ID/);
+		assert.match(prompt, /TEAM_ROOT/);
+		assert.equal(call.options.env.TEAM_ROOT, stateRoot);
+		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
 	} finally {
 		delete process.env.PI_TEAMS_PI;
 	}
