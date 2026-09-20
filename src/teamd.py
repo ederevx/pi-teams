@@ -42,6 +42,7 @@ DEFAULT_ROOT = os.path.join(os.path.expanduser("~"), ".local", "state", "pi-team
 ENDPOINT_NAME = "endpoint"
 REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"
+PEERS_NAME = "peers.json"
 
 
 class TeamRoot:
@@ -52,6 +53,7 @@ class TeamRoot:
         self.endpoint = self.base / ENDPOINT_NAME
         self.registry = self.base / REGISTRY_NAME
         self.pidfile = self.base / PID_NAME
+        self.peersfile = self.base / PEERS_NAME
 
     def ensure(self):
         self.base.mkdir(parents=True, exist_ok=True)
@@ -88,15 +90,111 @@ class TeamRoot:
         except (OSError, ValueError):
             return {}
 
+    def read_peers(self):
+        try:
+            data = json.loads(self.peersfile.read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def write_peers(self, peers):
+        self.write_atomic(PEERS_NAME, json.dumps(peers, indent=2) + "\n")
+
+
+class PeerLink:
+    """One broker's authenticated, bidirectional link to a peer broker.
+
+    Either side may open it: the initiator connects and starts a read
+    loop; the acceptor wraps the accepted socket and lets the caller's
+    connection loop feed it. Both directions carry peer-relay traffic
+    and peer-registry snapshots over a single stream.
+    """
+
+    def __init__(self, owner, host, endpoint=None, conn=None):
+        self.owner = owner
+        self.host = host
+        self.endpoint = endpoint or {}
+        self.conn = conn
+        self.connected = conn is not None
+        self._buf = b""
+
+    def open(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2.0)
+        sock.connect((self.endpoint["host"], self.endpoint["port"]))
+        sock.settimeout(0.5)
+        self.conn = sock
+        self.connected = True
+        self.send({"op": "hello", "token": self.endpoint.get("token") or ""})
+        self.send({"op": "peer", "host": self.owner.host})
+        threading.Thread(target=self._read_loop, daemon=True).start()
+        return True
+
+    def send(self, obj):
+        if not self.connected or self.conn is None:
+            return False
+        try:
+            self.conn.sendall(
+                (json.dumps(obj, separators=(",", ":")) + "\n").encode()
+            )
+            return True
+        except OSError:
+            self.drop()
+            return False
+
+    def _read_loop(self):
+        try:
+            while self.connected and self.conn is not None:
+                try:
+                    chunk = self.conn.recv(65536)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                self._buf += chunk
+                while b"\n" in self._buf:
+                    line, self._buf = self._buf.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line.decode("utf-8"))
+                    except ValueError:
+                        continue
+                    self.owner._peer_message(self, msg)
+        finally:
+            self.drop()
+
+    def feed(self, msg):
+        # Acceptor path: the broker's own loop already framed the message.
+        self.owner._peer_message(self, msg)
+
+    def drop(self):
+        if not self.connected and self.conn is None:
+            return
+        self.connected = False
+        conn, self.conn = self.conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        self.owner._peer_down(self)
+
 
 class TeamBroker:
     """Registry + relay for connected agents on one loopback endpoint."""
 
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
-                 fork_idle=None):
+                 fork_idle=None, host=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
+        # Globally unique ids need a per-host label; peers route by the
+        # host prefix of a target id.
+        self.host = host or os.environ.get("PI_TEAMS_HOST") \
+            or socket.gethostname().split(".")[0]
         # A spawned teammate (role "fork") with no work contact for this
         # long is garbage-collected: its connection is closed, its
         # owner process is signalled, and its entry is dropped. Owned by
@@ -108,6 +206,10 @@ class TeamBroker:
         self.token = secrets.token_hex(16)
         self._registry = {}
         self._clients = {}
+        self._peers = {}
+        self._peers_by_conn = {}
+        self._remote = {}
+        self._peer_pending = {}
         self._lock = threading.RLock()
         self._running = False
         self._server = None
@@ -172,7 +274,8 @@ class TeamBroker:
         self.root.write_atomic(
             ENDPOINT_NAME,
             json.dumps(
-                {"host": "127.0.0.1", "port": port, "token": self.token},
+                {"host": "127.0.0.1", "port": port,
+                 "token": self.token, "name": self.host},
                 indent=2,
             )
             + "\n",
@@ -180,6 +283,7 @@ class TeamBroker:
         )
         self.root.write_atomic(PID_NAME, "%d\n" % os.getpid())
         threading.Thread(target=self._sweep_loop, daemon=True).start()
+        self._load_peers()
         try:
             while self._running:
                 try:
@@ -198,6 +302,15 @@ class TeamBroker:
 
     def stop(self):
         self._running = False
+        # Close peer links here as well as in _close_all: closing the
+        # listening socket does not reliably wake a blocked accept(), so
+        # the serve loop's finally may not run promptly. Dropping the
+        # link now sends the peer an EOF and drives connection-based GC.
+        with self._lock:
+            peers = list(self._peers.values())
+        for peer in peers:
+            peer.endpoint = {}
+            peer.drop()
         try:
             self._server.close()
         except OSError:
@@ -222,6 +335,10 @@ class TeamBroker:
                     if agent_id is None and not self._running:
                         return
         finally:
+            with self._lock:
+                peer = self._peers_by_conn.pop(conn, None)
+            if peer is not None:
+                peer.drop()
             self._drop_conn(agent_id)
 
     def _messages(self, conn):
@@ -269,7 +386,24 @@ class TeamBroker:
                             exclude=agent_id)
             self._touch(agent_id, work=True)
         elif op == "ls":
-            self._reply(conn, op="registry", agents=self._snapshot())
+            self._reply(conn, op="registry", agents=self._snapshot_all())
+        elif op == "peer":
+            self._accept_peer(conn, str(msg.get("host") or ""))
+            self._reply(conn, op="ack")
+        elif op in ("peer-registry", "peer-relay", "peer-ack"):
+            peer = self._peer_for(conn)
+            if peer is not None:
+                peer.feed(msg)
+        elif op == "peer-add":
+            ok = self.link_peer(str(msg.get("host") or ""),
+                               msg.get("endpoint") or {})
+            if ok:
+                self._reply(conn, op="ack")
+            else:
+                self._reply(conn, op="error", error="peer-unreachable")
+        elif op == "peer-remove":
+            self._remove_peer(str(msg.get("host") or ""))
+            self._reply(conn, op="ack")
         elif op == "ping":
             # A plain ping is the endpoint shim's keepalive; a busy ping
             # marks the agent as actively working and keeps the fork's
@@ -305,6 +439,7 @@ class TeamBroker:
             "cwd": str(msg.get("cwd") or os.getcwd()),
             "session": msg.get("session") or None,
             "owner_pid": msg.get("owner_pid") or None,
+            "origin": self.host,
             "since_ts": time.time(),
             "last_seen": time.time(),
             "last_work": time.time(),
@@ -329,8 +464,12 @@ class TeamBroker:
             data = json.dumps(
                 {"ts": time.time(), "agents": self._registry}, indent=2
             )
+            peers = list(self._peers.values())
         self.root.write_atomic(REGISTRY_NAME, data + "\n")
-        self._broadcast("registry-change", self._snapshot())
+        agents = self._snapshot()
+        self._broadcast("registry-change", agents)
+        for peer in peers:
+            peer.send({"op": "peer-registry", "agents": agents})
 
     def _touch(self, agent_id, work=False, waiting=None):
         now = time.time()
@@ -367,20 +506,35 @@ class TeamBroker:
         target = msg.get("to")
         with self._lock:
             conn = self._clients.get(target)
-        if conn is None:
-            self._reply(sender_conn, op="error", error="undeliverable",
-                        target=target)
+        if conn is not None:
+            self._write(conn, {
+                "op": "message",
+                "from": msg.get("from") or sender_id,
+                "to": target,
+                "kind": str(msg.get("kind") or "text"),
+                "payload": msg.get("payload"),
+                "ts": msg.get("ts") or time.time(),
+            })
+            self._reply(sender_conn, op="ack")
             return
-        envelope = {
-            "op": "message",
-            "from": msg.get("from") or sender_id,
-            "to": target,
-            "kind": str(msg.get("kind") or "text"),
-            "payload": msg.get("payload"),
-            "ts": msg.get("ts") or time.time(),
-        }
-        self._write(conn, envelope)
-        self._reply(sender_conn, op="ack")
+        peer = self._peers.get(self._parent_host(target))
+        if peer is not None and peer.connected:
+            rid = secrets.token_hex(8)
+            with self._lock:
+                self._peer_pending[rid] = sender_conn
+            sent = peer.send({
+                "op": "peer-relay", "id": rid, "to": target,
+                "from": msg.get("from") or sender_id,
+                "kind": str(msg.get("kind") or "text"),
+                "payload": msg.get("payload"),
+                "ts": msg.get("ts") or time.time(),
+            })
+            if sent:
+                return
+            with self._lock:
+                self._peer_pending.pop(rid, None)
+        self._reply(sender_conn, op="error", error="undeliverable",
+                    target=target)
 
     def _evict(self, agent_id, why):
         # Drop an agent's endpoint and entry, tell its connection why, and
@@ -455,7 +609,7 @@ class TeamBroker:
         with self._lock:
             for agent_id, entry in list(self._registry.items()):
                 parent = entry.get("parent")
-                parent_gone = bool(parent) and parent not in self._registry
+                parent_gone = self._parent_gone(parent)
                 is_fork = entry.get("role") == "fork"
                 work_idle = (
                     is_fork and self.fork_idle > 0
@@ -482,6 +636,155 @@ class TeamBroker:
             self._clients.pop(agent_id, None)
             self._registry.pop(agent_id, None)
 
+    # -- peer federation ---------------------------------------------
+
+    def _parent_host(self, agent_id):
+        # The host prefix on an agent id, or our own host for a bare local
+        # id. Routing and cross-host parentage both use this.
+        if isinstance(agent_id, str) and ":" in agent_id:
+            return agent_id.split(":", 1)[0]
+        return self.host
+
+    def _parent_gone(self, parent):
+        # A parent is gone when it is neither a live local entry nor a
+        # connected peer's agent. A peer parent keeps its forks alive
+        # until that peer link drops (connection-based cross-host GC).
+        if not parent:
+            return False
+        if parent in self._registry:
+            return False
+        host = self._parent_host(parent)
+        if host != self.host:
+            return host not in self._peers
+        return True
+
+    def _snapshot_all(self):
+        agents = self._snapshot()
+        with self._lock:
+            remote = list(self._remote.items())
+        for host, entries in remote:
+            for entry in entries:
+                agents.append(dict(entry, online=False, remote=True))
+        return agents
+
+    def _peer_for(self, conn):
+        with self._lock:
+            return self._peers_by_conn.get(conn)
+
+    def _accept_peer(self, conn, host):
+        if not host or host == self.host:
+            return
+        peer = PeerLink(self, host, conn=conn)
+        with self._lock:
+            old = self._peers.get(host)
+            self._peers[host] = peer
+            self._peers_by_conn[conn] = peer
+        if old is not None and old is not peer and old.connected:
+            old.drop()
+        peer.send({"op": "peer-registry", "agents": self._snapshot()})
+
+    def link_peer(self, host, endpoint, persist=True):
+        if not host or host == self.host or not endpoint:
+            return False
+        with self._lock:
+            existing = self._peers.get(host)
+        if existing is not None and existing.connected:
+            return True
+        peer = PeerLink(self, host, endpoint=endpoint)
+        with self._lock:
+            self._peers[host] = peer
+        try:
+            peer.open()
+        except OSError:
+            with self._lock:
+                self._peers.pop(host, None)
+            return False
+        peer.send({"op": "peer-registry", "agents": self._snapshot()})
+        if persist:
+            self._persist_peers()
+        return True
+
+    def _remove_peer(self, host):
+        with self._lock:
+            peer = self._peers.pop(host, None)
+            self._remote.pop(host, None)
+        if peer is not None:
+            peer.endpoint = {}
+            peer.drop()
+        self._persist_peers()
+
+    def _peer_message(self, peer, msg):
+        op = msg.get("op")
+        if op == "peer-registry":
+            with self._lock:
+                self._remote[peer.host] = msg.get("agents") or []
+        elif op == "peer-relay":
+            self._deliver_peer(peer, msg)
+        elif op == "peer-ack":
+            self._finish_peer_relay(msg)
+
+    def _deliver_peer(self, peer, msg):
+        target = msg.get("to")
+        with self._lock:
+            conn = self._clients.get(target)
+        if conn is not None:
+            self._write(conn, {
+                "op": "message",
+                "from": msg.get("from") or peer.host,
+                "to": target,
+                "kind": str(msg.get("kind") or "text"),
+                "payload": msg.get("payload"),
+                "ts": msg.get("ts") or time.time(),
+            })
+        peer.send({"op": "peer-ack", "id": msg.get("id"),
+                   "ok": conn is not None})
+
+    def _finish_peer_relay(self, msg):
+        with self._lock:
+            sender = self._peer_pending.pop(msg.get("id"), None)
+        if sender is None:
+            return
+        if msg.get("ok"):
+            self._reply(sender, op="ack")
+        else:
+            self._reply(sender, op="error", error="undeliverable")
+
+    def _peer_down(self, peer):
+        with self._lock:
+            if self._peers.get(peer.host) is peer:
+                self._peers.pop(peer.host, None)
+            for conn, other in list(self._peers_by_conn.items()):
+                if other is peer:
+                    self._peers_by_conn.pop(conn, None)
+            self._remote.pop(peer.host, None)
+        self._reap_peer(peer.host)
+
+    def _reap_peer(self, host):
+        doomed = []
+        with self._lock:
+            for agent_id, entry in list(self._registry.items()):
+                if entry.get("role") != "fork":
+                    continue
+                if self._parent_host(entry.get("parent")) == host:
+                    doomed.append(agent_id)
+        for agent_id in doomed:
+            self._evict(agent_id, "parent-gone")
+        if doomed:
+            self._persist_and_notify()
+
+    def _load_peers(self):
+        for host, endpoint in self.root.read_peers().items():
+            self.link_peer(host, endpoint, persist=False)
+
+    def _persist_peers(self):
+        with self._lock:
+            endpoints = {
+                host: peer.endpoint
+                for host, peer in self._peers.items()
+                if peer.endpoint
+            }
+        self.root.write_peers(endpoints)
+
     # -- low-level writes -------------------------------------------
 
     def _reply(self, conn, **fields):
@@ -499,11 +802,16 @@ class TeamBroker:
         with self._lock:
             conns = list(self._clients.values())
             self._clients.clear()
+            peers = list(self._peers.values())
+            self._peers.clear()
+            self._peers_by_conn.clear()
         for conn in conns:
             try:
                 conn.close()
             except OSError:
                 pass
+        for peer in peers:
+            peer.drop()
 
 
 def _shutdown_via_endpoint(root):
@@ -530,6 +838,7 @@ def main(argv=None):
         prog="teamd", description="pi-teams broker"
     )
     parser.add_argument("--root", default=DEFAULT_ROOT)
+    parser.add_argument("--host", default=None)
     parser.add_argument("--idle-timeout", type=float, default=15.0)
     parser.add_argument("--fork-idle", type=float, default=None)
     parser.add_argument("--sweep-interval", type=float, default=1.0)
@@ -542,7 +851,7 @@ def main(argv=None):
         return 0
     TeamBroker(args.root, idle_timeout=args.idle_timeout,
                sweep_interval=args.sweep_interval,
-               fork_idle=args.fork_idle).run()
+               fork_idle=args.fork_idle, host=args.host).run()
     return 0
 
 
