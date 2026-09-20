@@ -30,7 +30,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -223,7 +223,7 @@ export class TeamAgent {
 		const name = process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`;
 		const role = process.env.TEAM_ID ? "fork" : "main";
 		const parent = process.env.TEAM_PARENT_ID || "";
-		const busyFile = join(stateRoot, `${this.id}.busy`);
+		const busyFile = this.busyFile();
 		const env = this.holdEnv(name, role, parent, busyFile);
 		// The client exits on stdin EOF, so the pipe must be owned by
 		// this process: closing it (when pi goes away) drops the
@@ -336,10 +336,17 @@ export class TeamAgent {
 	setState(state: "busy" | "idle" | "waiting"): void {
 		const value = state === "busy" ? "1" : state === "waiting" ? "2" : "0";
 		try {
-			writeFileSync(join(stateRoot, `${this.id}.busy`), value);
+			writeFileSync(this.busyFile(), value);
 		} catch {
 			// best effort: without the flag the fork is GC'd like an idle one
 		}
+	}
+
+	/** This agent's state file. The id carries a host label, whose colon
+	 *  is illegal in a Windows filename, so the id is sanitized. */
+	private busyFile(): string {
+		const safe = this.id.replace(/[^A-Za-z0-9._-]/g, "-");
+		return join(stateRoot, `${safe}.busy`);
 	}
 
 	async snapshot(): Promise<AgentInfo[]> {
@@ -699,6 +706,8 @@ export class TeamAgent {
 		}
 		this.waiters.clear();
 		this.recentResults.clear();
+		for (const settle of [...this.pendingSpawns.values()]) settle(null);
+		this.pendingSpawns.clear();
 	}
 
 	deregister(): void {
@@ -706,6 +715,17 @@ export class TeamAgent {
 		this.stopHold();
 		this.stopTeammates();
 		this.stopTunnels();
+		this.clearState();
+	}
+
+	/** Removes this agent's state file so stale busy flags do not
+	 *  accumulate in the team root across sessions. */
+	private clearState(): void {
+		try {
+			unlinkSync(this.busyFile());
+		} catch {
+			// no state file to remove
+		}
 	}
 
 	rememberSession(sessionFile?: string): void {
@@ -729,9 +749,10 @@ export class TeamAgent {
 			`## pi-teams teammates (broker: ${stateRoot})\n` +
 			`${lines.join("\n") || "- none live yet"}\n` +
 			`Spawn a teammate that lives in its own session: team_spawn ` +
-			`(task, name); block for its report with team_wait (id), or let ` +
-			`it arrive as a message; list: /team ls; send: ` +
-			`/team send <id> <kind> <text>.`;
+			`(task, name); block for one or more reports with team_wait ` +
+			`(ids), or let them arrive as messages. Peer hosts: team_peer ` +
+			`add <ssh-host>, then team_spawn host=<label>. list: ` +
+			`/team ls; send: /team send <id> <kind> <text>.`;
 		return { customType: "pi-teams", content, display: false };
 	}
 }

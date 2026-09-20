@@ -406,9 +406,16 @@ class BrokerProtocolTests(unittest.TestCase):
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import os, time; time.sleep(60)"])
         try:
+            caller = TeamClient(root_a, heartbeat=0.2)
+            caller.id = "alpha:caller"
+            caller.role = "main"
+            caller.register()
             endpoint_b = broker_b.root.read_endpoint()
             broker_a.link_peer("beta", endpoint_b)
             self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            self.assertTrue(wait_until(lambda: any(
+                a.get("id") == "alpha:caller"
+                for a in broker_b._remote.get("alpha", []))))
             fork = TeamClient(root_b, heartbeat=None)
             fork.id = "beta:fork-remote"
             fork.role = "fork"
@@ -445,8 +452,15 @@ class BrokerProtocolTests(unittest.TestCase):
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import os, time; time.sleep(60)"])
         try:
+            caller = TeamClient(root_a, heartbeat=0.2)
+            caller.id = "alpha:caller"
+            caller.role = "main"
+            caller.register()
             broker_a.link_peer("beta", broker_b.root.read_endpoint())
             self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            self.assertTrue(wait_until(lambda: any(
+                a.get("id") == "alpha:caller"
+                for a in broker_b._remote.get("alpha", []))))
             fork = TeamClient(root_b, heartbeat=None)
             fork.id = "beta:fork-keep"
             fork.role = "fork"
@@ -465,7 +479,8 @@ class BrokerProtocolTests(unittest.TestCase):
             probe = TeamClient(root_b, heartbeat=None)
             probe.id = "beta:probe"
             probe.register()
-            broker_b._peer_pending["rid-x"] = (probe._conn, "alpha")
+            broker_b._peer_pending["rid-x"] = (
+                probe._conn, broker_b._peers["alpha"])
             broker_a.stop()
             thread_a.join(timeout=3)
             self.assertTrue(wait_until(
@@ -476,6 +491,54 @@ class BrokerProtocolTests(unittest.TestCase):
                 "remote fork not reaped on peer down")
         finally:
             broker_b.stop()
+            thread_b.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_remote_fork_reaped_when_parent_disconnects(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"])
+        try:
+            caller = TeamClient(root_a, heartbeat=0.2)
+            caller.id = "alpha:caller"
+            caller.role = "main"
+            caller.register()
+            broker_a.link_peer("beta", broker_b.root.read_endpoint())
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            self.assertTrue(wait_until(lambda: any(
+                a.get("id") == "alpha:caller"
+                for a in broker_b._remote.get("alpha", []))))
+            fork = TeamClient(root_b, heartbeat=None)
+            fork.id = "beta:fork-live"
+            fork.role = "fork"
+            fork.parent = "alpha:caller"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "fork reaped while its parent was live")
+            # The requesting agent's session ends: only its connection
+            # drops while the peer link stays up.
+            caller.close()
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=6),
+                "remote fork not reaped when its parent disconnected")
+            self.assertTrue(wait_until(
+                lambda: "beta:fork-live" not in self._ids_via(root_b)))
+            self.assertIn("alpha", broker_b._peers)
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
             thread_b.join(timeout=3)
             try:
                 dummy.kill()

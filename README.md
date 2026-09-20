@@ -140,7 +140,8 @@ That chains, in order:
   delivery, undeliverable reports, deregistration, connection-close
   drop, idle sweep, a waiting fork's exemption from fork idle GC, and
   two-broker federation (cross-host relay both ways, an undeliverable
-  remote target, and peer-down reaping of remote-parent forks).
+  remote target, and reaping of remote-parent forks when the parent
+  disconnects or its peer link drops).
 - **Fork lifecycle tests** (`tests/fork_test.py`): a fork stays alive
   while its parent stays connected and exits on its own when the
   parent's connection closes or an explicit terminate is issued; the
