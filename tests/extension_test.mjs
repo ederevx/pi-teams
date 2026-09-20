@@ -51,7 +51,8 @@ process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
 const { TeamAgent, ProcessRunner, SshPeerBridge, SshSetupGuide,
-	logTeamMessage } = await import("../extensions/pi-teams.ts");
+	WindowlessPython, windowlessCandidates, logTeamMessage } =
+	await import("../extensions/pi-teams.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -121,13 +122,22 @@ function makeRunner(run) {
 				detached: process.platform !== "win32",
 			});
 		},
+		spawnPersistent(file, args, options = {}) {
+			return spawnStub(calls, file, args, {
+				...options, windowsHide: true, detached: true,
+			});
+		},
 	};
 	return { calls, runner };
 }
 
 function makeAgent(deliver = () => {}) {
 	const { calls, runner } = makeRunner();
-	return { agent: new TeamAgent(runner, deliver), calls };
+	const windowless = (python) => new WindowlessPython(python, () => false);
+	return {
+		agent: new TeamAgent(runner, deliver, undefined, windowless),
+		calls,
+	};
 }
 
 function publishEndpoint(present) {
@@ -504,7 +514,7 @@ test("spawn starts a detached broker only when none is published", () => {
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0].file, process.env.PYTHON || "python3");
 	assert.deepEqual(calls[0].args, [join(binDir, "teamd"), "--root", stateRoot, "start"]);
-	assert.equal(calls[0].options.detached, process.platform !== "win32");
+	assert.equal(calls[0].options.detached, true);
 	assert.equal(calls[0].options.stdio, "ignore");
 	assert.equal(calls[0].options.windowsHide, true);
 	assert.equal(calls[0].unrefed, true);
@@ -629,6 +639,35 @@ test("ProcessRunner hides every child console", async () => {
 	assert.ok(detached);
 	assert.equal(calls[2].options.windowsHide, true);
 	assert.equal(calls[2].options.detached, process.platform !== "win32");
+	const persistent = runner.spawnPersistent("pythonw", ["w"]);
+	assert.ok(persistent);
+	assert.equal(calls[3].options.windowsHide, true);
+	assert.equal(calls[3].options.detached, true);
+});
+
+test("windowlessCandidates maps Python interpreters to GUI twins", () => {
+	assert.ok(windowlessCandidates("C:/py/python.exe")
+		.includes("C:/py/pythonw.exe"));
+	assert.ok(windowlessCandidates("python3").includes("pythonw3"));
+	assert.ok(windowlessCandidates("python").includes("pythonw"));
+	assert.ok(windowlessCandidates("py").includes("pyw"));
+});
+
+test("WindowlessPython resolves a probed twin only off Windows", () => {
+	const probes = [];
+	const resolver = new WindowlessPython("python3", (candidate) => {
+		probes.push(candidate);
+		return candidate === "pythonw3";
+	});
+	if (process.platform === "win32") {
+		assert.equal(resolver.resolve(), "pythonw3");
+		assert.deepEqual(probes, ["pythonw3"]);
+	} else {
+		assert.equal(resolver.resolve(), "python3");
+		assert.deepEqual(probes, []);
+	}
+	const none = new WindowlessPython("python3", () => false);
+	assert.equal(none.resolve(), "python3");
 });
 
 test("an SSH tunnel that dies on its own fires the exit callback", async () => {
