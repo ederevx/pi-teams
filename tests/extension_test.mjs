@@ -927,3 +927,32 @@ test("deregister resolves a pending attach instead of hanging it", async () => {
 	assert.equal(ref, null);
 });
 
+test("member-only operations refuse a non-team session", () => {
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	assert.equal(agent.isTeammate(), false);
+	assert.throws(() => agent.requireTeammate("team_send"), /team member/);
+	assert.throws(() => agent.requireTeammate("team_wait"), /team member/);
+});
+
+test("attaching makes a session a teammate that passes the gate", async () => {
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	agent.hold("/work");
+	assert.equal(agent.isTeammate(), false);
+	await agent.attachTo("parent-9", "helper");
+	assert.equal(agent.isTeammate(), true);
+	assert.doesNotThrow(() => agent.requireTeammate("team_send"));
+	agent.detach();
+	assert.equal(agent.isTeammate(), false);
+	agent.stopHold();
+});
+

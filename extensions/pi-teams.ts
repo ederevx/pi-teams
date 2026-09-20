@@ -1042,6 +1042,23 @@ export class TeamAgent {
 		return String(result.stdout).trim();
 	}
 
+	/** Whether this session is a team member: spawned as a teammate (role
+	 *  fork) or attached to one. Messaging and waiting are member-only
+	 *  operations. */
+	isTeammate(): boolean {
+		return this.role === "fork";
+	}
+
+	/** Gate for member-only agent operations; throws with the fix when
+	 *  this session is not a team member. Control traffic (acks, notices)
+	 *  uses the raw send path and is not gated. */
+	requireTeammate(action: string): void {
+		if (this.isTeammate()) return;
+		throw new Error(
+			`${action} requires being a team member; attach first with ` +
+			`team_attach or /team attach <parent>`);
+	}
+
 	/** Blocks until the awaited teammate (by id) sends a `result`, the
 	 *  bound elapses, or the signal aborts; resolves null in the latter
 	 *  two. A result that already arrived is returned at once. Several
@@ -1607,10 +1624,10 @@ export class TeamAgent {
 			`## pi-teams teammates (broker: ${stateRoot})\n` +
 			`${lines.join("\n") || "- none live yet"}\n` +
 			`Spawn a teammate that lives in its own session: team_spawn ` +
-			`(task, name); block for one or more reports with team_wait ` +
-			`(ids), or let them arrive as messages. Peer hosts: team_peer ` +
-			`add <ssh-host>, then team_spawn host=<label>. list: ` +
-			`/team ls; send: /team send <id> <kind> <text>.`;
+			`(task, name). Messaging and waiting require a team member: ` +
+			`attach first with team_attach or /team attach <parent>, then ` +
+			`team_send and team_wait work (peer hosts: team_peer add ` +
+			`<ssh-host>, then team_spawn host=<label>). list: /team ls.`;
 		return { customType: "pi-teams", content, display: false };
 	}
 }
@@ -1808,7 +1825,9 @@ export default async function (pi: ExtensionAPI) {
 		label: "wait for teammates",
 		description:
 			"Wait for one or more teammates to report, when you want to " +
-			"block. Pass the id or ids returned by team_spawn; returns each " +
+			"block. Requires this session to be a team member (attached or " +
+			"spawned); attach first with team_attach. Pass the id or ids " +
+			"returned by team_spawn; returns each " +
 			"report as the tool result once every teammate has reported or " +
 			"the wait bound elapses. While blocked the agent is idle. If you " +
 			"have other work, skip this: the teammate still reports as a " +
@@ -1833,6 +1852,7 @@ export default async function (pi: ExtensionAPI) {
 			})),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+			app.requireTeammate("team_wait");
 			const targetIds = (params.ids && params.ids.length > 0)
 				? params.ids
 				: params.id ? [params.id] : [];
@@ -1881,9 +1901,11 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_send",
 		label: "message an agent",
 		description:
-			"Send a pi-teams message to any live agent id, local or on a " +
-			"linked peer host. The broker relays it, so peer hosts work " +
-			"through the existing SSH tunnel. Returns the broker's ack.",
+			"Send a pi-teams message to a live agent id, local or on a " +
+			"linked peer host. Requires this session to be a team member " +
+			"(attached or spawned); attach first with team_attach. The " +
+			"broker relays it, so peer hosts work through the existing " +
+			"SSH tunnel. Returns the broker's ack.",
 		parameters: Type.Object({
 			to: Type.String({ description: "Target agent id" }),
 			text: Type.String({ description: "Message text" }),
@@ -1892,6 +1914,7 @@ export default async function (pi: ExtensionAPI) {
 			})),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			app.requireTeammate("team_send");
 			const reply = await app.send(
 				params.to, params.kind || "text", params.text);
 			return {
@@ -2038,6 +2061,12 @@ export default async function (pi: ExtensionAPI) {
 				const m = /^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]+))?$/.exec(rest);
 				if (!m || !m[1] || !m[3]) {
 					ctx.ui.notify("usage: /team send <id> [kind] <text>", "warning");
+					return;
+				}
+				if (!app.isTeammate()) {
+					ctx.ui.notify(
+						"pi-teams: /team send requires being a team member; " +
+						"attach first with /team attach <parent>", "warning");
 					return;
 				}
 				const kind = m[2] || "text";
