@@ -653,13 +653,13 @@ class TeamBroker:
             self._sweep()
 
     def _sweep(self):
-        self._expire_peer_relays()
-        self._gc_orphan_busy_files(time.time())
         now = time.time()
+        self._expire_peer_relays()
+        self._gc_orphan_busy_files(now)
         if now - self._last_session_sweep >= self._session_sweep_interval:
             self._last_session_sweep = now
             self._gc_orphan_session_files(now)
-        doomed_fork, doomed_idle = self._classify(time.time())
+        doomed_fork, doomed_idle = self._classify(now)
         if not doomed_fork and not doomed_idle:
             return
         for agent_id, why in doomed_fork:
@@ -737,12 +737,12 @@ class TeamBroker:
                     continue
             except OSError:
                 continue
-            self._unlink_under_root(str(path))
+            self._unlink_under(str(path), self.root.base)
 
     def _remove_busy_file(self, entry):
         path = (entry or {}).get("busy_file")
         if path:
-            self._unlink_under_root(path)
+            self._unlink_under(path, self.root.base)
 
     def _gc_orphan_session_files(self, now):
         # Every teammate is a pi session that shows up in /resume. Remove
@@ -768,14 +768,14 @@ class TeamBroker:
             except OSError:
                 continue
             if self._is_teammate_session(path):
-                self._unlink_session(str(path))
+                self._unlink_under(str(path), self.sessions_root)
 
     def _remove_session_file(self, entry):
         if (entry or {}).get("role") != "fork":
             return
         path = (entry or {}).get("session")
         if path:
-            self._unlink_session(path)
+            self._unlink_under(path, self.sessions_root)
 
     def _is_teammate_session(self, path):
         # The marker sits in the first user turn; scan only the head so a
@@ -791,22 +791,12 @@ class TeamBroker:
             return False
         return False
 
-    def _unlink_session(self, path):
+    def _unlink_under(self, path, root):
+        # Guard a delete to the root that owns the file; a path outside it
+        # is never removed.
         try:
             target = pathlib.Path(path).resolve()
-            root = self.sessions_root.resolve()
-            if root != target.parent and root not in target.parents:
-                return
-            target.unlink()
-        except OSError:
-            pass
-
-    def _unlink_under_root(self, path):
-        # Guard the delete to the broker's own root so a malformed or
-        # hostile path can never remove a file elsewhere.
-        try:
-            target = pathlib.Path(path).resolve()
-            base = self.root.base.resolve()
+            base = pathlib.Path(root).resolve()
             if base != target.parent and base not in target.parents:
                 return
             target.unlink()
