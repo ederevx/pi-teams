@@ -746,3 +746,54 @@ test("peerAdd closes the tunnel when broker registration fails", async () => {
 	const tunnel = calls.find((c) => c.file === "ssh");
 	assert.equal(tunnel.killed, true);
 });
+
+test("send carries this agent's id so a peer can reply to it", async () => {
+	const runs = [];
+	const { runner } = makeRunner((file, args) => {
+		runs.push(args);
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	await agent.send("beta:main", "spawn", "{}");
+	const sent = runs.find((a) => a.includes("send"));
+	assert.ok(sent, "send was not run");
+	const at = sent.indexOf("--id");
+	assert.ok(at >= 0, "send did not pass --id");
+	assert.equal(sent[at + 1], agent.id);
+});
+
+test("peerAdd remembers and peerRemove forgets the ssh target", async () => {
+	const peersFile = join(stateRoot, "peers-ssh.json");
+	writeFileSync(peersFile, "{}\n");
+	const { runner } = makeRunner((file) => {
+		if (file === "ssh") {
+			return Promise.resolve({ stdout: JSON.stringify({
+				port: 6001, token: "t", name: "hz" }), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	await agent.peerAdd("peer.example", "hz");
+	const saved = JSON.parse(readFileSync(peersFile, "utf-8"));
+	assert.equal(saved.hz, "peer.example");
+	await agent.peerRemove("hz");
+	const after = JSON.parse(readFileSync(peersFile, "utf-8"));
+	assert.equal(after.hz, undefined);
+});
+
+test("restorePeers rebuilds a remembered ssh peer", async () => {
+	const peersFile = join(stateRoot, "peers-ssh.json");
+	writeFileSync(peersFile, JSON.stringify({ hz: "peer.example" }) + "\n");
+	const { calls, runner } = makeRunner((file) => {
+		if (file === "ssh") {
+			return Promise.resolve({ stdout: JSON.stringify({
+				port: 6002, token: "t", name: "hz" }), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	await agent.restorePeers();
+	assert.ok(calls.some((c) => c.file === "ssh"),
+		"restorePeers did not rebuild the tunnel");
+});
+

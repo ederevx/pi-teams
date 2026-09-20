@@ -36,7 +36,13 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
@@ -605,6 +611,7 @@ export class TeamAgent {
 	private holdProc: SpawnedProcess | null = null;
 	private readonly teammates = new Set<SpawnedProcess>();
 	private readonly bridges = new Map<string, PeerBridge>();
+	private readonly peersFile: string;
 	private readonly waiters =
 		new Map<string, Set<(message: TeamMessage | null) => void>>();
 	private readonly recentResults = new Map<string, TeamMessage>();
@@ -628,6 +635,7 @@ export class TeamAgent {
 				new SshPeerBridge(sshTarget, label, runner));
 		this.python = resolvePython();
 		this.windowless = windowlessFactory(this.python);
+		this.peersFile = join(stateRoot, "peers-ssh.json");
 		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
 		this.id =
 			process.env.TEAM_ID ||
@@ -836,9 +844,13 @@ export class TeamAgent {
 	}
 
 	async send(to: string, kind: string, text: string): Promise<string> {
+		// The peer's spawn handler replies to the message's `from`, and a
+		// spawned fork is parented to it, so an unregistered sender would
+		// strand both. Hand this agent's id to the transient client.
 		const result = await this.runner.run(
 			this.python,
-			[teamBin, "--root", stateRoot, "send", to, kind, text],
+			[teamBin, "--root", stateRoot, "send",
+				"--id", this.id, to, kind, text],
 			{ timeout: 3000 },
 		);
 		return String(result.stdout).trim();
@@ -1136,6 +1148,7 @@ export class TeamAgent {
 			throw err;
 		}
 		this.bridges.set(bridge.name, bridge);
+		this.rememberPeer(bridge.name, sshTarget);
 		// A tunnel that dies on its own must not leave a peer pointing
 		// at a dead loopback port: drop it and prune the broker's entry.
 		bridge.onExit(() => {
@@ -1150,8 +1163,61 @@ export class TeamAgent {
 	async peerRemove(host: string): Promise<void> {
 		const bridge = this.bridges.get(host);
 		this.bridges.delete(host);
+		this.forgetPeer(host);
 		bridge?.close();
 		await this.unlinkPeer(host);
+	}
+
+	/** The durable SSH-peer map, label -> ssh target. The broker's
+	 *  persisted endpoint is a loopback tunnel port that exists only while
+	 *  this process's ssh tunnel lives, so the extension owns the target
+	 *  and rebuilds the tunnel on the next session. */
+	private readPeerTargets(): Record<string, string> {
+		try {
+			const parsed = JSON.parse(readFileSync(this.peersFile, "utf-8"));
+			return parsed && typeof parsed === "object" ? parsed : {};
+		} catch {
+			return {};
+		}
+	}
+
+	private writePeerTargets(targets: Record<string, string>): void {
+		try {
+			const tmp = `${this.peersFile}.tmp`;
+			writeFileSync(tmp, JSON.stringify(targets, null, 2) + "\n");
+			renameSync(tmp, this.peersFile);
+		} catch {
+			// best effort: losing the map only costs a manual team_peer add
+		}
+	}
+
+	private rememberPeer(label: string, sshTarget: string): void {
+		const targets = this.readPeerTargets();
+		targets[label] = sshTarget;
+		this.writePeerTargets(targets);
+	}
+
+	private forgetPeer(label: string): void {
+		const targets = this.readPeerTargets();
+		if (label in targets) {
+			delete targets[label];
+			this.writePeerTargets(targets);
+		}
+	}
+
+	/** Rebuilds every remembered peer link. An ssh tunnel is owned by this
+	 *  process, so a reload leaves the broker pointing at a dead loopback
+	 *  port; re-resolving the peer endpoint restores it. A failure stays
+	 *  in the map so the next session retries. */
+	async restorePeers(): Promise<void> {
+		for (const [label, sshTarget] of Object.entries(this.readPeerTargets())) {
+			if (this.bridges.has(label)) continue;
+			try {
+				await this.peerAdd(sshTarget, label);
+			} catch {
+				// unreachable now; keep the target for the next session
+			}
+		}
 	}
 
 	private async linkPeer(
@@ -1542,6 +1608,7 @@ export default async function (pi: ExtensionAPI) {
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		app.rememberSession(sessionFile);
 		app.hold(ctx.cwd);
+		void app.restorePeers();
 		void app.announceSession(sessionFile);
 	});
 

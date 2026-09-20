@@ -107,6 +107,37 @@ class ForkLifecycleTests(unittest.TestCase):
             child.wait(timeout=5)
             parent.close()
 
+    def test_send_identity_arg_stamps_the_sender(self):
+        # send must carry the caller's real id: a peer's spawn handler
+        # replies to `from`, and a remote fork is parented to it, so a
+        # throwaway cli id would strand the reply and the fork.
+        holder = team_proc(
+            self.root,
+            ["hold", "--id", "target-1", "--role", "main"],
+        )
+        try:
+            self.assertTrue(
+                wait_until(lambda: "target-1" in self._ids(), timeout=3),
+                "hold never registered",
+            )
+            run_team(self.root, [
+                "send", "--id", "sender-1", "target-1", "text", "hello",
+            ])
+            lines = []
+            reader = threading.Thread(
+                target=lambda: lines.append(holder.stdout.readline()),
+                daemon=True,
+            )
+            reader.start()
+            reader.join(timeout=3)
+            self.assertTrue(lines, "hold did not surface the message")
+            msg = json.loads(lines[0])
+            self.assertEqual(msg["from"], "sender-1")
+            self.assertEqual(msg["to"], "target-1")
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+
     def test_hold_exits_when_hosted_stdin_closes(self):
         # The extension must own a stdin pipe for the hold: the client
         # treats EOF on stdin as "the pi that hosted me is gone" and

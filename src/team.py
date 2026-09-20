@@ -349,6 +349,7 @@ def main(argv=None):
     p_hold = sub.add_parser("hold")
     add_identity_args(p_hold)
     p_send = sub.add_parser("send")
+    add_identity_args(p_send)
     p_send.add_argument("to")
     p_send.add_argument("kind", nargs="?", default="text")
     p_send.add_argument("payload", nargs="?", default="")
@@ -365,7 +366,7 @@ def main(argv=None):
         parser.print_help()
         return 0
     client = TeamClient(args.root)
-    if args.command in ("register", "follow", "hold"):
+    if args.command in ("register", "follow", "hold", "send"):
         apply_identity(client, args)
     if args.command == "register":
         print(json.dumps(client.register()))
