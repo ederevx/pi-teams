@@ -578,6 +578,8 @@ export class TeamAgent {
 	}
 
 	private taskPrompt(session: string, task: string): string {
+		// The marker phrase here is the broker's teammate-session stamp; keep
+		// it in sync with TEAMMATE_MARKER in src/teamd.py.
 		// Call the interpreter on the absolute client path instead of a
 		// `team` name on PATH: a shebang script is not executable on
 		// Windows, and binDir may not be on PATH. The teammate runs this
