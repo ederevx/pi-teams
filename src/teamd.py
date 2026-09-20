@@ -68,7 +68,7 @@ class TeamRoot:
         self.ensure()
         target = self.base / relative
         tmp = self.base / ("%s.tmp.%d" % (relative, os.getpid()))
-        tmp.write_text(data)
+        tmp.write_text(data, encoding="utf-8")
         try:
             os.chmod(str(tmp), mode)
         except OSError:
@@ -92,13 +92,13 @@ class TeamRoot:
 
     def read_endpoint(self):
         try:
-            return json.loads(self.endpoint.read_text())
+            return json.loads(self.endpoint.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
     def read_peers(self):
         try:
-            data = json.loads(self.peersfile.read_text())
+            data = json.loads(self.peersfile.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}
@@ -815,11 +815,16 @@ class TeamBroker:
 
     def _is_teammate_session(self, path):
         # The marker sits in the first user turn; scan only the head so a
-        # large transcript is never fully read during a sweep.
+        # large transcript is never fully read during a sweep. The scan
+        # is byte-based on purpose: the locale text codec differs per
+        # platform (cp1252 on Windows), and a non-ASCII session file
+        # decoded through the wrong codec would raise and kill the whole
+        # sweep thread.
+        marker = TEAMMATE_MARKER.encode("utf-8")
         try:
-            with open(path) as fh:
+            with open(path, "rb") as fh:
                 for index, line in enumerate(fh):
-                    if TEAMMATE_MARKER in line:
+                    if marker in line:
                         return True
                     if index >= 50:
                         break
