@@ -10,11 +10,18 @@
  * terminates the fork when the parent process dies, so teammates cannot
  * outlive the agent that spawned them.
  *
- * The held connection and the forked pi are launched with Node's
- * child_process, not pi.exec: pi.exec opens the child's stdin to
- * /dev/null and drops the env option, which would make the hold see EOF
- * immediately and strip a fork of its identity. A stdin pipe owned by
- * this process keeps the hold alive exactly as long as the pi runs.
+ * Every process is launched through ProcessRunner, which owns the OS
+ * spawn flags (windowsHide on Windows; a no-op elsewhere) so no console
+ * window flashes on any platform. The hold and the forked pi are
+ * launched directly with Node's child_process rather than pi.exec:
+ * pi.exec opens the child's stdin to /dev/null and drops the env option,
+ * which would make the hold see EOF immediately and strip a fork of its
+ * identity. A stdin pipe owned by this process keeps the hold alive
+ * exactly as long as the pi runs.
+ *
+ * Cross-host peers go through a PeerBridge: SshPeerBridge owns all SSH
+ * interaction and yields a plain loopback endpoint, so the rest of the
+ * extension registers and reaps a peer without knowing SSH exists.
  *
  * A spawned teammate is a normal pi session: it is named and stored in
  * the parent's session directory, so it appears in `/resume` after the
@@ -90,21 +97,6 @@ function waitSeconds(requested?: number): number {
 	return Number.isFinite(env) && env > 0 ? env : DEFAULT_WAIT_SECONDS;
 }
 
-/** Resolves a free loopback port for an SSH local forward. */
-function freePort(): Promise<number> {
-	return new Promise((resolve, reject) => {
-		const server = createServer();
-		server.on("error", reject);
-		server.listen(0, "127.0.0.1", () => {
-			const address = server.address();
-			const port = typeof address === "object" && address
-				? address.port
-				: 0;
-			server.close(() => resolve(port));
-		});
-	});
-}
-
 /**
  * How to launch another pi without a shell. Reusing the running runtime
  * avoids spawning a Windows launcher shim (pi.cmd/pi.ps1) directly,
@@ -138,7 +130,8 @@ interface AgentInfo {
 interface SpawnedProcess {
 	stdin: { end(): void; write(data: string): void } | null;
 	stdout: { on(event: string, listener: (chunk: unknown) => void): void } | null;
-	on(event: string, listener: () => void): void;
+	stderr?: { on(event: string, listener: (chunk: unknown) => void): void } | null;
+	on(event: string, listener: (...args: unknown[]) => void): void;
 	unref(): void;
 	kill(): void;
 }
@@ -151,13 +144,236 @@ export interface TeamMessage {
 	ts?: number;
 }
 
-type ExecFn = (file: string, args: string[], options?: object) => Promise<unknown>;
 type SpawnFn = (
 	file: string,
 	args: string[],
 	options?: Record<string, unknown>,
 ) => SpawnedProcess;
 type DeliverFn = (message: TeamMessage) => void;
+
+/** The output of a finished child process. */
+export interface ExecResult {
+	stdout: string;
+	stderr: string;
+	code: number;
+}
+
+interface RunOptions {
+	cwd?: string;
+	timeout?: number;
+}
+
+/** The seam a TeamAgent uses to launch processes. ProcessRunner is the
+ *  only production implementation; tests supply a fake. */
+export interface ProcessHost {
+	run(
+		file: string,
+		args: string[],
+		options?: RunOptions,
+	): Promise<ExecResult>;
+	spawnHidden(
+		file: string,
+		args: string[],
+		options?: Record<string, unknown>,
+	): SpawnedProcess | null;
+}
+
+/**
+ * Owns every OS child-process launch. Each spawn sets windowsHide so no
+ * console window flashes on Windows; the option is a documented no-op
+ * on Linux and macOS, so the same code behaves identically everywhere.
+ */
+export class ProcessRunner implements ProcessHost {
+	private readonly spawn: SpawnFn;
+
+	constructor(spawn: SpawnFn = nodeSpawn) {
+		this.spawn = spawn;
+	}
+
+	run(
+		file: string,
+		args: string[],
+		options: RunOptions = {},
+	): Promise<ExecResult> {
+		return new Promise((resolve) => {
+			let child: SpawnedProcess;
+			try {
+				child = this.spawn(file, args, {
+					cwd: options.cwd,
+					windowsHide: true,
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+			} catch {
+				resolve({ stdout: "", stderr: "", code: 1 });
+				return;
+			}
+			let stdout = "";
+			let stderr = "";
+			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const finish = (code: number): void => {
+				if (settled) return;
+				settled = true;
+				if (timer) clearTimeout(timer);
+				resolve({ stdout, stderr, code });
+			};
+			child.stdout?.on("data", (chunk) => {
+				stdout += String(chunk);
+			});
+			child.stderr?.on("data", (chunk) => {
+				stderr += String(chunk);
+			});
+			child.on("error", () => finish(1));
+			child.on("close", (code) => {
+				finish(typeof code === "number" ? code : 1);
+			});
+			if (options.timeout && options.timeout > 0) {
+				timer = setTimeout(() => {
+					try {
+						child.kill();
+					} catch {
+						// already gone
+					}
+					finish(1);
+				}, options.timeout);
+			}
+		});
+	}
+
+	spawnHidden(
+		file: string,
+		args: string[],
+		options: Record<string, unknown> = {},
+	): SpawnedProcess | null {
+		try {
+			return this.spawn(file, args, { ...options, windowsHide: true });
+		} catch {
+			return null;
+		}
+	}
+}
+
+/** A broker endpoint reachable over a bridge, always on loopback. */
+export interface PeerEndpoint {
+	host: string;
+	port: number;
+	token: string;
+	name?: string;
+}
+
+/**
+ * A transport-agnostic loopback bridge to a peer host's broker. The rest
+ * of TeamAgent treats every bridge identically: connect yields a
+ * reachable endpoint and close reaps it. SSH is one implementation; a
+ * direct or test bridge can implement the same interface.
+ */
+export interface PeerBridge {
+	name: string;
+	connect(): Promise<PeerEndpoint>;
+	close(): void;
+	onExit(callback: () => void): void;
+}
+
+export type BridgeFactory = (sshTarget: string, label: string) => PeerBridge;
+
+/**
+ * The SSH implementation of PeerBridge. It reads the peer broker's
+ * loopback endpoint over an existing SSH session, forwards that port to
+ * a local loopback port, and owns the ssh process for its whole life.
+ * Nothing outside this class knows SSH is involved.
+ */
+export class SshPeerBridge implements PeerBridge {
+	name: string;
+	private readonly label: string;
+	private readonly sshTarget: string;
+	private readonly runner: ProcessHost;
+	private readonly remoteState: string;
+	private tunnel: SpawnedProcess | null = null;
+	private exitCallback: (() => void) | null = null;
+	private closed = false;
+
+	constructor(sshTarget: string, label: string, runner: ProcessHost) {
+		this.sshTarget = sshTarget;
+		this.label = label;
+		this.name = label || sshTarget;
+		this.runner = runner;
+		this.remoteState = process.env.PI_TEAMS_REMOTE_STATE
+			|| "$HOME/.local/state/pi-teams";
+	}
+
+	async connect(): Promise<PeerEndpoint> {
+		const endpoint = await this.readEndpoint();
+		this.name = this.label || endpoint.name || this.sshTarget;
+		const port = await this.reservePort();
+		const tunnel = this.runner.spawnHidden("ssh", [
+			"-N", "-L",
+			`127.0.0.1:${port}:127.0.0.1:${endpoint.port}`,
+			this.sshTarget,
+		], { stdio: "ignore", detached: true });
+		if (!tunnel) {
+			throw new Error(
+				`ssh tunnel to ${this.sshTarget} failed to start`);
+		}
+		this.tunnel = tunnel;
+		tunnel.on("exit", () => {
+			this.tunnel = null;
+			this.closed = true;
+			this.exitCallback?.();
+		});
+		tunnel.unref();
+		return {
+			host: "127.0.0.1", port, token: endpoint.token,
+			name: this.name,
+		};
+	}
+
+	close(): void {
+		if (this.closed) return;
+		this.closed = true;
+		this.exitCallback = null;
+		const tunnel = this.tunnel;
+		this.tunnel = null;
+		try {
+			tunnel?.kill();
+		} catch {
+			// already gone
+		}
+	}
+
+	onExit(callback: () => void): void {
+		this.exitCallback = callback;
+	}
+
+	private async readEndpoint(): Promise<{
+		port: number;
+		token: string;
+		name?: string;
+	}> {
+		const result = await this.runner.run("ssh",
+			[this.sshTarget, "cat", `${this.remoteState}/endpoint`]);
+		return JSON.parse(result.stdout.trim()) as {
+			port: number;
+			token: string;
+			name?: string;
+		};
+	}
+
+	/** A loopback port reserved and released at once: ssh binds it when
+	 *  the tunnel starts. The listener never outlives this call. */
+	private reservePort(): Promise<number> {
+		return new Promise((resolve, reject) => {
+			const server = createServer();
+			server.on("error", reject);
+			server.listen(0, "127.0.0.1", () => {
+				const address = server.address();
+				const port = typeof address === "object" && address
+					? address.port
+					: 0;
+				server.close(() => resolve(port));
+			});
+		});
+	}
+}
 
 export interface SpawnOptions {
 	provider?: string;
@@ -178,15 +394,15 @@ export interface TeammateRef {
 }
 
 export class TeamAgent {
-	readonly exec: ExecFn;
-	private readonly spawnProcess: SpawnFn;
+	private readonly runner: ProcessHost;
 	private readonly deliver: DeliverFn;
+	private readonly makeBridge: BridgeFactory;
 	private readonly python: string;
 	id: string = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
 	private readonly teammates = new Set<SpawnedProcess>();
-	private readonly tunnels = new Set<SpawnedProcess>();
+	private readonly bridges = new Map<string, PeerBridge>();
 	private readonly waiters =
 		new Map<string, Set<(message: TeamMessage | null) => void>>();
 	private readonly recentResults = new Map<string, TeamMessage>();
@@ -196,10 +412,16 @@ export class TeamAgent {
 	private sessionFile = "";
 	private sessionDir = "";
 
-	constructor(exec: ExecFn, spawnProcess: SpawnFn = nodeSpawn, deliver: DeliverFn = () => {}) {
-		this.exec = exec;
-		this.spawnProcess = spawnProcess;
+	constructor(
+		runner: ProcessHost,
+		deliver: DeliverFn = () => {},
+		bridgeFactory?: BridgeFactory,
+	) {
+		this.runner = runner;
 		this.deliver = deliver;
+		this.makeBridge = bridgeFactory
+			?? ((sshTarget, label) =>
+				new SshPeerBridge(sshTarget, label, runner));
 		this.python = resolvePython();
 		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
 		this.id =
@@ -213,16 +435,12 @@ export class TeamAgent {
 		args: string[],
 		options: Record<string, unknown>,
 	): SpawnedProcess | null {
-		try {
-			const child = this.spawnProcess(file, args, options);
-			child.on("error", () => {
-				// A failed broker/hold/pi start must not crash the
-				// session; the next /team call retries.
-			});
-			return child;
-		} catch {
-			return null;
-		}
+		const child = this.runner.spawnHidden(file, args, options);
+		child?.on("error", () => {
+			// A failed broker/hold/pi start must not crash the session;
+			// the next /team call retries.
+		});
+		return child;
 	}
 
 	ensureBroker(): void {
@@ -378,7 +596,7 @@ export class TeamAgent {
 	}
 
 	async snapshot(): Promise<AgentInfo[]> {
-		const result = await this.exec(
+		const result = await this.runner.run(
 			this.python,
 			[teamBin, "--root", stateRoot, "ls"],
 			{ timeout: 3000 },
@@ -392,7 +610,7 @@ export class TeamAgent {
 	}
 
 	async send(to: string, kind: string, text: string): Promise<string> {
-		const result = await this.exec(
+		const result = await this.runner.run(
 			this.python,
 			[teamBin, "--root", stateRoot, "send", to, kind, text],
 			{ timeout: 3000 },
@@ -529,7 +747,7 @@ export class TeamAgent {
 	}
 
 	async terminate(agentId: string): Promise<void> {
-		await this.exec(
+		await this.runner.run(
 			this.python,
 			[teamBin, "--root", stateRoot, "terminate", agentId],
 			{ timeout: 3000 },
@@ -667,49 +885,65 @@ export class TeamAgent {
 		this.teammates.clear();
 	}
 
-	private stopTunnels(): void {
-		for (const tunnel of this.tunnels) {
-			try {
-				tunnel.kill();
-			} catch {
-				// already gone
-			}
-		}
-		this.tunnels.clear();
+	private closeBridges(): void {
+		for (const bridge of this.bridges.values()) bridge.close();
+		this.bridges.clear();
 	}
 
-	/** Links a peer host's loopback broker: read its endpoint read-only
-	 *  over the existing SSH session, open a loopback-only ssh -L tunnel
-	 *  to it, and tell the local broker to peer. Returns the peer label. */
+	/** Links a peer host's broker. The bridge owns every transport
+	 *  detail (SSH or otherwise); this method only registers the loopback
+	 *  endpoint with the local broker and keeps the bridge for reaping.
+	 *  Returns the peer label. */
 	async peerAdd(sshTarget: string, label: string): Promise<string> {
-		const remoteState = process.env.PI_TEAMS_REMOTE_STATE
-			|| "$HOME/.local/state/pi-teams";
-		const result = await this.exec(
-			"ssh", [sshTarget, "cat", `${remoteState}/endpoint`]);
-		const endpoint = JSON.parse(String(result.stdout).trim()) as {
-			port: number; token: string; name?: string;
-		};
-		const peer = label || endpoint.name || sshTarget;
-		const port = await freePort();
-		const tunnel = this.launch("ssh", [
-			"-N", "-L",
-			`127.0.0.1:${port}:127.0.0.1:${endpoint.port}`,
-			sshTarget,
-		], { stdio: "ignore", windowsHide: true, detached: true });
-		if (tunnel) {
-			this.tunnels.add(tunnel);
-			tunnel.on("exit", () => this.tunnels.delete(tunnel));
-			tunnel.unref();
+		const bridge = this.makeBridge(sshTarget, label);
+		let endpoint: PeerEndpoint;
+		try {
+			endpoint = await bridge.connect();
+		} catch (err) {
+			bridge.close();
+			throw err;
 		}
-		await this.exec(this.python, [
-			teamBin, "--root", stateRoot, "peer", "add", peer,
-			`127.0.0.1:${port}:${endpoint.token}`,
-		]);
-		return peer;
+		try {
+			await this.linkPeer(bridge.name, endpoint);
+		} catch (err) {
+			bridge.close();
+			throw err;
+		}
+		this.bridges.set(bridge.name, bridge);
+		// A tunnel that dies on its own must not leave a peer pointing
+		// at a dead loopback port: drop it and prune the broker's entry.
+		bridge.onExit(() => {
+			if (this.bridges.get(bridge.name) === bridge) {
+				this.bridges.delete(bridge.name);
+			}
+			void this.unlinkPeer(bridge.name);
+		});
+		return bridge.name;
 	}
 
 	async peerRemove(host: string): Promise<void> {
-		await this.exec(this.python, [
+		const bridge = this.bridges.get(host);
+		this.bridges.delete(host);
+		bridge?.close();
+		await this.unlinkPeer(host);
+	}
+
+	private async linkPeer(
+		host: string,
+		endpoint: PeerEndpoint,
+	): Promise<void> {
+		const result = await this.runner.run(this.python, [
+			teamBin, "--root", stateRoot, "peer", "add", host,
+			`${endpoint.host}:${endpoint.port}:${endpoint.token}`,
+		]);
+		if (result.code !== 0) {
+			throw new Error(
+				`broker rejected peer ${host}: ${result.stderr.trim()}`);
+		}
+	}
+
+	private async unlinkPeer(host: string): Promise<void> {
+		await this.runner.run(this.python, [
 			teamBin, "--root", stateRoot, "peer", "remove", host,
 		]);
 	}
@@ -744,7 +978,7 @@ export class TeamAgent {
 		this.cancelWaits();
 		this.stopHold();
 		this.stopTeammates();
-		this.stopTunnels();
+		this.closeBridges();
 		this.clearState();
 	}
 
@@ -834,8 +1068,7 @@ function deliverToAgent(pi: ExtensionAPI, message: TeamMessage): void {
 
 export default async function (pi: ExtensionAPI) {
 	const app = new TeamAgent(
-		(file, args, options) => pi.exec(file, args, options),
-		undefined,
+		new ProcessRunner(),
 		(message) => deliverToAgent(pi, message),
 	);
 

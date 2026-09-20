@@ -1,9 +1,11 @@
 /**
  * Regression tests for the pi-teams extension.
  *
+ * Every child launch goes through ProcessRunner, which sets windowsHide
+ * so no console window flashes on Windows. The hold and forked pi are
+ * launched with Node's child_process directly rather than pi.exec:
  * pi.exec opens a child's stdin to /dev/null and silently drops the env
- * option, so the extension must launch the held connection and forked
- * pi with Node's child_process directly:
+ * option, so the extension must own that launch:
  *   - hold keeps a stdin pipe owned by this process (EOF == pi gone)
  *     and forwards the agent identity through the environment;
  *   - spawn forwards the fork identity (parent/role) in the environment
@@ -48,55 +50,76 @@ process.env.PYTHON = process.env.PYTHON || "python3";
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
-const { TeamAgent, logTeamMessage } = await import("../extensions/pi-teams.ts");
+const { TeamAgent, ProcessRunner, SshPeerBridge, logTeamMessage } =
+	await import("../extensions/pi-teams.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
+function spawnStub(calls, file, args, options) {
+	const record = {
+		file,
+		args,
+		options,
+		stdinEnded: false,
+		stdinWrites: [],
+		killed: false,
+		unrefed: false,
+	};
+	calls.push(record);
+	return {
+		stdin: {
+			end() {
+				record.stdinEnded = true;
+			},
+			write(data) {
+				record.stdinWrites.push(data);
+			},
+		},
+		stdout: {
+			on(event, listener) {
+				record["stdout:" + event] = listener;
+			},
+		},
+		stderr: {
+			on(event, listener) {
+				record["stderr:" + event] = listener;
+			},
+		},
+		on(event, listener) {
+			record["on:" + event] = listener;
+		},
+		unref() {
+			record.unrefed = true;
+		},
+		kill() {
+			record.killed = true;
+		},
+	};
+}
+
 function makeSpawn() {
 	const calls = [];
-	const spawnProcess = (file, args, options) => {
-		const record = {
-			file,
-			args,
-			options,
-			stdinEnded: false,
-			stdinWrites: [],
-			killed: false,
-			unrefed: false,
-		};
-		calls.push(record);
-		return {
-			stdin: {
-				end() {
-					record.stdinEnded = true;
-				},
-				write(data) {
-					record.stdinWrites.push(data);
-				},
-			},
-			stdout: {
-				on(event, listener) {
-					record["stdout:" + event] = listener;
-				},
-			},
-			on(event, _listener) {
-				record["on:" + event] = true;
-			},
-			unref() {
-				record.unrefed = true;
-			},
-			kill() {
-				record.killed = true;
-			},
-		};
-	};
+	const spawnProcess = (file, args, options) =>
+		spawnStub(calls, file, args, options);
 	return { calls, spawnProcess };
 }
 
+/** A fake ProcessHost: records spawns and runs a caller-supplied run. */
+function makeRunner(run) {
+	const calls = [];
+	const runner = {
+		run: run ?? (() =>
+			Promise.resolve({ stdout: "{}", stderr: "", code: 0 })),
+		spawnHidden(file, args, options) {
+			return spawnStub(calls, file, args, options);
+		},
+	};
+	return { calls, runner };
+}
+
 function makeAgent(deliver = () => {}) {
-	const { calls, spawnProcess } = makeSpawn();
-	const exec = () => Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	return { agent: new TeamAgent(exec, spawnProcess, deliver), calls };
+	const { calls, runner } = makeRunner();
+	return { agent: new TeamAgent(runner, deliver), calls };
 }
 
 function publishEndpoint(present) {
@@ -160,20 +183,17 @@ test("logTeamMessage records a truncated sent/received log entry", () => {
 });
 
 test("announceSession notices the parent of the fork's session file", async () => {
-	const execCalls = [];
-	const agent = new TeamAgent(
-		async (_file, args) => {
-			execCalls.push(args);
-			return { stdout: "{}" };
-		},
-		() => {},
-		() => {},
-	);
+	const runCalls = [];
+	const { runner } = makeRunner(async (_file, args) => {
+		runCalls.push(args);
+		return { stdout: "{}", stderr: "", code: 0 };
+	});
+	const agent = new TeamAgent(runner, () => {});
 	process.env.TEAM_PARENT_ID = "parent-9";
 	try {
 		await agent.announceSession("/x/sessions/sess.jsonl");
-		assert.equal(execCalls.length, 1);
-		const args = execCalls[0];
+		assert.equal(runCalls.length, 1);
+		const args = runCalls[0];
 		assert.ok(args.includes("send"));
 		assert.ok(args.includes("parent-9"));
 		assert.ok(args.includes("notice"));
@@ -182,12 +202,12 @@ test("announceSession notices the parent of the fork's session file", async () =
 		// No parent: nothing is sent.
 		delete process.env.TEAM_PARENT_ID;
 		await agent.announceSession("/x/sessions/sess.jsonl");
-		assert.equal(execCalls.length, 1);
+		assert.equal(runCalls.length, 1);
 
 		// No session file: nothing is sent.
 		process.env.TEAM_PARENT_ID = "parent-9";
 		await agent.announceSession(null);
-		assert.equal(execCalls.length, 1);
+		assert.equal(runCalls.length, 1);
 	} finally {
 		delete process.env.TEAM_PARENT_ID;
 	}
@@ -408,31 +428,26 @@ test("spawnTask context=inherit forks the parent session; fresh does not", () =>
 	assert.equal(calls[1].args[4], join(sessionDir, "sess.jsonl"));
 
 	// Inheriting without a parent session is refused.
-	const bare = new TeamAgent(
-		() => Promise.resolve({ stdout: "{}" }),
-		() => ({ stdin: null, stdout: null, on() {}, unref() {}, kill() {} }),
-		() => {},
-	);
+	const bare = new TeamAgent(makeRunner().runner, () => {});
 	assert.throws(
 		() => bare.spawnTask("c", "task c", { context: "inherit" }),
 		/no file to fork/);
 });
 
 test("spawnRemote asks a peer host and returns the spawned id", async () => {
-	const { calls, spawnProcess } = makeSpawn();
 	const sends = [];
-	const exec = (file, args) => {
+	const { calls, runner } = makeRunner((file, args) => {
 		if (args.includes("ls")) {
 			return Promise.resolve({ stdout: JSON.stringify({ agents: [{
 				id: "beta:main", name: "peer", role: "main", pid: 1,
 				parent: null, session: null, online: false, origin: "beta",
 				remote: true,
-			}] }) });
+			}] }), stderr: "", code: 0 });
 		}
 		sends.push(args);
-		return Promise.resolve({ stdout: "{}" });
-	};
-	const agent = new TeamAgent(exec, spawnProcess, () => {});
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
 	const onData = calls[0]["stdout:data"];
 	const pending = agent.spawnRemote("beta", "worker", "do it");
@@ -453,13 +468,12 @@ test("spawnRemote asks a peer host and returns the spawned id", async () => {
 
 test("an inbound spawn request is spawned locally and acked", async () => {
 	publishEndpoint(true);
-	const { calls, spawnProcess } = makeSpawn();
 	const sends = [];
-	const exec = (file, args) => {
+	const { calls, runner } = makeRunner((file, args) => {
 		sends.push(args);
-		return Promise.resolve({ stdout: "{}" });
-	};
-	const agent = new TeamAgent(exec, spawnProcess, () => {});
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
 	const onData = calls[0]["stdout:data"];
 	onData(JSON.stringify({
@@ -498,4 +512,133 @@ test("deregister closes the held connection", () => {
 	agent.deregister();
 	assert.equal(calls[0].stdinEnded, true);
 	assert.equal(calls[0].killed, true);
+});
+
+test("SshPeerBridge reads the endpoint, tunnels it, and reaps on close", async () => {
+	const runCalls = [];
+	const endpoint = JSON.stringify({ port: 5555, token: "tok", name: "hz" });
+	const { calls, runner } = makeRunner((file, args) => {
+		runCalls.push({ file, args });
+		return Promise.resolve({ stdout: endpoint, stderr: "", code: 0 });
+	});
+	const bridge = new SshPeerBridge("peer.example", "", runner);
+	const ep = await bridge.connect();
+	assert.equal(ep.host, "127.0.0.1");
+	assert.equal(ep.token, "tok");
+	assert.equal(ep.name, "hz");
+	assert.ok(ep.port > 0);
+	assert.deepEqual(runCalls[0].args.slice(0, 2),
+		["peer.example", "cat"]);
+	const tunnel = calls.find((c) => c.file === "ssh");
+	assert.ok(tunnel, "no ssh tunnel was spawned");
+	assert.deepEqual(tunnel.args.slice(0, 2), ["-N", "-L"]);
+	assert.ok(tunnel.args[2].endsWith(":127.0.0.1:5555"));
+	assert.equal(tunnel.args[3], "peer.example");
+	assert.equal(tunnel.options.detached, true);
+	assert.equal(tunnel.unrefed, true);
+	bridge.close();
+	assert.equal(tunnel.killed, true);
+	bridge.close();
+	assert.equal(tunnel.killed, true);
+});
+
+test("ProcessRunner hides every child console", async () => {
+	const calls = [];
+	const spawnProcess = (file, args, options) => {
+		const api = spawnStub(calls, file, args, options);
+		const record = calls[calls.length - 1];
+		setTimeout(() => {
+			record["stdout:data"]?.("out");
+			record["stderr:data"]?.("err");
+			record["on:close"]?.(0);
+		}, 0);
+		return api;
+	};
+	const runner = new ProcessRunner(spawnProcess);
+	const result = await runner.run("ssh", ["x"], { timeout: 100 });
+	assert.equal(result.stdout, "out");
+	assert.equal(result.stderr, "err");
+	assert.equal(result.code, 0);
+	assert.equal(calls[0].options.windowsHide, true);
+	const child = runner.spawnHidden("ssh", ["y"], { detached: true });
+	assert.ok(child);
+	assert.equal(calls[1].options.windowsHide, true);
+	assert.equal(calls[1].options.detached, true);
+});
+
+test("an SSH tunnel that dies on its own fires the exit callback", async () => {
+	const { calls, runner } = makeRunner(() =>
+		Promise.resolve({ stdout: JSON.stringify({ port: 1, token: "t" }),
+			stderr: "", code: 0 }));
+	const bridge = new SshPeerBridge("host", "label", runner);
+	let exits = 0;
+	bridge.onExit(() => {
+		exits += 1;
+	});
+	await bridge.connect();
+	const exit = calls[0]["on:exit"];
+	assert.equal(typeof exit, "function");
+	exit();
+	assert.equal(exits, 1);
+});
+
+test("peerAdd registers the bridge endpoint and peerRemove reaps it", async () => {
+	const sends = [];
+	const { calls, runner } = makeRunner((file, args) => {
+		sends.push(args);
+		if (file === "ssh") {
+			return Promise.resolve({ stdout: JSON.stringify({
+				port: 4444, token: "tok", name: "hz" }),
+				stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	const peer = await agent.peerAdd("peer.example", "hz");
+	assert.equal(peer, "hz");
+	const add = sends.find((a) => a.includes("peer") && a.includes("add"));
+	assert.ok(add, "no broker peer-add was sent");
+	assert.ok(add.includes("hz"));
+	assert.ok(add.some((a) => a.startsWith("127.0.0.1:")));
+	const tunnel = calls.find((c) => c.file === "ssh");
+	assert.ok(tunnel, "no ssh tunnel was spawned");
+	await agent.peerRemove("hz");
+	assert.equal(tunnel.killed, true);
+	const remove = sends.find((a) =>
+		a.includes("peer") && a.includes("remove"));
+	assert.ok(remove, "no broker peer-remove was sent");
+});
+
+test("a tunnel exit prunes the peer from the broker", async () => {
+	const sends = [];
+	const { calls, runner } = makeRunner((file, args) => {
+		sends.push(args);
+		if (file === "ssh") {
+			return Promise.resolve({ stdout: JSON.stringify({
+				port: 3333, token: "t", name: "hz" }),
+				stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	await agent.peerAdd("host", "hz");
+	const tunnel = calls.find((c) => c.file === "ssh");
+	tunnel["on:exit"]();
+	await new Promise((r) => setTimeout(r, 20));
+	assert.ok(sends.some((a) => a.includes("remove") && a.includes("hz")));
+});
+
+test("peerAdd closes the tunnel when broker registration fails", async () => {
+	const { calls, runner } = makeRunner((file) => {
+		if (file === "ssh") {
+			return Promise.resolve({ stdout: JSON.stringify({
+				port: 4000, token: "t" }), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "", stderr: "boom", code: 1 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	await assert.rejects(() => agent.peerAdd("host", "h"),
+		/rejected peer/);
+	const tunnel = calls.find((c) => c.file === "ssh");
+	assert.equal(tunnel.killed, true);
 });
