@@ -58,7 +58,9 @@ coordinate natively instead of through the shared tree.
   through the same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
-  is the direct channel.
+  is the direct channel. Inbound relayed messages are surfaced to the
+  agent as `pi-teams` custom messages, so a teammate can report a
+  result back and the parent sees it without polling.
 
 ## Validation
 
