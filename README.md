@@ -57,7 +57,9 @@ coordinate natively instead of through the shared tree.
   extension compares that stamp with the installed broker and
   stops+starts the broker only when they differ, so a reload adopts new
   broker/GC code without a manual restart while an unchanged reload
-  leaves the broker alone.
+  leaves the broker alone. A stale broker is never restarted while a
+  teammate is live (the registry still holds a fork); it defers to the
+  next safe window so a reload cannot kill in-flight work.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers

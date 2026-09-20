@@ -121,6 +121,12 @@ function publishEndpoint(present, version = installedTeamdVersion()) {
 	}
 }
 
+function publishRegistry(agents) {
+	mkdirSync(stateRoot, { recursive: true });
+	writeFileSync(join(stateRoot, "registry.json"),
+		JSON.stringify({ agents }) + "\n");
+}
+
 test("hold forwards identity and owns the held connection's stdin", () => {
 	const { agent, calls } = makeAgent();
 	agent.hold("/work");
@@ -506,10 +512,20 @@ test("spawn starts a detached broker only when none is published", () => {
 
 test("ensureBroker replaces a broker whose version stamp is stale", () => {
 	publishEndpoint(true, "stale-version");
+	publishRegistry({});
 	const { agent, calls } = makeAgent();
 	agent.ensureBroker();
 	assert.equal(calls.length, 1, "stale broker must be restarted");
 	assert.deepEqual(calls[0].args, [join(binDir, "teamd"), "--root", stateRoot, "start"]);
+});
+
+test("ensureBroker defers a stale-broker restart while a fork is live", () => {
+	publishEndpoint(true, "stale-version");
+	publishRegistry({ "host:fork-1": { role: "fork" } });
+	const { agent, calls } = makeAgent();
+	agent.ensureBroker();
+	assert.equal(calls.length, 0,
+		"a live teammate must not be killed by a reload restart");
 });
 
 test("deregister closes the held connection", () => {
