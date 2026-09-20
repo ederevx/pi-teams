@@ -199,6 +199,11 @@ export interface ProcessHost {
 		args: string[],
 		options?: Record<string, unknown>,
 	): SpawnedProcess | null;
+	spawnPersistent(
+		file: string,
+		args: string[],
+		options?: Record<string, unknown>,
+	): SpawnedProcess | null;
 }
 
 /**
@@ -282,13 +287,94 @@ export class ProcessRunner implements ProcessHost {
 	): SpawnedProcess | null {
 		// windowsHide is ignored when DETACHED_PROCESS is set, so a
 		// detached console child can still flash a window on Windows.
-		// Detach only where it buys survival: on POSIX. A hidden,
-		// non-detached child on Windows still outlives the parent through
-		// unref() and its extension-owned stdin pipe.
+		// A session-scoped child does not need that: keep it hidden and
+		// non-detached on Windows, where it is reaped with the parent.
+		// On POSIX it detaches so it survives the session.
 		return this.spawnHidden(file, args, {
 			...options,
 			detached: process.platform !== "win32",
 		});
+	}
+
+	spawnPersistent(
+		file: string,
+		args: string[],
+		options: Record<string, unknown> = {},
+	): SpawnedProcess | null {
+		// A helper that must outlive the session is always detached (that
+		// is what escapes the kill-on-close job on Windows). The caller
+		// supplies a windowless launcher there, so no console can flash.
+		return this.spawnHidden(file, args, { ...options, detached: true });
+	}
+}
+
+/** Runs a trivial program to test that an interpreter candidate works. */
+type InterpreterProbe = (candidate: string) => boolean;
+
+function defaultProbe(candidate: string): boolean {
+	try {
+		return spawnSync(candidate, ["-c", "pass"], {
+			stdio: "ignore", windowsHide: true,
+		}).status === 0;
+	} catch {
+		return false;
+	}
+}
+
+/** The GUI-subsystem name candidates for a Python interpreter. */
+export function windowlessCandidates(interpreter: string): string[] {
+	const lower = interpreter.toLowerCase();
+	const candidates: string[] = [];
+	if (lower.endsWith("python.exe")) {
+		candidates.push(
+			interpreter.slice(0, -"python.exe".length) + "pythonw.exe");
+	} else if (lower.endsWith("python3.exe")) {
+		candidates.push(
+			interpreter.slice(0, -"python3.exe".length) + "pythonw3.exe");
+	}
+	if (lower === "python" || lower === "python.exe") {
+		candidates.push("pythonw");
+	}
+	if (lower === "python3" || lower === "python3.exe") {
+		candidates.push("pythonw3");
+	}
+	if (lower === "py" || lower === "py.exe") {
+		candidates.push("pyw");
+	}
+	candidates.push("pythonw");
+	return candidates;
+}
+
+/** Maps an interpreter to the one a launch should actually use. */
+export interface InterpreterResolver {
+	resolve(): string;
+}
+
+/**
+ * Maps a Python interpreter to its GUI-subsystem twin on Windows, so a
+ * detached broker has no console to flash. Off Windows, and when no twin
+ * exists, the interpreter is returned unchanged.
+ */
+export class WindowlessPython implements InterpreterResolver {
+	private readonly interpreter: string;
+	private readonly probe: InterpreterProbe;
+
+	constructor(
+		interpreter: string,
+		probe: InterpreterProbe = defaultProbe,
+	) {
+		this.interpreter = interpreter;
+		this.probe = probe;
+	}
+
+	resolve(): string {
+		if (process.platform !== "win32") return this.interpreter;
+		for (const candidate of windowlessCandidates(this.interpreter)) {
+			if (candidate !== this.interpreter && this.probe(candidate)) {
+				return candidate;
+			}
+		}
+		return this.interpreter;
 	}
 }
 
@@ -513,6 +599,7 @@ export class TeamAgent {
 	private readonly deliver: DeliverFn;
 	private readonly makeBridge: BridgeFactory;
 	private readonly python: string;
+	private readonly windowless: InterpreterResolver;
 	id: string = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
@@ -531,6 +618,8 @@ export class TeamAgent {
 		runner: ProcessHost,
 		deliver: DeliverFn = () => {},
 		bridgeFactory?: BridgeFactory,
+		windowlessFactory: (python: string) => InterpreterResolver =
+			(python) => new WindowlessPython(python),
 	) {
 		this.runner = runner;
 		this.deliver = deliver;
@@ -538,6 +627,7 @@ export class TeamAgent {
 			?? ((sshTarget, label) =>
 				new SshPeerBridge(sshTarget, label, runner));
 		this.python = resolvePython();
+		this.windowless = windowlessFactory(this.python);
 		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
 		this.id =
 			process.env.TEAM_ID ||
@@ -561,6 +651,14 @@ export class TeamAgent {
 		return this.guard(this.runner.spawnDetached(file, args, options));
 	}
 
+	private launchPersistent(
+		file: string,
+		args: string[],
+		options: Record<string, unknown>,
+	): SpawnedProcess | null {
+		return this.guard(this.runner.spawnPersistent(file, args, options));
+	}
+
 	private guard(child: SpawnedProcess | null): SpawnedProcess | null {
 		child?.on("error", () => {
 			// A failed broker/hold/pi start must not crash the session;
@@ -580,10 +678,12 @@ export class TeamAgent {
 
 	/** Launch the detached broker; the broker lock admits only one. */
 	private startBroker(): void {
-		// The broker never exits; detach it so it outlives the session
-		// that happened to start it.
-		const child = this.launchDetached(
-			this.python,
+		// The broker never exits, so it must survive the session. On
+		// Windows a windowless interpreter keeps that persistence from
+		// flashing a console.
+		const interpreter = this.windowless.resolve();
+		const child = this.launchPersistent(
+			interpreter,
 			[teamdBin, "--root", stateRoot, "start"],
 			{ stdio: "ignore" },
 		);
