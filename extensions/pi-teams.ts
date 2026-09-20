@@ -233,6 +233,10 @@ export class TeamAgent {
 		// or missing stamp means it predates a reload/install, so replace
 		// it. This is what ties a broker restart to /reload.
 		if (endpoint && endpoint.version === this.teamdVersion()) return;
+		// Restarting drops every hold. Never do that while a teammate is
+		// live: defer to the next safe window (a session start with no
+		// registered fork), so a reload cannot kill in-flight work.
+		if (endpoint && this.hasLiveForks()) return;
 		if (endpoint) this.stopBroker();
 		this.startBroker();
 	}
@@ -245,6 +249,20 @@ export class TeamAgent {
 			) as { version?: string };
 		} catch {
 			return null;
+		}
+	}
+
+	/** Whether the registry still holds a live teammate (fork). */
+	private hasLiveForks(): boolean {
+		try {
+			const data = JSON.parse(
+				readFileSync(join(stateRoot, "registry.json"), "utf8"),
+			) as { agents?: Record<string, { role?: string }> };
+			return Object.values(data.agents ?? {}).some(
+				(agent) => agent?.role === "fork",
+			);
+		} catch {
+			return false;
 		}
 	}
 
