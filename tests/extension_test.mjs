@@ -323,6 +323,12 @@ test("parseSpawn treats only a standalone -- as the argv separator", () => {
 	});
 	assert.deepEqual(agent.parseSpawn("--name worker --"), { name: "worker", argv: [] });
 	assert.deepEqual(agent.parseSpawn(""), { name: "", argv: [] });
+	// Quoted prompts survive as one argument.
+	assert.deepEqual(
+		agent.parseSpawn('--name worker -- -p "do the thing" --model x'),
+		{ name: "worker", argv: ["-p", "do the thing", "--model", "x"] });
+	assert.deepEqual(agent.parseSpawn("--name worker -- -p 'quoted value'"),
+		{ name: "worker", argv: ["-p", "quoted value"] });
 });
 
 test("deregister closes the held connection", () => {
