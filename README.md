@@ -120,8 +120,9 @@ Tests run on isolated roots under `TMPDIR`
 extensions dir, and records installed bytes in a manifest;
 `scripts/uninstall.sh` removes exactly what was installed. Both stage
 every write through a same-directory temp file before the atomic move.
-Restart pi sessions after installing so the extension loads; the broker
-starts on demand per session.
+On Windows, run both scripts from Git Bash (the shell pi itself uses
+there). Restart pi sessions after installing so the extension loads;
+the broker starts on demand per session.
 
 ```
 scripts/install.sh      # install broker, client, and extension

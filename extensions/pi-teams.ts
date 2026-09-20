@@ -31,18 +31,20 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const home = homedir();
 const stateRoot =
 	process.env.TEAM_ROOT ||
-	`${process.env.XDG_STATE_HOME || `${home}/.local/state`}/pi-teams`;
-const binDir = process.env.PI_TEAMS_BIN || `${home}/.local/bin`;
+	join(process.env.XDG_STATE_HOME || join(home, ".local", "state"),
+		"pi-teams");
+const binDir = process.env.PI_TEAMS_BIN || join(home, ".local", "bin");
 /** Resolves a Python interpreter without a platform branch: an explicit
- *  PYTHON wins, otherwise the first of python3/python that answers. */
+ *  PYTHON wins, otherwise the first of python3/python/py that answers
+ *  (py is the launcher on Windows). */
 function resolvePython(): string {
 	if (process.env.PYTHON) return process.env.PYTHON;
-	for (const candidate of ["python3", "python"]) {
+	for (const candidate of ["python3", "python", "py"]) {
 		try {
 			if (spawnSync(candidate, ["--version"], {
 				stdio: "ignore", windowsHide: true,
@@ -55,8 +57,8 @@ function resolvePython(): string {
 	}
 	return "python3";
 }
-const teamdBin = `${binDir}/teamd`;
-const teamBin = `${binDir}/team`;
+const teamdBin = join(binDir, "teamd");
+const teamBin = join(binDir, "team");
 
 /**
  * How to launch another pi without a shell. Reusing the running runtime
@@ -165,7 +167,7 @@ export class TeamAgent {
 	}
 
 	ensureBroker(): void {
-		if (existsSync(`${stateRoot}/endpoint`)) return;
+		if (existsSync(join(stateRoot, "endpoint"))) return;
 		// The broker never exits; detach it so it outlives the session
 		// that happened to start it.
 		const child = this.launch(
@@ -182,7 +184,7 @@ export class TeamAgent {
 		const role = process.env.TEAM_ID ? "fork" : "main";
 		const parent = process.env.TEAM_PARENT_ID || "";
 		const session = this.sessionFile;
-		const busyFile = `${stateRoot}/${this.id}.busy`;
+		const busyFile = join(stateRoot, `${this.id}.busy`);
 		const env = {
 			...process.env,
 			TEAM_ID: this.id,
@@ -251,7 +253,7 @@ export class TeamAgent {
 		// The model's own lifecycle publishes busyness so the broker's
 		// fork idle GC keeps a working teammate alive.
 		try {
-			writeFileSync(`${stateRoot}/${this.id}.busy`, busy ? "1" : "0");
+			writeFileSync(join(stateRoot, `${this.id}.busy`), busy ? "1" : "0");
 		} catch {
 			// best effort: without the flag the fork is GC'd like an idle one
 		}
@@ -320,11 +322,17 @@ export class TeamAgent {
 	}
 
 	private taskPrompt(session: string, task: string): string {
+		// Call the interpreter on the absolute client path instead of a
+		// `team` name on PATH: a shebang script is not executable on
+		// Windows, and binDir may not be on PATH. The teammate runs this
+		// through its shell tool, where the $TEAM_* variables expand.
+		const send =
+			`"${this.python}" "${teamBin}" --root "$TEAM_ROOT" ` +
+			`send "$TEAM_PARENT_ID" result "<report>"`;
 		return (
 			`You are "${session}", a teammate spawned by a parent pi session ` +
 			`to do one task. Do the task, then report the outcome to your ` +
-			`parent by running this bash command:\n` +
-			`  team --root "$TEAM_ROOT" send "$TEAM_PARENT_ID" result "<report>"\n` +
+			`parent by running this command:\n  ${send}\n` +
 			`Do not write memory. Task:\n${task}`
 		);
 	}
