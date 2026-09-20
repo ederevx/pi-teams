@@ -39,6 +39,12 @@ coordinate natively instead of through the shared tree.
   (agent_start/agent_settled) and the hold streams it in its heartbeat,
   which resets the idle clock. Only forks are ever signalled; main
   agents are never touched.
+- **Busy-file GC**: the broker also sweeps stale `.busy` state files. A
+  file whose agent is no longer registered and whose mtime is older than
+  PI_TEAMS_BUSY_GRACE (default 120s) belongs to an old /reload-idle
+  session and is removed; a registered agent keeps its file however old
+  the mtime is, and paths outside the team root are never touched. This
+  clears flags left by a reload, crash, or reaped fork.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers

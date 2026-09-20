@@ -21,7 +21,7 @@ class BrokerProtocolTests(unittest.TestCase):
     def setUp(self):
         self.root = make_root()
         self.broker = TeamBroker(self.root, idle_timeout=IDLE_ROOMY,
-                                 sweep_interval=0.2)
+                                 sweep_interval=0.2, busy_grace=0.3)
         self.thread = threading.Thread(target=self.broker.run, daemon=True)
         self.thread.start()
         wait_endpoint(self.root)
@@ -48,6 +48,47 @@ class BrokerProtocolTests(unittest.TestCase):
         reply = client.register()
         self.assertIn(reply.get("op"), ("ack", "error"), reply)
         return client
+
+    def _busy_agent(self, agent_id, busy_path):
+        client = TeamClient(self.root)
+        client.id = agent_id
+        client.name = agent_id
+        client.busy_file = busy_path
+        with open(busy_path, "w") as fh:
+            fh.write("1")
+        reply = client.register()
+        self.assertIn(reply.get("op"), ("ack", "error"), reply)
+        return client
+
+    def test_deregister_removes_busy_file(self):
+        path = os.path.join(self.root, "busy-a.busy")
+        client = self._busy_agent("busy-a", path)
+        self.assertTrue(os.path.exists(path))
+        client.deregister()
+        self.assertFalse(os.path.exists(path))
+
+    def test_orphan_busy_file_is_swept(self):
+        path = os.path.join(self.root, "orphan.busy")
+        with open(path, "w") as fh:
+            fh.write("0")
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        self.assertTrue(
+            wait_until(lambda: not os.path.exists(path)),
+            "old orphan busy file was not swept",
+        )
+
+    def test_registered_busy_file_survives_sweep(self):
+        path = os.path.join(self.root, "live.busy")
+        client = self._busy_agent("live", path)
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        time.sleep(0.6)
+        self.assertTrue(
+            os.path.exists(path),
+            "a registered agent's busy file must not be swept",
+        )
+        client.deregister()
 
     def test_handshake_rejects_bad_token(self):
         endpoint = self.broker.root.read_endpoint()
@@ -480,7 +521,7 @@ class BrokerProtocolTests(unittest.TestCase):
             probe.id = "beta:probe"
             probe.register()
             broker_b._peer_pending["rid-x"] = (
-                probe._conn, broker_b._peers["alpha"])
+                probe._conn, broker_b._peers["alpha"], time.time())
             broker_a.stop()
             thread_a.join(timeout=3)
             self.assertTrue(wait_until(
