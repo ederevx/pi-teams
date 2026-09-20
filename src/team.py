@@ -277,28 +277,42 @@ class TeamClient:
 
     def fork(self, name, argv):
         self.register()
-        child_env = dict(os.environ)
-        child_env["TEAM_ID"] = "fork-%d-%s" % (
-            os.getpid(), "%08x" % random.getrandbits(32),
-        )
-        child_env["TEAM_NAME"] = name or child_env["TEAM_ID"]
-        child_env["TEAM_ROLE"] = "fork"
-        child_env["TEAM_PARENT_ID"] = self.id
-        if self.session:
-            child_env["TEAM_SESSION"] = self.session
+        fork_id, child_env = self._fork_identity(name)
         if not argv:
             argv = [sys.executable, os.path.abspath(__file__), "hold"]
-        log = self.root.base / "forks" / ("%s.log" % child_env["TEAM_ID"])
+        log = self._fork_log(fork_id)
+        proc = self._spawn_fork(argv, child_env, log)
+        return {"op": "forked", "id": fork_id, "pid": proc.pid,
+                "log": str(log)}
+
+    def _fork_identity(self, name):
+        # Owns the child's fork identity; only the parent's id and session
+        # are read from this client.
+        fork_id = "fork-%d-%s" % (
+            os.getpid(), "%08x" % random.getrandbits(32),
+        )
+        env = dict(os.environ)
+        env["TEAM_ID"] = fork_id
+        env["TEAM_NAME"] = name or fork_id
+        env["TEAM_ROLE"] = "fork"
+        env["TEAM_PARENT_ID"] = self.id
+        if self.session:
+            env["TEAM_SESSION"] = self.session
+        return fork_id, env
+
+    def _fork_log(self, fork_id):
+        log = self.root.base / "forks" / ("%s.log" % fork_id)
         log.parent.mkdir(parents=True, exist_ok=True)
+        return log
+
+    def _spawn_fork(self, argv, env, log):
         logfile = open(str(log), "ab")
-        proc = subprocess.Popen(
+        return subprocess.Popen(
             argv,
-            env=child_env,
+            env=env,
             stdout=logfile,
             stderr=logfile,
         )
-        return {"op": "forked", "id": child_env["TEAM_ID"], "pid": proc.pid,
-                "log": str(log)}
 
 
 def parse_payload(text):
