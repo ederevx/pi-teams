@@ -59,10 +59,18 @@ coordinate natively instead of through the shared tree.
   session start or spawn starts the replacement. It never self-exits
   while agents are active, so a reload cannot kill live work; the
   extension only starts a broker when none is published.
+- **Attach an existing session**: any running pi session that is not
+  already a teammate can become one without spawning a new process.
+  `team_attach` (or `/team attach <parent> [name]`) asks the target
+  agent to re-register under a fork id of the requester, so `team_wait`
+  blocks for its reports and the broker GCs it with the parent.
+  `/team detach` returns the session to a plain main agent so it is no
+  longer reaped. A teammate cannot be re-attached. The session file is
+  preserved, so an attached session stays in `/resume`.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
-  `/team ls|status|send|kill`. The hold and forked pi are
+  `/team ls|status|send|attach|detach|kill`. The hold and forked pi are
   launched with Node's `child_process`, not `pi.exec`: `pi.exec` opens
   a child's stdin to `/dev/null` and drops the `env` option, which
   would make the hold exit on its first read and strip a fork of its
@@ -173,7 +181,10 @@ That chains, in order:
   parent reach the real agent; a remembered peer is rebuilt on the next
   session; `team_wait` resolves
   one or several awaited results without a second delivery and on
-  timeout, abort, or shutdown; a password-only or unknown host fails
+  timeout, abort, or shutdown; an attach re-registers the session as a
+  fork and notifies the parent, an inbound attach request converts the
+  session and acks the requester, and detach restores a main identity; a
+  password-only or unknown host fails
   with the one-line setup guidance and no tunnel; the broker starts
   detached only when absent.
 - **Setup-script tests** (`tests/setup_script_test.py`): the user-run

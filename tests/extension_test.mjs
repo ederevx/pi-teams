@@ -797,3 +797,94 @@ test("restorePeers rebuilds a remembered ssh peer", async () => {
 		"restorePeers did not rebuild the tunnel");
 });
 
+test("attachTo re-registers as a fork and notifies the parent", async () => {
+	const sends = [];
+	const { calls, runner } = makeRunner((file, args) => {
+		sends.push(args);
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	const before = agent.id;
+	const ref = await agent.attachTo("parent-9", "helper");
+	assert.notEqual(agent.id, before);
+	assert.ok(agent.id.includes(":fork-"), "id is not a fork id");
+	assert.equal(ref.session, "helper");
+	const hold = calls[calls.length - 1];
+	assert.equal(hold.options.env.TEAM_ID, agent.id);
+	assert.equal(hold.options.env.TEAM_ROLE, "fork");
+	assert.equal(hold.options.env.TEAM_PARENT_ID, "parent-9");
+	assert.equal(hold.options.env.TEAM_NAME, "helper");
+	const notice = sends.find((a) => a.includes("notice"));
+	assert.ok(notice && notice.includes("parent-9"),
+		"no attach notice was sent to the parent");
+	agent.stopHold();
+});
+
+test("detach returns an attached agent to a main identity", async () => {
+	const { calls, runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	const attached = await agent.attachTo("parent-9", "helper");
+	const detached = agent.detach();
+	assert.notEqual(detached, attached.id);
+	const hold = calls[calls.length - 1];
+	assert.equal(hold.options.env.TEAM_ROLE, "main");
+	assert.equal(hold.options.env.TEAM_PARENT_ID, "");
+	agent.stopHold();
+});
+
+test("an inbound attach request converts this session and acks", async () => {
+	// A non-teammate session: clear the spawn identity the suite sets so
+	// the agent registers as main and may be attached.
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const sends = [];
+	const { calls, runner } = makeRunner((file, args) => {
+		sends.push(args);
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	onData(JSON.stringify({
+		from: "alpha:main", to: agent.id, kind: "attach",
+		payload: { requestId: "r1", name: "kid" },
+	}) + "\n");
+	await new Promise((r) => setTimeout(r, 20));
+	const ack = sends.find((a) => a.includes("attach-ack"));
+	assert.ok(ack, "no attach-ack was sent");
+	assert.ok(ack.includes("alpha:main"));
+	const hold = calls[calls.length - 1];
+	assert.equal(hold.options.env.TEAM_ROLE, "fork");
+	assert.equal(hold.options.env.TEAM_PARENT_ID, "alpha:main");
+	agent.stopHold();
+});
+
+test("attachRemote asks a target agent and returns its new fork id", async () => {
+	const sends = [];
+	const { calls, runner } = makeRunner((file, args) => {
+		sends.push(args);
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const pending = agent.attachRemote("beta:main", "kid");
+	await new Promise((r) => setTimeout(r, 20));
+	const sent = sends.find((a) => a.includes("attach"));
+	assert.ok(sent, "attach request was not sent");
+	const request = JSON.parse(sent[sent.length - 1]);
+	onData(JSON.stringify({
+		from: "beta:main", to: agent.id, kind: "attach-ack",
+		payload: { requestId: request.requestId, id: "beta:fork-1",
+			session: "kid" },
+	}) + "\n");
+	const ref = await pending;
+	assert.equal(ref.id, "beta:fork-1");
+	assert.equal(ref.session, "kid");
+	agent.stopHold();
+});
+
