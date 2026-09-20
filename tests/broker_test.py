@@ -1,6 +1,7 @@
 """Broker protocol tests: handshake, registry, relay, liveness."""
 
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -260,6 +261,54 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertTrue(
                 wait_until(lambda: dummy.poll() is not None, timeout=6),
                 "fork never GC'd after going idle",
+            )
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_waiting_fork_survives_idle_gc(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=2.0, fork_idle=0.5,
+                            sweep_interval=0.1)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"]
+        )
+        busy = os.path.join(root, "fork-wait.busy")
+        with open(busy, "w") as fh:
+            fh.write("2")
+        try:
+            wait_endpoint(root)
+            parent = TeamClient(root, heartbeat=0.2)
+            parent.id = "parent-w"
+            parent.role = "main"
+            parent.register()
+            fork = TeamClient(root, heartbeat=0.2)
+            fork.id = "fork-wait"
+            fork.role = "fork"
+            fork.parent = "parent-w"
+            fork.owner_pid = str(dummy.pid)
+            fork.busy_file = busy
+            fork.register()
+            # Waiting is not work, but it is not idle either: the fork
+            # must outlive several fork-idle windows while it waits.
+            time.sleep(2.0)
+            self.assertIsNone(dummy.poll(),
+                              "waiting fork was garbage-collected")
+            self.assertIn("fork-wait", self._ids_via(root))
+            # Leaving the wait lets the stale work clock expire it again.
+            with open(busy, "w") as fh:
+                fh.write("0")
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=6),
+                "fork never GC'd after it left the wait",
             )
         finally:
             broker.stop()
