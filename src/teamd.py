@@ -28,6 +28,7 @@ Reply objects use op "ack", "error", "registry", "message",
 """
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -239,6 +240,10 @@ class TeamBroker:
         )
         self._last_session_sweep = 0.0
         self.token = secrets.token_hex(16)
+        # Stamp the running source so a reloading extension can tell a
+        # broker built from older code from the installed one and restart
+        # it. The stamp is the installed file's own hash.
+        self.version = self._source_version()
         self._registry = {}
         self._clients = {}
         self._peers = {}
@@ -249,6 +254,14 @@ class TeamBroker:
         self._running = False
         self._server = None
         self._lockpath = None
+
+    def _source_version(self):
+        # Hash the running file so the stamp reflects the installed code.
+        try:
+            with open(__file__, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()[:16]
+        except OSError:
+            return ""
 
     def _acquire_lock(self):
         # One broker per root: a racing session (every hosted pi reloads
@@ -313,7 +326,8 @@ class TeamBroker:
             ENDPOINT_NAME,
             json.dumps(
                 {"host": "127.0.0.1", "port": port,
-                 "token": self.token, "name": self.host},
+                 "token": self.token, "name": self.host,
+                 "version": self.version},
                 indent=2,
             )
             + "\n",
