@@ -46,7 +46,7 @@ process.env.PI_TEAMS_BIN = binDir;
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
-const { TeamAgent } = await import("../extensions/pi-teams.ts");
+const { TeamAgent, logTeamMessage } = await import("../extensions/pi-teams.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -130,6 +130,27 @@ test("hold replaces a previous held connection", () => {
 	assert.equal(calls[1].killed, false);
 	agent.stopHold();
 	assert.equal(calls[1].killed, true);
+});
+
+test("logTeamMessage records a truncated sent/received log entry", () => {
+	const entries = [];
+	const pi = { appendEntry: (type, data) => entries.push({ type, data }) };
+	logTeamMessage(pi, "received", {
+		from: "kid", to: "parent", kind: "result", payload: "x".repeat(200),
+	});
+	assert.equal(entries.length, 1);
+	assert.equal(entries[0].type, "pi-teams-log");
+	assert.equal(entries[0].data.direction, "received");
+	assert.equal(entries[0].data.payload.length, 200);
+	assert.equal(entries[0].data.preview.length, 96);
+	assert.ok(entries[0].data.preview.endsWith("..."));
+
+	logTeamMessage(pi, "sent", {
+		from: "parent", to: "kid", kind: "task", payload: "short",
+	});
+	assert.equal(entries.length, 2);
+	assert.equal(entries[1].data.direction, "sent");
+	assert.equal(entries[1].data.preview, "short");
 });
 
 test("hold forwards inbound messages to the agent", () => {
