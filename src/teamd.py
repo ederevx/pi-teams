@@ -9,12 +9,14 @@ register once, then exchange JSON-lines messages; the broker relays to
 online recipients, mirrors the registry, and enforces fork lifetime
 through connections only.
 
-There is no pid probing anywhere: liveness is connection liveness. A
+There is no pid probing for liveness: liveness is connection liveness. A
 connection that closes (EOF) ends its agent; entries idle past the
-heartbeat timeout are swept. When a fork's parent entry disappears, the
-broker sends that fork a terminate notice on its connection and closes
-it, so a team cannot outlive the process that spawned it. Nothing here
-kills processes or names pids, which keeps the broker portable.
+heartbeat timeout are swept. When a fork's parent entry disappears, or a
+fork goes idle, the broker sends that fork a terminate notice, closes
+its connection, and signals the owner pid it serves (only forks carry
+one). The signal is one portable SIGTERM (TerminateProcess on Windows)
+the daemon sends to reap the teammate; it is never used to test whether
+a pid is alive, which keeps the broker portable.
 
 Protocol (one JSON object per line, both directions):
   hello/{op, token}            mandatory first message; ack on success
@@ -61,12 +63,24 @@ class TeamRoot:
         tmp.write_text(data)
         try:
             os.chmod(str(tmp), mode)
-            os.replace(str(tmp), str(target))
-        except FileNotFoundError:
-            # Mirror-only write: the owning root was removed (e.g. test
-            # teardown raced a lingering connection thread). The
-            # in-memory registry remains authoritative.
+        except OSError:
+            # Windows chmod only toggles the read-only bit.
             pass
+        # On Windows os.replace can raise PermissionError while a reader
+        # holds the destination open; retry briefly instead of failing.
+        for attempt in range(11):
+            try:
+                os.replace(str(tmp), str(target))
+                return
+            except FileNotFoundError:
+                # Mirror-only write: the owning root was removed (e.g. test
+                # teardown raced a lingering connection thread). The
+                # in-memory registry remains authoritative.
+                return
+            except PermissionError:
+                if attempt >= 10:
+                    return
+                time.sleep(0.05)
 
     def read_endpoint(self):
         try:
@@ -307,11 +321,13 @@ class TeamBroker:
         self._broadcast("registry-change", self._snapshot())
 
     def _touch(self, agent_id, work=False):
-        entry = self._registry.get(agent_id) if agent_id else None
-        if entry is not None:
-            entry["last_seen"] = time.time()
-            if work:
-                entry["last_work"] = time.time()
+        now = time.time()
+        with self._lock:
+            entry = self._registry.get(agent_id) if agent_id else None
+            if entry is not None:
+                entry["last_seen"] = now
+                if work:
+                    entry["last_work"] = now
 
     def _drop_entry(self, agent_id):
         with self._lock:
@@ -403,10 +419,20 @@ class TeamBroker:
             self._sweep()
 
     def _sweep(self):
-        now = time.time()
+        doomed_fork, doomed_idle = self._classify(time.time())
+        if not doomed_fork and not doomed_idle:
+            return
+        for agent_id, why in doomed_fork:
+            self._reap_fork(agent_id, why)
+        for agent_id in doomed_idle:
+            self._forget(agent_id)
+        self._persist_and_notify()
+
+    def _classify(self, now):
+        # Pure policy: which agents have outlived their liveness window.
+        doomed_fork = []
+        doomed_idle = []
         with self._lock:
-            doomed_fork = []
-            doomed_idle = []
             for agent_id, entry in list(self._registry.items()):
                 parent = entry.get("parent")
                 parent_gone = bool(parent) and parent not in self._registry
@@ -419,34 +445,35 @@ class TeamBroker:
                     entry.get("last_seen", 0) < now - self.idle_timeout
                 )
                 if is_fork and (parent_gone or work_idle or seen_idle):
-                    doomed_fork.append(agent_id)
+                    doomed_fork.append(
+                        (agent_id, "parent-gone" if parent_gone else "idle-gc"))
                 elif seen_idle:
                     doomed_idle.append(agent_id)
-            if not doomed_fork and not doomed_idle:
-                return
-            for agent_id in doomed_fork:
-                entry = self._registry.get(agent_id)
-                conn = self._clients.pop(agent_id, None)
-                self._registry.pop(agent_id, None)
-                if conn is not None:
-                    why = "parent-gone" if (
-                        entry and entry.get("parent")
-                        and entry["parent"] not in self._registry
-                    ) else "idle-gc"
-                    self._write(conn, {
-                        "op": "message", "from": "*",
-                        "kind": "terminate",
-                        "payload": {"id": agent_id, "why": why},
-                    })
-                    try:
-                        conn.close()
-                    except OSError:
-                        pass
-                self._kill_owner(entry or {}, "idle-gc")
-            for agent_id in doomed_idle:
-                self._clients.pop(agent_id, None)
-                self._registry.pop(agent_id, None)
-        self._persist_and_notify()
+        return doomed_fork, doomed_idle
+
+    def _reap_fork(self, agent_id, why):
+        # A fork: terminate its endpoint, drop its entry, and signal the
+        # pi process it serves. Only forks are ever signalled.
+        with self._lock:
+            entry = self._registry.get(agent_id)
+            conn = self._clients.pop(agent_id, None)
+            self._registry.pop(agent_id, None)
+        if conn is not None:
+            self._write(conn, {
+                "op": "message", "from": "*",
+                "kind": "terminate",
+                "payload": {"id": agent_id, "why": why},
+            })
+            try:
+                conn.close()
+            except OSError:
+                pass
+        self._kill_owner(entry or {}, why)
+
+    def _forget(self, agent_id):
+        with self._lock:
+            self._clients.pop(agent_id, None)
+            self._registry.pop(agent_id, None)
 
     # -- low-level writes -------------------------------------------
 

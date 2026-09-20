@@ -27,16 +27,33 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { spawn as nodeSpawn } from "node:child_process";
+import { spawn as nodeSpawn, spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname } from "node:path";
 
-const home = process.env.HOME || ".";
+const home = homedir();
 const stateRoot =
 	process.env.TEAM_ROOT ||
 	`${process.env.XDG_STATE_HOME || `${home}/.local/state`}/pi-teams`;
 const binDir = process.env.PI_TEAMS_BIN || `${home}/.local/bin`;
-const python = process.env.PYTHON || "python3";
+/** Resolves a Python interpreter without a platform branch: an explicit
+ *  PYTHON wins, otherwise the first of python3/python that answers. */
+function resolvePython(): string {
+	if (process.env.PYTHON) return process.env.PYTHON;
+	for (const candidate of ["python3", "python"]) {
+		try {
+			if (spawnSync(candidate, ["--version"], {
+				stdio: "ignore", windowsHide: true,
+			}).status === 0) {
+				return candidate;
+			}
+		} catch {
+			// try the next candidate
+		}
+	}
+	return "python3";
+}
 const teamdBin = `${binDir}/teamd`;
 const teamBin = `${binDir}/team`;
 
@@ -137,6 +154,7 @@ export class TeamAgent {
 	readonly exec: ExecFn;
 	private readonly spawnProcess: SpawnFn;
 	private readonly deliver: DeliverFn;
+	private readonly python: string;
 	id: string = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
@@ -147,6 +165,7 @@ export class TeamAgent {
 		this.exec = exec;
 		this.spawnProcess = spawnProcess;
 		this.deliver = deliver;
+		this.python = resolvePython();
 		this.id =
 			process.env.TEAM_ID ||
 			`pi-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
@@ -174,7 +193,7 @@ export class TeamAgent {
 		// The broker never exits; detach it so it outlives the session
 		// that happened to start it.
 		const child = this.launch(
-			python,
+			this.python,
 			[teamdBin, "--root", stateRoot, "start"],
 			{ detached: true, stdio: "ignore", windowsHide: true },
 		);
@@ -203,7 +222,7 @@ export class TeamAgent {
 		// endpoint instead of leaving an orphan pinging forever. Its
 		// stdout carries inbound messages for the agent.
 		const proc = this.launch(
-			python,
+			this.python,
 			[teamBin, "--root", stateRoot, "hold"],
 			{ env, stdio: ["pipe", "pipe", "ignore"] },
 		);
@@ -264,7 +283,7 @@ export class TeamAgent {
 
 	async snapshot(): Promise<AgentInfo[]> {
 		const result = await this.exec(
-			python,
+			this.python,
 			[teamBin, "--root", stateRoot, "ls"],
 			{ timeout: 3000 },
 		);
@@ -278,7 +297,7 @@ export class TeamAgent {
 
 	async send(to: string, kind: string, text: string): Promise<string> {
 		const result = await this.exec(
-			python,
+			this.python,
 			[teamBin, "--root", stateRoot, "send", to, kind, text],
 			{ timeout: 3000 },
 		);
@@ -287,7 +306,7 @@ export class TeamAgent {
 
 	async terminate(agentId: string): Promise<void> {
 		await this.exec(
-			python,
+			this.python,
 			[teamBin, "--root", stateRoot, "terminate", agentId],
 			{ timeout: 3000 },
 		);
