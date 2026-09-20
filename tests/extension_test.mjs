@@ -120,31 +120,41 @@ test("hold replaces a previous held connection", () => {
 
 test("spawn detaches the teammate with fork identity in the environment", () => {
 	publishEndpoint(true);
-	const { agent, calls } = makeAgent();
-	agent.spawn("worker", ["pi", "-p", "hi"]);
-	assert.equal(calls.length, 1);
-	const call = calls[0];
-	assert.equal(call.file, "pi");
-	assert.deepEqual(call.args, ["-p", "hi"]);
-	assert.equal(call.options.detached, true);
-	assert.equal(call.options.stdio, "ignore");
-	assert.equal(call.options.env.TEAM_ROLE, "fork");
-	assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
-	assert.equal(call.options.env.TEAM_NAME, "worker");
-	assert.ok(call.options.env.TEAM_ID.startsWith("fork-"));
-	assert.equal(call.unrefed, true);
+	process.env.PI_TEAMS_PI = "pi-test";
+	try {
+		const { agent, calls } = makeAgent();
+		agent.spawn("worker", ["--model", "x", "-p", "hi"]);
+		assert.equal(calls.length, 1);
+		const call = calls[0];
+		assert.equal(call.file, "pi-test");
+		assert.deepEqual(call.args, ["--model", "x", "-p", "hi"]);
+		assert.equal(call.options.detached, true);
+		assert.equal(call.options.stdio, "ignore");
+		assert.equal(call.options.windowsHide, true);
+		assert.equal(call.options.env.TEAM_ROLE, "fork");
+		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
+		assert.equal(call.options.env.TEAM_NAME, "worker");
+		assert.ok(call.options.env.TEAM_ID.startsWith("fork-"));
+		assert.equal(call.unrefed, true);
+	} finally {
+		delete process.env.PI_TEAMS_PI;
+	}
 });
 
-test("spawn without argv runs a one-shot pi teammate", () => {
+test("spawn resolves pi from the running runtime, not a shell shim", () => {
+	// Windows wraps pi as a .cmd/.ps1 shim that child_process cannot
+	// execute without a shell; the runtime plus its entry script is
+	// spawnable everywhere.
 	publishEndpoint(true);
+	delete process.env.PI_TEAMS_PI;
 	const { agent, calls } = makeAgent();
 	agent.spawn("", []);
 	assert.equal(calls.length, 1);
 	const call = calls[0];
-	assert.equal(call.file, "pi");
-	assert.equal(call.args[0], "--no-session");
-	assert.equal(call.args[1], "-p");
-	assert.ok(call.args[2].length > 0);
+	assert.equal(call.file, process.execPath);
+	assert.equal(call.args[0], process.argv[1]);
+	assert.deepEqual(call.args.slice(1, 3), ["--no-session", "-p"]);
+	assert.ok(call.args[3].length > 0);
 	assert.ok(call.options.env.TEAM_NAME.startsWith("fork-"));
 });
 
@@ -157,6 +167,7 @@ test("spawn starts a detached broker only when none is published", () => {
 	assert.deepEqual(calls[0].args, [`${binDir}/teamd`, "--root", stateRoot, "start"]);
 	assert.equal(calls[0].options.detached, true);
 	assert.equal(calls[0].options.stdio, "ignore");
+	assert.equal(calls[0].options.windowsHide, true);
 	assert.equal(calls[0].unrefed, true);
 
 	publishEndpoint(true);

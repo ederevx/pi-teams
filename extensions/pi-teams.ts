@@ -24,6 +24,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 
 const home = process.env.HOME || ".";
 const stateRoot =
@@ -33,7 +34,26 @@ const binDir = process.env.PI_TEAMS_BIN || `${home}/.local/bin`;
 const python = process.env.PYTHON || "python3";
 const teamdBin = `${binDir}/teamd`;
 const teamBin = `${binDir}/team`;
-const piBin = process.env.PI_TEAMS_PI || "pi";
+
+/**
+ * How to launch another pi without a shell. Reusing the running runtime
+ * avoids spawning a Windows launcher shim (pi.cmd/pi.ps1) directly,
+ * which child_process cannot execute; pi's own subagent helper resolves
+ * it the same way. PI_TEAMS_PI overrides the command for forks.
+ */
+function piInvocation(): { command: string; args: string[] } {
+	const override = process.env.PI_TEAMS_PI;
+	if (override) return { command: override, args: [] };
+	const entry = process.argv[1];
+	if (entry && existsSync(entry) && !entry.startsWith("/$bunfs/root/")) {
+		return { command: process.execPath, args: [entry] };
+	}
+	const execName = basename(process.execPath).toLowerCase();
+	if (!/^(node|bun)(\.exe)?$/.test(execName)) {
+		return { command: process.execPath, args: [] };
+	}
+	return { command: "pi", args: [] };
+}
 
 interface AgentInfo {
 	id: string;
@@ -102,7 +122,7 @@ export class TeamAgent {
 		const child = this.launch(
 			python,
 			[teamdBin, "--root", stateRoot, "start"],
-			{ detached: true, stdio: "ignore" },
+			{ detached: true, stdio: "ignore", windowsHide: true },
 		);
 		child?.unref();
 	}
@@ -209,9 +229,10 @@ export class TeamAgent {
 	spawn(name: string, argv: string[]): void {
 		const forkId =
 			`fork-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
+		const invocation = piInvocation();
 		const args = argv.length
 			? argv
-			: [piBin, "--no-session", "-p",
+			: ["--no-session", "-p",
 				"You are a teammate of the agent that forked you. " +
 				"Check /team ls for teammates and use /team send " +
 				"to coordinate."];
@@ -228,11 +249,11 @@ export class TeamAgent {
 		// The child is its own pi; detach it so the broker, not process
 		// parentage, owns its lifetime. The environment carries the fork
 		// identity that pi.exec would have dropped.
-		const child = this.launch(args[0], args.slice(1), {
-			env,
-			detached: true,
-			stdio: "ignore",
-		});
+		const child = this.launch(
+			invocation.command,
+			[...invocation.args, ...args],
+			{ env, detached: true, stdio: "ignore", windowsHide: true },
+		);
 		child?.unref();
 	}
 
@@ -317,7 +338,7 @@ export default function (pi: ExtensionAPI) {
 				app.spawn(name, argv);
 				ctx.ui.notify(
 					`pi-teams: spawned ${name || "fork"} ` +
-					`(${argv.length ? argv.join(" ") : piBin})`,
+					`(${argv.length ? argv.join(" ") : "default teammate"})`,
 					"info",
 				);
 				return;
