@@ -111,45 +111,6 @@ type SpawnFn = (
 ) => SpawnedProcess;
 type DeliverFn = (message: TeamMessage) => void;
 
-/** Splits a command tail into argv, honoring single and double quotes so
- *  a teammate can be given a multi-word prompt. */
-function splitArgs(text: string): string[] {
-	const args: string[] = [];
-	let current = "";
-	let quote = "";
-	let started = false;
-	for (const ch of text) {
-		if (quote) {
-			if (ch === quote) quote = "";
-			else current += ch;
-			started = true;
-			continue;
-		}
-		if (ch === "'" || ch === "\"") {
-			quote = ch;
-			started = true;
-			continue;
-		}
-		if (/\s/.test(ch)) {
-			if (started) {
-				args.push(current);
-				current = "";
-				started = false;
-			}
-			continue;
-		}
-		current += ch;
-		started = true;
-	}
-	if (started) args.push(current);
-	return args;
-}
-
-export interface SpawnRequest {
-	name: string;
-	argv: string[];
-}
-
 export interface SpawnOptions {
 	provider?: string;
 	model?: string;
@@ -323,28 +284,6 @@ export class TeamAgent {
 		);
 	}
 
-	parseSpawn(rest: string): SpawnRequest {
-		const trimmed = (rest || "").trim();
-		const nameMatch = /^--name\s+(\S+)/.exec(trimmed);
-		const name = nameMatch ? nameMatch[1] : "";
-		// The argv separator is a standalone "--"; the leading "--" of
-		// "--name" must never be mistaken for it.
-		const sep = /(?:^|\s)--(?:\s|$)/.exec(trimmed);
-		let argv: string[] = [];
-		if (sep) {
-			const after = trimmed.slice(sep.index + sep[0].length).trim();
-			argv = after ? splitArgs(after) : [];
-		}
-		return { name, argv };
-	}
-
-	spawn(name: string, argv: string[]): TeammateRef {
-		const forkId = this.makeForkId();
-		const session = name || forkId;
-		this.launchTeammate(forkId, session, this.sessionArgs(argv, session));
-		return { id: forkId, session };
-	}
-
 	/** The common teammate template: the caller supplies only the task and
 	 *  an optional name; session, model, and the report-back instruction
 	 *  are supplied here. */
@@ -401,36 +340,6 @@ export class TeamAgent {
 			{ env, detached: true, stdio: "ignore", windowsHide: true },
 		);
 		child?.unref();
-	}
-
-	/** Teammates must be persistent, named sessions so /resume can find
-	 *  them: inject the parent's session dir and a display name when the
-	 *  caller omitted them, and refuse --no-session outright. */
-	private sessionArgs(argv: string[], sessionName: string): string[] {
-		const hasFlag = (flag: string) =>
-			argv.includes(flag) || argv.some((a) => a.startsWith(`${flag}=`));
-		if (hasFlag("--no-session")) {
-			throw new Error(
-				"teammates must have a session; --no-session is not allowed");
-		}
-		if (argv.length === 0) {
-			return [
-				...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
-				"--name", sessionName,
-				"-p",
-				"You are a teammate of the agent that forked you. " +
-				"Check /team ls for teammates and use /team send " +
-				"to coordinate.",
-			];
-		}
-		const args = [...argv];
-		if (!hasFlag("--name") && !hasFlag("-n")) {
-			args.unshift("--name", sessionName);
-		}
-		if (!hasFlag("--session-dir") && this.sessionDir) {
-			args.unshift("--session-dir", this.sessionDir);
-		}
-		return args;
 	}
 
 	sessionDirLabel(): string {
@@ -621,7 +530,7 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.registerCommand("team", {
 		description:
-			"pi-teams: ls|status|send <id> [kind] <text>|spawn [--name N] [-- argv...]|kill <id>",
+			"pi-teams: ls|status|send <id> [kind] <text>|kill <id>",
 		handler: async (args, ctx) => {
 			const parts = (args || "").trim().split(/\s+/).filter(Boolean);
 			const sub = parts.shift() || "status";
@@ -652,24 +561,6 @@ export default async function (pi: ExtensionAPI) {
 				ctx.ui.notify(`pi-teams: ${reply}`, "info");
 				return;
 			}
-			if (sub === "spawn") {
-				const { name, argv } = app.parseSpawn(rest);
-				try {
-					const ref = app.spawn(name, argv);
-					ctx.ui.notify(
-						`pi-teams: teammate "${ref.session}" started as ` +
-						`session "${ref.session}" in ${app.sessionDirLabel()}; ` +
-						"it will appear in /resume once it writes",
-						"info",
-					);
-				} catch (err) {
-					ctx.ui.notify(
-						`pi-teams: ${err instanceof Error ? err.message : String(err)}`,
-						"warning",
-					);
-				}
-				return;
-			}
 			if (sub === "kill") {
 				const target = rest.trim();
 				if (!target) {
@@ -682,7 +573,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			ctx.ui.notify(
 				"pi-teams: subcommands: ls | status | send <id> [kind] " +
-				"<text> | spawn [--name N] [-- argv...] | kill <id>",
+				"<text> | kill <id>",
 				"warning",
 			);
 		},

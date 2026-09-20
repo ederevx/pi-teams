@@ -6,7 +6,9 @@ comes from the environment (TEAM_ID, TEAM_NAME, TEAM_ROLE,
 TEAM_PARENT_ID, TEAM_SESSION) or is derived from the process. One
 TeamClient holds one persistent connection: while it stays open the
 agent is reachable and broker relays arrive on it. The CLI offers
-register, ls, send, follow, hold, terminate, fork, and deregister.
+register, ls, send, follow, hold, terminate, and deregister. Teammates
+are spawned only by the extension's structured team_spawn tool, never
+by an arbitrary client command.
 
 Liveness is connection-based on every platform: hold() keeps the
 endpoint open and exits when the broker closes it (deregister), a
@@ -20,7 +22,6 @@ import json
 import os
 import random
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -273,48 +274,6 @@ class TeamClient:
         finally:
             self.close()
 
-    # -- forking ------------------------------------------------------
-
-    def fork(self, name, argv):
-        self.register()
-        fork_id, child_env = self._fork_identity(name)
-        if not argv:
-            argv = [sys.executable, os.path.abspath(__file__), "hold"]
-        log = self._fork_log(fork_id)
-        proc = self._spawn_fork(argv, child_env, log)
-        return {"op": "forked", "id": fork_id, "pid": proc.pid,
-                "log": str(log)}
-
-    def _fork_identity(self, name):
-        # Owns the child's fork identity; only the parent's id and session
-        # are read from this client.
-        fork_id = "fork-%d-%s" % (
-            os.getpid(), "%08x" % random.getrandbits(32),
-        )
-        env = dict(os.environ)
-        env["TEAM_ID"] = fork_id
-        env["TEAM_NAME"] = name or fork_id
-        env["TEAM_ROLE"] = "fork"
-        env["TEAM_PARENT_ID"] = self.id
-        if self.session:
-            env["TEAM_SESSION"] = self.session
-        return fork_id, env
-
-    def _fork_log(self, fork_id):
-        log = self.root.base / "forks" / ("%s.log" % fork_id)
-        log.parent.mkdir(parents=True, exist_ok=True)
-        return log
-
-    def _spawn_fork(self, argv, env, log):
-        logfile = open(str(log), "ab")
-        return subprocess.Popen(
-            argv,
-            env=env,
-            stdout=logfile,
-            stderr=logfile,
-        )
-
-
 def parse_payload(text):
     try:
         return json.loads(text)
@@ -357,9 +316,6 @@ def main(argv=None):
     p_term = sub.add_parser("terminate")
     p_term.add_argument("to")
     p_term.add_argument("why", nargs="?", default="requested")
-    p_fork = sub.add_parser("fork")
-    p_fork.add_argument("--name")
-    p_fork.add_argument("--argv", nargs="+")
 
     args = parser.parse_args(argv)
     if args.command is None:
@@ -384,8 +340,6 @@ def main(argv=None):
         ))
     elif args.command == "terminate":
         print(json.dumps(client.terminate(args.to, args.why)))
-    elif args.command == "fork":
-        print(json.dumps(client.fork(args.name, args.argv)))
     else:
         parser.error("unknown command %r" % args.command)
     return 0

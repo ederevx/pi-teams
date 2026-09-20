@@ -25,7 +25,7 @@ coordinate natively instead of through the shared tree.
   endpoint; while it stays open the agent is reachable and relayed
   messages arrive on it. CLI: `team register`, `team ls`, `team send
   <id> <kind> <text>`, `team follow`, `team terminate <id>`,
-  `team fork --name <n> [-- argv...]`, `team deregister`.
+  `team deregister`.
 - **Fork lifetime and GC**: a fork registers with its parent's team id
   in the `parent` field and reports the pid of the pi it serves as its
   owner. Liveness is connection-based everywhere: when a parent's
@@ -42,7 +42,7 @@ coordinate natively instead of through the shared tree.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
-  `/team ls|status|send|spawn|kill`. The hold and forked pi are
+  `/team ls|status|send|kill`. The hold and forked pi are
   launched with Node's `child_process`, not `pi.exec`: `pi.exec` opens
   a child's stdin to `/dev/null` and drops the `env` option, which
   would make the hold exit on its first read and strip a fork of its
@@ -51,14 +51,12 @@ coordinate natively instead of through the shared tree.
   child environment, and EOF on that pipe (pi gone) drops the endpoint
   instead of leaving an orphan. Forks reuse the running pi runtime
   (`process.execPath` plus its entry script) instead of the `pi` name,
-  so a Windows launcher shim is never spawned directly. Every fork is a
-  named session stored in the parent's session directory (or the
-  default store), so it appears in `/resume`; `--no-session` is refused
-  and custom args inherit the parent's directory and a display name.
-  `/team spawn` reports the session it created, and the fork's own
-  `notice` records the exact session file. Agents spawn teammates
-  directly with the `team_spawn` tool, giving only a task (and an
-  optional name); the extension supplies the session, inherits the
+  so a Windows launcher shim is never spawned directly. Teammates are
+  spawned only by the `team_spawn` tool, so every one is a named,
+  persistent pi session stored in the parent's session directory (or
+  the default store) and appears in `/resume`; the fork's own `notice`
+  records the exact session file. The tool takes only a task (and an
+  optional name): the extension supplies the session, inherits the
   current model and thinking level, and prepends the report-back
   instruction, so no wrapper script or command line is needed. GC
   reaps only the process, leaving the session file for later
@@ -89,10 +87,9 @@ That chains, in order:
   `global`, no bare `except`, no `var` in the extension.
 - **Extension tests** (`tests/extension_test.mjs`): the hold owns a
   stdin pipe and forwards identity and inbound messages, sent/received
-  log entries are recorded, spawn detaches a fork with parent identity,
-  `--no-session` is refused, `spawnTask` builds the teammate template
-  from a task alone, spawn parsing honors quotes, and the broker starts
-  detached only when absent.
+  log entries are recorded, `spawnTask` builds the teammate template
+  from a task alone and resolves pi from the running runtime, no custom
+  spawn path exists, and the broker starts detached only when absent.
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
   delivery, undeliverable reports, deregistration, connection-close
