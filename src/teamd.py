@@ -197,7 +197,7 @@ class TeamBroker:
 
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
                  fork_idle=None, busy_grace=None, sessions_root=None,
-                 session_grace=None, host=None):
+                 session_grace=None, restart_grace=None, host=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
@@ -244,6 +244,14 @@ class TeamBroker:
         # broker built from older code from the installed one and restart
         # it. The stamp is the installed file's own hash.
         self.version = self._source_version()
+        # Restart policy: after the on-disk source changes (an install or
+        # reload), the broker exits once it has been idle this long, so the
+        # replacement adopts the new code without killing live work.
+        self.restart_grace = float(
+            restart_grace if restart_grace is not None
+            else os.environ.get("PI_TEAMS_RESTART_GRACE", "60")
+        )
+        self.last_active = time.time()
         self._registry = {}
         self._clients = {}
         self._peers = {}
@@ -294,6 +302,15 @@ class TeamBroker:
             pass
         self._lockpath = None
 
+    def _remove_endpoint(self):
+        # Remove only the endpoint this broker published; a newer broker may
+        # have replaced it while we were stopping.
+        try:
+            if self.root.read_endpoint().get("token") == self.token:
+                self.root.endpoint.unlink()
+        except OSError:
+            pass
+
     # -- lifecycle ---------------------------------------------------
 
     def run(self):
@@ -310,6 +327,7 @@ class TeamBroker:
         try:
             self._serve_forever()
         finally:
+            self._remove_endpoint()
             self._release_lock()
 
     def _serve_forever(self):
@@ -370,6 +388,19 @@ class TeamBroker:
         except OSError:
             pass
 
+    def _maybe_restart(self, now):
+        # Adopt newly installed code only once idle: a self-exit drops every
+        # hold, so it must never happen while agents are working.
+        if self._should_restart(now):
+            self.stop()
+
+    def _should_restart(self, now):
+        # Pure policy: the on-disk source changed and the broker has been
+        # idle past the grace.
+        if self._source_version() == self.version:
+            return False
+        return now - self.last_active >= self.restart_grace
+
     # -- connection handling ----------------------------------------
 
     def _serve(self, conn):
@@ -429,6 +460,9 @@ class TeamBroker:
         return True
 
     def _handle(self, conn, msg, agent_id):
+        # Any handled message is broker activity; the restart policy waits
+        # for an idle window before adopting new code.
+        self.last_active = time.time()
         op = msg.get("op")
         if op == "register":
             agent_id = self._register(conn, msg)
@@ -659,6 +693,7 @@ class TeamBroker:
         if now - self._last_session_sweep >= self._session_sweep_interval:
             self._last_session_sweep = now
             self._gc_orphan_session_files(now)
+        self._maybe_restart(now)
         doomed_fork, doomed_idle = self._classify(now)
         if not doomed_fork and not doomed_idle:
             return
@@ -1055,6 +1090,7 @@ def main(argv=None):
     parser.add_argument("--idle-timeout", type=float, default=15.0)
     parser.add_argument("--fork-idle", type=float, default=None)
     parser.add_argument("--busy-grace", type=float, default=None)
+    parser.add_argument("--restart-grace", type=float, default=None)
     parser.add_argument("--sweep-interval", type=float, default=1.0)
     parser.add_argument("command", nargs="?", choices=["start", "stop"],
                         default="start")
@@ -1066,7 +1102,7 @@ def main(argv=None):
     TeamBroker(args.root, idle_timeout=args.idle_timeout,
                sweep_interval=args.sweep_interval,
                fork_idle=args.fork_idle, busy_grace=args.busy_grace,
-               host=args.host).run()
+               restart_grace=args.restart_grace, host=args.host).run()
     return 0
 
 

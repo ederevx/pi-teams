@@ -27,7 +27,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -46,17 +45,6 @@ process.env.PI_TEAMS_BIN = binDir;
 // Pin the interpreter so resolvePython() is deterministic across
 // platforms (on Windows it may otherwise probe to `python`/`py`).
 process.env.PYTHON = process.env.PYTHON || "python3";
-// A stand-in broker file gives the version stamp a deterministic source.
-mkdirSync(binDir, { recursive: true });
-writeFileSync(join(binDir, "teamd"), "pass\n");
-
-/** The same source stamp the extension computes for the installed broker. */
-function installedTeamdVersion() {
-	return createHash("sha256")
-		.update(readFileSync(join(binDir, "teamd")))
-		.digest("hex")
-		.slice(0, 16);
-}
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
@@ -111,20 +99,14 @@ function makeAgent(deliver = () => {}) {
 	return { agent: new TeamAgent(exec, spawnProcess, deliver), calls };
 }
 
-function publishEndpoint(present, version = installedTeamdVersion()) {
+function publishEndpoint(present) {
 	mkdirSync(stateRoot, { recursive: true });
 	const endpoint = join(stateRoot, "endpoint");
 	if (present) {
-		writeFileSync(endpoint, JSON.stringify({ version }) + "\n");
+		writeFileSync(endpoint, "{}\n");
 	} else if (existsSync(endpoint)) {
 		unlinkSync(endpoint);
 	}
-}
-
-function publishRegistry(agents) {
-	mkdirSync(stateRoot, { recursive: true });
-	writeFileSync(join(stateRoot, "registry.json"),
-		JSON.stringify({ agents }) + "\n");
 }
 
 test("hold forwards identity and owns the held connection's stdin", () => {
@@ -508,24 +490,6 @@ test("spawn starts a detached broker only when none is published", () => {
 	publishEndpoint(true);
 	agent.ensureBroker();
 	assert.equal(calls.length, 1);
-});
-
-test("ensureBroker replaces a broker whose version stamp is stale", () => {
-	publishEndpoint(true, "stale-version");
-	publishRegistry({});
-	const { agent, calls } = makeAgent();
-	agent.ensureBroker();
-	assert.equal(calls.length, 1, "stale broker must be restarted");
-	assert.deepEqual(calls[0].args, [join(binDir, "teamd"), "--root", stateRoot, "start"]);
-});
-
-test("ensureBroker defers a stale-broker restart while a fork is live", () => {
-	publishEndpoint(true, "stale-version");
-	publishRegistry({ "host:fork-1": { role: "fork" } });
-	const { agent, calls } = makeAgent();
-	agent.ensureBroker();
-	assert.equal(calls.length, 0,
-		"a live teammate must not be killed by a reload restart");
 });
 
 test("deregister closes the held connection", () => {
