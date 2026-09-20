@@ -194,6 +194,11 @@ export interface ProcessHost {
 		args: string[],
 		options?: Record<string, unknown>,
 	): SpawnedProcess | null;
+	spawnDetached(
+		file: string,
+		args: string[],
+		options?: Record<string, unknown>,
+	): SpawnedProcess | null;
 }
 
 /**
@@ -268,6 +273,22 @@ export class ProcessRunner implements ProcessHost {
 		} catch {
 			return null;
 		}
+	}
+
+	spawnDetached(
+		file: string,
+		args: string[],
+		options: Record<string, unknown> = {},
+	): SpawnedProcess | null {
+		// windowsHide is ignored when DETACHED_PROCESS is set, so a
+		// detached console child can still flash a window on Windows.
+		// Detach only where it buys survival: on POSIX. A hidden,
+		// non-detached child on Windows still outlives the parent through
+		// unref() and its extension-owned stdin pipe.
+		return this.spawnHidden(file, args, {
+			...options,
+			detached: process.platform !== "win32",
+		});
 	}
 }
 
@@ -367,7 +388,7 @@ export class SshPeerBridge implements PeerBridge {
 		const endpoint = await this.readEndpoint();
 		this.name = this.label || endpoint.name || this.sshTarget;
 		const port = await this.reservePort();
-		const tunnel = this.runner.spawnHidden("ssh", [
+		const tunnel = this.runner.spawnDetached("ssh", [
 			"-N",
 			"-o", "BatchMode=yes",
 			"-o", "ExitOnForwardFailure=yes",
@@ -376,7 +397,7 @@ export class SshPeerBridge implements PeerBridge {
 			"-L",
 			`127.0.0.1:${port}:127.0.0.1:${endpoint.port}`,
 			this.sshTarget,
-		], { stdio: "ignore", detached: true });
+		], { stdio: "ignore" });
 		if (!tunnel) {
 			throw new Error(
 				`ssh tunnel to ${this.sshTarget} failed to start`);
@@ -529,7 +550,18 @@ export class TeamAgent {
 		args: string[],
 		options: Record<string, unknown>,
 	): SpawnedProcess | null {
-		const child = this.runner.spawnHidden(file, args, options);
+		return this.guard(this.runner.spawnHidden(file, args, options));
+	}
+
+	private launchDetached(
+		file: string,
+		args: string[],
+		options: Record<string, unknown>,
+	): SpawnedProcess | null {
+		return this.guard(this.runner.spawnDetached(file, args, options));
+	}
+
+	private guard(child: SpawnedProcess | null): SpawnedProcess | null {
 		child?.on("error", () => {
 			// A failed broker/hold/pi start must not crash the session;
 			// the next /team call retries.
@@ -550,10 +582,10 @@ export class TeamAgent {
 	private startBroker(): void {
 		// The broker never exits; detach it so it outlives the session
 		// that happened to start it.
-		const child = this.launch(
+		const child = this.launchDetached(
 			this.python,
 			[teamdBin, "--root", stateRoot, "start"],
-			{ detached: true, stdio: "ignore", windowsHide: true },
+			{ stdio: "ignore" },
 		);
 		child?.unref();
 	}
@@ -920,10 +952,10 @@ export class TeamAgent {
 		// The extension holds the teammate's RPC stdin open: the teammate
 		// stays alive for messages and exits when this pi goes away (the
 		// pipe closes) or the broker GC signals it.
-		const child = this.launch(
+		const child = this.launchDetached(
 			invocation.command,
 			[...invocation.args, ...args],
-			{ env, detached: true, stdio: ["pipe", "ignore", "ignore"], windowsHide: true },
+			{ env, stdio: ["pipe", "ignore", "ignore"] },
 		);
 		if (!child) return;
 		this.teammates.add(child);
