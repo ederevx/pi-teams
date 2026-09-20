@@ -45,6 +45,13 @@ coordinate natively instead of through the shared tree.
   session and is removed; a registered agent keeps its file however old
   the mtime is, and paths outside the team root are never touched. This
   clears flags left by a reload, crash, or reaped fork.
+- **Teammate-session GC**: a spawned teammate is a normal pi session, so
+  it appears in `/resume`. The broker removes a fork's session file when
+  it is reaped or deregisters, and sweeps any teammate-marked session
+  file whose agent is not live and whose mtime is older than
+  PI_TEAMS_SESSION_GRACE (default 1h; PI_TEAMS_SESSIONS_ROOT overrides the
+  scan root). A user's own session and a live fork's file are never
+  touched, and deletions are guarded to the sessions root.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
