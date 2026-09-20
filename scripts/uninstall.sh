@@ -9,7 +9,21 @@ if [[ ! -f "$manifest" ]]; then
 	exit 0
 fi
 
-python3 -c '
+python_bin="${PYTHON:-}"
+if [[ -z "$python_bin" ]]; then
+	for candidate in python3 python py; do
+		if command -v "$candidate" >/dev/null 2>&1; then
+			python_bin="$candidate"
+			break
+		fi
+	done
+fi
+[[ -n "$python_bin" ]] || {
+	echo "pi-teams: no python interpreter found for the manifest" >&2
+	exit 1
+}
+
+"$python_bin" -c '
 import json, sys
 manifest = json.load(open(sys.argv[1]))
 for path in manifest["files"]:

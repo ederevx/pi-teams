@@ -41,6 +41,9 @@ for (const key of Object.keys(process.env)) {
 }
 process.env.TEAM_ROOT = stateRoot;
 process.env.PI_TEAMS_BIN = binDir;
+// Pin the interpreter so resolvePython() is deterministic across
+// platforms (on Windows it may otherwise probe to `python`/`py`).
+process.env.PYTHON = process.env.PYTHON || "python3";
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
@@ -111,7 +114,7 @@ test("hold forwards identity and owns the held connection's stdin", () => {
 	assert.equal(calls.length, 1);
 	const call = calls[0];
 	assert.equal(call.file, process.env.PYTHON || "python3");
-	assert.deepEqual(call.args, [`${binDir}/team`, "--root", stateRoot, "hold"]);
+	assert.deepEqual(call.args, [join(binDir, "team"), "--root", stateRoot, "hold"]);
 	assert.deepEqual(call.options.stdio, ["pipe", "pipe", "ignore"]);
 	assert.equal(call.options.env.TEAM_ID, agent.id);
 	assert.equal(call.options.env.TEAM_OWNER_PID, String(process.pid));
@@ -252,6 +255,10 @@ test("spawnTask builds the teammate template from a task alone", () => {
 		assert.match(sent.message, /summarize the diff/);
 		assert.match(sent.message, /TEAM_PARENT_ID/);
 		assert.match(sent.message, /TEAM_ROOT/);
+		// Report-back names the interpreter and the absolute client path,
+		// never a bare `team` that needs a shebang or PATH.
+		assert.ok(sent.message.includes(process.env.PYTHON));
+		assert.ok(sent.message.includes(join(binDir, "team")));
 		assert.equal(call.options.env.TEAM_ROOT, stateRoot);
 		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
 		// The teammate must not inherit the parent's session or host
@@ -310,7 +317,7 @@ test("spawn starts a detached broker only when none is published", () => {
 	agent.ensureBroker();
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0].file, process.env.PYTHON || "python3");
-	assert.deepEqual(calls[0].args, [`${binDir}/teamd`, "--root", stateRoot, "start"]);
+	assert.deepEqual(calls[0].args, [join(binDir, "teamd"), "--root", stateRoot, "start"]);
 	assert.equal(calls[0].options.detached, true);
 	assert.equal(calls[0].options.stdio, "ignore");
 	assert.equal(calls[0].options.windowsHide, true);

@@ -8,6 +8,7 @@ the unittest suites (broker protocol + fork lifecycle).
 
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import unittest
@@ -31,10 +32,11 @@ def run_step(argv):
 
 
 def main():
+    node = shutil.which("node") or "node"
     steps = [
         [sys.executable, "tests/readme_lint.py"],
         [sys.executable, "tests/oop_lint.py"],
-        ["node", "--test", "--test-reporter=dot",
+        [node, "--test", "--test-reporter=dot",
          "tests/extension_test.mjs"],
     ]
     for step in steps:
