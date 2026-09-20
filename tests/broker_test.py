@@ -320,6 +320,123 @@ class BrokerProtocolTests(unittest.TestCase):
             dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
+    def _start_broker(self, root, host):
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
+                            sweep_interval=0.1, host=host)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        wait_endpoint(root)
+        return broker, thread
+
+    def test_peer_federation_relays_both_ways(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        try:
+            beta_rx = TeamClient(root_b, heartbeat=None)
+            beta_rx.id = "beta:main"
+            beta_rx.role = "main"
+            beta_rx.register()
+            alpha_caller = TeamClient(root_a, heartbeat=None)
+            alpha_caller.id = "alpha:caller"
+            alpha_caller.register()
+            beta_tx = TeamClient(root_b, heartbeat=None)
+            beta_tx.id = "beta:sender"
+            beta_tx.register()
+            alpha_tx = TeamClient(root_a, heartbeat=None)
+            alpha_tx.id = "alpha:tx"
+            alpha_tx.register()
+
+            endpoint_b = broker_b.root.read_endpoint()
+            self.assertTrue(broker_a.link_peer("beta", endpoint_b))
+            self.assertTrue(
+                wait_until(lambda: "alpha" in broker_b._peers),
+                "peer link was never accepted")
+            # The federated view exposes the peer's agent.
+            self.assertTrue(wait_until(
+                lambda: any(a["id"] == "beta:main"
+                            for a in alpha_caller.ls()["agents"])))
+
+            # alpha -> beta
+            beta_inbox = []
+            ready = threading.Event()
+            tb = threading.Thread(
+                target=beta_rx.follow, args=(beta_inbox.append, ready.set),
+                daemon=True)
+            tb.start()
+            self.assertTrue(ready.wait(timeout=3))
+            self.assertEqual(
+                alpha_caller.send_msg("beta:main", "text", "hi-beta").get("op"),
+                "ack")
+            self.assertTrue(wait_until(lambda: beta_inbox))
+            self.assertEqual(beta_inbox[0]["from"], "alpha:caller")
+
+            # beta -> alpha
+            alpha_inbox = []
+            ready2 = threading.Event()
+            ta = threading.Thread(
+                target=alpha_caller.follow, args=(alpha_inbox.append,
+                                                  ready2.set), daemon=True)
+            ta.start()
+            self.assertTrue(ready2.wait(timeout=3))
+            self.assertEqual(
+                beta_tx.send_msg("alpha:caller", "text", "hi-alpha").get("op"),
+                "ack")
+            self.assertTrue(wait_until(lambda: alpha_inbox))
+            self.assertEqual(alpha_inbox[0]["from"], "beta:sender")
+
+            # An unknown remote target is undeliverable, not lost.
+            reply = alpha_tx.send_msg("beta:ghost", "text", "x")
+            self.assertEqual(reply.get("op"), "error")
+            self.assertEqual(reply.get("error"), "undeliverable")
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_peer_down_reaps_remote_parent_forks(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"])
+        try:
+            endpoint_b = broker_b.root.read_endpoint()
+            broker_a.link_peer("beta", endpoint_b)
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            fork = TeamClient(root_b, heartbeat=None)
+            fork.id = "beta:fork-remote"
+            fork.role = "fork"
+            fork.parent = "alpha:caller"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "remote-parent fork reaped while peer is up")
+            broker_a.stop()
+            thread_a.join(timeout=3)
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=6),
+                "remote fork not reaped when its peer went down")
+            self.assertTrue(wait_until(
+                lambda: "beta:fork-remote" not in self._ids_via(root_b)),
+                "reaped remote fork still in the registry")
+        finally:
+            broker_b.stop()
+            thread_b.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
     def _ids_via(self, root):
         probe = TeamClient(root, heartbeat=None)
         probe.id = "probe"
