@@ -153,6 +153,40 @@ test("logTeamMessage records a truncated sent/received log entry", () => {
 	assert.equal(entries[1].data.preview, "short");
 });
 
+test("announceSession notices the parent of the fork's session file", async () => {
+	const execCalls = [];
+	const agent = new TeamAgent(
+		async (_file, args) => {
+			execCalls.push(args);
+			return { stdout: "{}" };
+		},
+		() => {},
+		() => {},
+	);
+	process.env.TEAM_PARENT_ID = "parent-9";
+	try {
+		await agent.announceSession("/x/sessions/sess.jsonl");
+		assert.equal(execCalls.length, 1);
+		const args = execCalls[0];
+		assert.ok(args.includes("send"));
+		assert.ok(args.includes("parent-9"));
+		assert.ok(args.includes("notice"));
+		assert.ok(args.some((a) => a.includes("sess.jsonl")));
+
+		// No parent: nothing is sent.
+		delete process.env.TEAM_PARENT_ID;
+		await agent.announceSession("/x/sessions/sess.jsonl");
+		assert.equal(execCalls.length, 1);
+
+		// No session file: nothing is sent.
+		process.env.TEAM_PARENT_ID = "parent-9";
+		await agent.announceSession(null);
+		assert.equal(execCalls.length, 1);
+	} finally {
+		delete process.env.TEAM_PARENT_ID;
+	}
+});
+
 test("hold forwards inbound messages to the agent", () => {
 	const received = [];
 	const { agent, calls } = makeAgent((message) => received.push(message));
