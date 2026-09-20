@@ -51,7 +51,7 @@ process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
 const { TeamAgent, ProcessRunner, SshPeerBridge, SshSetupGuide,
-	WindowlessPython, windowlessCandidates, logTeamMessage } =
+	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory } =
 	await import("../extensions/pi-teams.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
@@ -362,10 +362,10 @@ test("setState publishes busy, waiting, and idle to the busy file", () => {
 	assert.equal(readFileSync(busy, "utf8"), "0");
 });
 
-test("teammates can only be spawned through spawnTask", () => {
+test("spawning goes through one interface with no custom argv", () => {
 	const { agent } = makeAgent();
 	assert.equal(typeof agent.spawnTask, "function");
-	assert.equal(typeof agent.spawn, "undefined", "no custom spawn method");
+	assert.equal(typeof agent.spawn, "function");
 	assert.equal(typeof agent.parseSpawn, "undefined", "no argv parser");
 });
 
@@ -452,7 +452,22 @@ test("spawnTask context=inherit forks the parent session; fresh does not", () =>
 		/no file to fork/);
 });
 
-test("spawnRemote asks a peer host and returns the spawned id", async () => {
+test("AgentDirectory resolves local and peer main agents", async () => {
+	const directory = new AgentDirectory(async () => [
+		{ id: "rog-windows:pi-1", name: "a", role: "main", pid: 1,
+			parent: null, session: null, online: true },
+		{ id: "beta:pi-2", name: "b", role: "main", pid: 2,
+			parent: null, session: null, online: false, origin: "beta" },
+	], "rog-windows");
+	assert.equal(directory.isLocal(""), true);
+	assert.equal(directory.isLocal("rog-windows"), true);
+	assert.equal(directory.isLocal("beta"), false);
+	assert.equal((await directory.mainAgent("rog-windows")).id,
+		"rog-windows:pi-1");
+	assert.equal((await directory.mainAgent("beta")).id, "beta:pi-2");
+});
+
+test("spawn routes a peer host over the broker and returns the id", async () => {
 	const sends = [];
 	const { calls, runner } = makeRunner((file, args) => {
 		if (args.includes("ls")) {
@@ -468,7 +483,7 @@ test("spawnRemote asks a peer host and returns the spawned id", async () => {
 	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
 	const onData = calls[0]["stdout:data"];
-	const pending = agent.spawnRemote("beta", "worker", "do it");
+	const pending = agent.spawn("beta", "worker", "do it");
 	await new Promise((r) => setTimeout(r, 20));
 	const sent = sends.find((a) => a.includes("spawn"));
 	assert.ok(sent, "spawn request was not sent");
@@ -481,6 +496,19 @@ test("spawnRemote asks a peer host and returns the spawned id", async () => {
 	const ref = await pending;
 	assert.equal(ref.id, "beta:fork-1");
 	assert.equal(ref.session, "worker");
+	agent.stopHold();
+});
+
+test("spawn routes a host-less target to the local backend", async () => {
+	const { calls, runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	const ref = await agent.spawn("", "local-kid", "do it");
+	assert.ok(ref.id.includes(":fork-"), "not a locally spawned fork id");
+	assert.equal(ref.session, "local-kid");
+	// A local spawn launches a process; no broker send was needed.
+	assert.ok(calls.length >= 2, "no local teammate process was spawned");
 	agent.stopHold();
 });
 
@@ -863,7 +891,7 @@ test("an inbound attach request converts this session and acks", async () => {
 	agent.stopHold();
 });
 
-test("attachRemote asks a target agent and returns its new fork id", async () => {
+test("attach asks a target agent and returns its new fork id", async () => {
 	const sends = [];
 	const { calls, runner } = makeRunner((file, args) => {
 		sends.push(args);
@@ -872,7 +900,7 @@ test("attachRemote asks a target agent and returns its new fork id", async () =>
 	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
 	const onData = calls[0]["stdout:data"];
-	const pending = agent.attachRemote("beta:main", "kid");
+	const pending = agent.attach("beta:main", "kid");
 	await new Promise((r) => setTimeout(r, 20));
 	const sent = sends.find((a) => a.includes("attach"));
 	assert.ok(sent, "attach request was not sent");
@@ -893,7 +921,7 @@ test("deregister resolves a pending attach instead of hanging it", async () => {
 		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
 	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
-	const pending = agent.attachRemote("beta:main", "kid");
+	const pending = agent.attach("beta:main", "kid");
 	agent.deregister();
 	const ref = await pending;
 	assert.equal(ref, null);

@@ -128,10 +128,13 @@ and messages cross both ways.
   loopback endpoint over the existing SSH session (read-only), opens a
   loopback-bound `ssh -L` tunnel to that broker, and links the two
   brokers. No broker rebinding, no TLS, no manual tunnel.
-- **Remote spawn**: `team_spawn` takes an optional `host`; it asks that
-  host's main pi agent to spawn the teammate, so the peer host owns the
-  process, session, and reaping. The teammate reports back through the
-  federation, and `team_wait` can block for it by id.
+- **Remote spawn**: `team_spawn` takes an optional `host`. One spawn
+  interface routes internally: a host-less or this-host request uses the
+  local backend (it launches the process), and any other host resolves
+  that host's main agent through the same agent directory and asks it to
+  spawn, so the peer host owns the process, session, and reaping. The
+  caller never branches on local versus ssh, and the teammate reports
+  back through the federation. `team_wait` can block for it by id.
 - **Bidirectional messaging**: every agent id carries a host label
   (`<host>:pi-...`, `<host>:fork-...`); a message to a peer-hosted id is
   relayed across the peer link (the `team_send` tool or `/team send`),
