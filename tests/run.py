@@ -18,6 +18,10 @@ ROOT = HERE.parent
 SANDBOX = os.path.join(os.path.expanduser("~"), "tmp", "pi-teams-sandbox")
 os.makedirs(SANDBOX, exist_ok=True)
 os.environ.setdefault("TMPDIR", SANDBOX)
+# Strip ambient team identity so protocol tests cannot inherit the
+# environment of a pi-teams fork that runs the suite.
+for _key in [k for k in os.environ if k.startswith("TEAM_")]:
+    del os.environ[_key]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "src"))
 

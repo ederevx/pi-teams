@@ -16,6 +16,11 @@
  * immediately and strip a fork of its identity. A stdin pipe owned by
  * this process keeps the hold alive exactly as long as the pi runs.
  *
+ * A spawned teammate is a normal pi session: it is named and stored in
+ * the parent's session directory, so it appears in `/resume` after the
+ * hold's GC reaps its process. Only the process is tied to the parent;
+ * the session file survives for later resumption.
+ *
  * The broker and client live in the pi-teams repository and are expected
  * at $HOME/.local/bin (or PI_TEAMS_BIN). Override the pi binary for
  * forks with PI_TEAMS_PI.
@@ -24,7 +29,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 
 const home = process.env.HOME || ".";
 const stateRoot =
@@ -89,6 +94,8 @@ export class TeamAgent {
 	id: string = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
+	private sessionFile = "";
+	private sessionDir = "";
 
 	constructor(exec: ExecFn, spawnProcess: SpawnFn = nodeSpawn) {
 		this.exec = exec;
@@ -132,7 +139,7 @@ export class TeamAgent {
 		const name = process.env.TEAM_NAME || `pi@${cwd || process.cwd()}`;
 		const role = process.env.TEAM_ID ? "fork" : "main";
 		const parent = process.env.TEAM_PARENT_ID || "";
-		const session = process.env.PI_SESSION_FILE || "";
+		const session = this.sessionFile;
 		const busyFile = `${stateRoot}/${this.id}.busy`;
 		const env = {
 			...process.env,
@@ -232,10 +239,14 @@ export class TeamAgent {
 		const invocation = piInvocation();
 		const args = argv.length
 			? argv
-			: ["--no-session", "-p",
+			: [
+				...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
+				"--name", name || forkId,
+				"-p",
 				"You are a teammate of the agent that forked you. " +
 				"Check /team ls for teammates and use /team send " +
-				"to coordinate."];
+				"to coordinate.",
+			];
 		const env = {
 			...process.env,
 			TEAM_ID: forkId,
@@ -261,6 +272,14 @@ export class TeamAgent {
 		this.stopHold();
 	}
 
+	rememberSession(sessionFile?: string): void {
+		// The session file comes from ctx.sessionManager at session start,
+		// not the environment: pi only exposes PI_SESSION_FILE to shell
+		// tools, and it can be absent or stale in a fresh session.
+		this.sessionFile = sessionFile || "";
+		this.sessionDir = this.sessionFile ? dirname(this.sessionFile) : "";
+	}
+
 	announce(agents: AgentInfo[]): { customType: string; content: string; display: boolean } | null {
 		if (this.announced) return null;
 		this.announced = true;
@@ -283,6 +302,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		app.ensureBroker();
+		app.rememberSession(ctx.sessionManager.getSessionFile());
 		app.hold(ctx.cwd);
 	});
 
