@@ -60,6 +60,16 @@ function resolvePython(): string {
 const teamdBin = join(binDir, "teamd");
 const teamBin = join(binDir, "team");
 
+/** Default bound for team_wait, overridable with PI_TEAMS_WAIT. */
+const DEFAULT_WAIT_SECONDS = 300;
+
+/** Resolves the team_wait bound from the call, then the environment. */
+function waitSeconds(requested?: number): number {
+	if (typeof requested === "number" && requested > 0) return requested;
+	const env = Number(process.env.PI_TEAMS_WAIT);
+	return Number.isFinite(env) && env > 0 ? env : DEFAULT_WAIT_SECONDS;
+}
+
 /**
  * How to launch another pi without a shell. Reusing the running runtime
  * avoids spawning a Windows launcher shim (pi.cmd/pi.ps1) directly,
@@ -136,6 +146,9 @@ export class TeamAgent {
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
 	private readonly teammates = new Set<SpawnedProcess>();
+	private readonly waiters =
+		new Map<string, Set<(message: TeamMessage | null) => void>>();
+	private readonly recentResults = new Map<string, TeamMessage>();
 	private sessionFile = "";
 	private sessionDir = "";
 
@@ -225,12 +238,31 @@ export class TeamAgent {
 	}
 
 	private deliverMessage(line: string): void {
+		let message: TeamMessage;
 		try {
-			this.deliver(JSON.parse(line) as TeamMessage);
+			message = JSON.parse(line) as TeamMessage;
 		} catch {
 			// The hold prints one JSON object per line; a malformed line
 			// is dropped rather than crashing the session.
+			return;
 		}
+		if (message.kind !== "result" || message.to !== this.id) {
+			this.deliver(message);
+			return;
+		}
+		// A pending wait consumes the awaited result and surfaces it as the
+		// tool's result, so it is not also delivered as a steered turn.
+		const waiting = this.waiters.get(message.from);
+		if (waiting && waiting.size > 0) {
+			this.waiters.delete(message.from);
+			for (const settle of waiting) settle(message);
+			return;
+		}
+		// Nobody is waiting yet: remember it so a wait that starts just
+		// after the report returns it instead of timing out, and deliver it
+		// the ordinary way for an agent that was not waiting at all.
+		this.recentResults.set(message.from, message);
+		this.deliver(message);
 	}
 
 	stopHold(): void {
@@ -250,10 +282,16 @@ export class TeamAgent {
 	}
 
 	setBusy(busy: boolean): void {
-		// The model's own lifecycle publishes busyness so the broker's
-		// fork idle GC keeps a working teammate alive.
+		this.setState(busy ? "busy" : "idle");
+	}
+
+	/** Publishes the agent's run-state for the broker: busy keeps a fork
+	 *  alive, idle does not, and waiting is not-working while an in-flight
+	 *  team_wait keeps the fork exempt from idle GC. */
+	setState(state: "busy" | "idle" | "waiting"): void {
+		const value = state === "busy" ? "1" : state === "waiting" ? "2" : "0";
 		try {
-			writeFileSync(join(stateRoot, `${this.id}.busy`), busy ? "1" : "0");
+			writeFileSync(join(stateRoot, `${this.id}.busy`), value);
 		} catch {
 			// best effort: without the flag the fork is GC'd like an idle one
 		}
@@ -280,6 +318,46 @@ export class TeamAgent {
 			{ timeout: 3000 },
 		);
 		return String(result.stdout).trim();
+	}
+
+	/** Blocks until the awaited teammate (by id) sends a `result`, the
+	 *  bound elapses, or the signal aborts; resolves null in the latter
+	 *  two. A result that already arrived is returned at once. Several
+	 *  waits for one teammate all resolve on its single result. */
+	async waitForResult(
+		agentId: string,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<TeamMessage | null> {
+		const buffered = this.recentResults.get(agentId);
+		if (buffered) {
+			this.recentResults.delete(agentId);
+			return buffered;
+		}
+		// A bound of zero still cannot hang: fall back to the default.
+		const effective = timeoutMs > 0 ? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
+		return new Promise((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const settle = (message: TeamMessage | null): void => {
+				if (timer) clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				const set = this.waiters.get(agentId);
+				if (set) {
+					set.delete(settle);
+					if (set.size === 0) this.waiters.delete(agentId);
+				}
+				resolve(message);
+			};
+			const onAbort = (): void => settle(null);
+			const set = this.waiters.get(agentId) ?? new Set();
+			set.add(settle);
+			this.waiters.set(agentId, set);
+			timer = setTimeout(() => settle(null), effective);
+			if (signal) {
+				if (signal.aborted) settle(null);
+				else signal.addEventListener("abort", onAbort, { once: true });
+			}
+		});
 	}
 
 	async terminate(agentId: string): Promise<void> {
@@ -416,7 +494,16 @@ export class TeamAgent {
 		}
 	}
 
+	private cancelWaits(): void {
+		for (const set of [...this.waiters.values()]) {
+			for (const settle of [...set]) settle(null);
+		}
+		this.waiters.clear();
+		this.recentResults.clear();
+	}
+
 	deregister(): void {
+		this.cancelWaits();
 		this.stopHold();
 		this.stopTeammates();
 	}
@@ -442,7 +529,8 @@ export class TeamAgent {
 			`## pi-teams teammates (broker: ${stateRoot})\n` +
 			`${lines.join("\n") || "- none live yet"}\n` +
 			`Spawn a teammate that lives in its own session: team_spawn ` +
-			`(task, name); list: /team ls; send: /team send <id> <kind> <text>.`;
+			`(task, name); wait for a report: team_wait (id); list: ` +
+			`/team ls; send: /team send <id> <kind> <text>.`;
 		return { customType: "pi-teams", content, display: false };
 	}
 }
@@ -573,6 +661,69 @@ export default async function (pi: ExtensionAPI) {
 				}],
 				details: ref,
 			};
+		},
+	});
+
+	// -- agent-facing teammate wait --------------------------------------
+	// Blocks until the teammate reports, so the parent needs neither to
+	// poll nor to end its turn. The wait publishes the agent as idle (a
+	// waiting agent is not working), then restores its busy state.
+	pi.registerTool({
+		name: "team_wait",
+		label: "wait for teammate",
+		description:
+			"Block until a teammate sends its result, then return that " +
+			"report as the tool result. While blocked the agent is idle. " +
+			"Times out after the wait bound; the result is then still " +
+			"delivered as a pi-teams message.",
+		promptSnippet: "Wait for a teammate's report",
+		promptGuidelines: [
+			"After team_spawn, call team_wait with the returned id to block " +
+				"until the teammate reports instead of polling /team ls. If it " +
+				"times out, the result still arrives as a pi-teams message.",
+		],
+		parameters: Type.Object({
+			id: Type.String({
+				description: "Teammate id returned by team_spawn",
+			}),
+			wait: Type.Optional(Type.Number({
+				description: "Seconds to wait (default PI_TEAMS_WAIT or 300)",
+			})),
+		}),
+		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+			const bound = waitSeconds(params.wait);
+			// A waiting agent is idle, not working: publish that for the
+			// block, then restore the turn's busy state. The broker keeps a
+			// waiting fork exempt from idle GC.
+			app.setState("waiting");
+			try {
+				const message = await app.waitForResult(
+					params.id, bound * 1000, signal);
+				if (!message) {
+					return {
+						content: [{
+							type: "text",
+							text: `no result from ${params.id} within ${bound}s; ` +
+								`it is still running and will report as a message.`,
+						}],
+						details: { id: params.id },
+					};
+				}
+				logTeamMessage(pi, "received", message);
+				const payload = typeof message.payload === "string"
+					? message.payload
+					: JSON.stringify(message.payload);
+				return {
+					content: [{
+						type: "text",
+						text: `pi-teams ${message.kind} from ` +
+							`${message.from}:\n${payload}`,
+					}],
+					details: message,
+				};
+			} finally {
+				app.setBusy(true);
+			}
 		},
 	});
 

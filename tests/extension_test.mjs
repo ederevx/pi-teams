@@ -21,6 +21,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readFileSync,
 	rmSync,
 	unlinkSync,
 	writeFileSync,
@@ -215,6 +216,89 @@ test("hold forwards inbound messages to the agent", () => {
 	assert.equal(received[1].payload, "x");
 
 	agent.stopHold();
+});
+
+test("team_wait resolves on the result without double delivery", async () => {
+	const received = [];
+	const { agent, calls } = makeAgent((message) => received.push(message));
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const waiting = agent.waitForResult("kid", 5000);
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "notice", payload: "session x",
+	}) + "\n");
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "text", payload: "working",
+	}) + "\n");
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "result", payload: "done",
+	}) + "\n");
+	const message = await waiting;
+	assert.equal(message.kind, "result");
+	assert.equal(message.payload, "done");
+	// Notices and progress still reach the agent; the awaited result was
+	// consumed by the wait alone, so it is not delivered a second time.
+	assert.deepEqual(received.map((m) => m.kind), ["notice", "text"]);
+	agent.stopHold();
+});
+
+test("team_wait resolves null on timeout and on abort", async () => {
+	const { agent } = makeAgent();
+	assert.equal(await agent.waitForResult("nobody", 10), null);
+	const controller = new AbortController();
+	const waiting = agent.waitForResult("nobody", 5000, controller.signal);
+	controller.abort();
+	assert.equal(await waiting, null);
+});
+
+test("deregister resolves a pending wait instead of hanging it", async () => {
+	const { agent } = makeAgent();
+	const waiting = agent.waitForResult("kid", 5000);
+	agent.deregister();
+	assert.equal(await waiting, null);
+});
+
+test("team_wait returns a result that arrived before the call", async () => {
+	const received = [];
+	const { agent, calls } = makeAgent((message) => received.push(message));
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "result", payload: "early",
+	}) + "\n");
+	// The early result is delivered as usual and also remembered, so a
+	// wait that starts after it returns it instead of timing out.
+	assert.equal(received.length, 1);
+	const message = await agent.waitForResult("kid", 5000);
+	assert.equal(message.payload, "early");
+	agent.stopHold();
+});
+
+test("one result resolves every concurrent wait for a teammate", async () => {
+	const { agent, calls } = makeAgent();
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const first = agent.waitForResult("kid", 5000);
+	const second = agent.waitForResult("kid", 5000);
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "result", payload: "shared",
+	}) + "\n");
+	const [a, b] = await Promise.all([first, second]);
+	assert.equal(a.payload, "shared");
+	assert.equal(b.payload, "shared");
+	agent.stopHold();
+});
+
+test("setState publishes busy, waiting, and idle to the busy file", () => {
+	mkdirSync(stateRoot, { recursive: true });
+	const { agent } = makeAgent();
+	const busy = join(stateRoot, `${agent.id}.busy`);
+	agent.setState("waiting");
+	assert.equal(readFileSync(busy, "utf8"), "2");
+	agent.setBusy(true);
+	assert.equal(readFileSync(busy, "utf8"), "1");
+	agent.setBusy(false);
+	assert.equal(readFileSync(busy, "utf8"), "0");
 });
 
 test("teammates can only be spawned through spawnTask", () => {

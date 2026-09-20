@@ -196,18 +196,27 @@ class TeamClient:
             time.sleep(self.heartbeat)
             if self._conn is not None:
                 try:
-                    self._send_line({"op": "ping", "busy": self._is_busy()})
+                    state = self._state()
+                    self._send_line({
+                        "op": "ping",
+                        "busy": state == "busy",
+                        "waiting": state == "waiting",
+                    })
                 except OSError:
                     break
 
-    def _is_busy(self):
+    def _state(self):
+        # The spawner publishes 1=busy, 2=waiting, 0/absent=idle. A
+        # waiting agent is not working, but the broker keeps it exempt
+        # from idle GC, so it is reported separately from busy.
         if not self.busy_file:
-            return False
+            return "idle"
         try:
             with open(self.busy_file) as fh:
-                return fh.read().strip() == "1"
+                value = fh.read().strip()
         except (OSError, IOError):
-            return False
+            return "idle"
+        return {"1": "busy", "2": "waiting"}.get(value, "idle")
 
     def follow(self, on_message=None, ready=None):
         self.register()

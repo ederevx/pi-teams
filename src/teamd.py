@@ -265,8 +265,11 @@ class TeamBroker:
         elif op == "ping":
             # A plain ping is the endpoint shim's keepalive; a busy ping
             # marks the agent as actively working and keeps the fork's
-            # idle clock from firing.
-            self._touch(agent_id, work=msg.get("busy") is True)
+            # idle clock from firing. A waiting ping is not working, but
+            # it is not idle either: the agent is blocked in a wait and
+            # must not be reaped as idle.
+            self._touch(agent_id, work=msg.get("busy") is True,
+                        waiting=msg.get("waiting") is True)
             self._reply(conn, op="ack")
         elif op == "terminate":
             self._terminate(msg.get("to"), msg.get("why") or "requested")
@@ -297,6 +300,7 @@ class TeamBroker:
             "since_ts": time.time(),
             "last_seen": time.time(),
             "last_work": time.time(),
+            "waiting": False,
         }
         with self._lock:
             self._clients[agent_id] = conn
@@ -320,7 +324,7 @@ class TeamBroker:
         self.root.write_atomic(REGISTRY_NAME, data + "\n")
         self._broadcast("registry-change", self._snapshot())
 
-    def _touch(self, agent_id, work=False):
+    def _touch(self, agent_id, work=False, waiting=None):
         now = time.time()
         with self._lock:
             entry = self._registry.get(agent_id) if agent_id else None
@@ -328,6 +332,8 @@ class TeamBroker:
                 entry["last_seen"] = now
                 if work:
                     entry["last_work"] = now
+                if waiting is not None:
+                    entry["waiting"] = waiting
 
     def _drop_entry(self, agent_id):
         with self._lock:
@@ -439,6 +445,7 @@ class TeamBroker:
                 is_fork = entry.get("role") == "fork"
                 work_idle = (
                     is_fork and self.fork_idle > 0
+                    and not entry.get("waiting")
                     and entry.get("last_work", 0) < now - self.fork_idle
                 )
                 seen_idle = (
