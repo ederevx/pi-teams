@@ -85,6 +85,33 @@ coordinate natively instead of through the shared tree.
   received message also appends a one-line `[pi-teams]` log entry with
   a truncated preview, expandable to the full payload.
 
+## Cross-host peers
+
+Two machines that already have SSH between them can federate their
+pi-teams brokers, so an agent on one host spawns a teammate on the other
+and messages cross both ways.
+
+- **One-call setup**: `team_peer add <ssh-host>` reads the peer's
+  loopback endpoint over the existing SSH session (read-only), opens a
+  loopback-bound `ssh -L` tunnel to that broker, and links the two
+  brokers. No broker rebinding, no TLS, no manual tunnel.
+- **Remote spawn**: `team_spawn` takes an optional `host`; it asks that
+  host's main pi agent to spawn the teammate, so the peer host owns the
+  process, session, and reaping. The teammate reports back through the
+  federation, and `team_wait` can block for it by id.
+- **Bidirectional messaging**: every agent id carries a host label
+  (`<host>:pi-...`, `<host>:fork-...`); a message to a peer-hosted id is
+  relayed across the peer link, and an undeliverable target reports
+  back. Local `/team send`, `team_wait`, and reports are unchanged.
+- **Lifetime**: a teammate spawned for a remote parent is kept alive
+  until the peer link drops, then reaped on its own host by
+  connection-based GC. Pid signalling never crosses hosts.
+
+Usage: on host A run `team_peer add B`, then `team_spawn` with
+`host="B"` and `team_wait(id)`. `team_peer remove B` unlinks. The peer
+must already run pi-teams; the SSH session supplies confidentiality,
+integrity, and host authentication, and only loopback is forwarded.
+
 ## Validation
 
 Enforced in this repository; run all of it with:
@@ -111,7 +138,9 @@ That chains, in order:
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
   delivery, undeliverable reports, deregistration, connection-close
-  drop, idle sweep, and a waiting fork's exemption from fork idle GC.
+  drop, idle sweep, a waiting fork's exemption from fork idle GC, and
+  two-broker federation (cross-host relay both ways, an undeliverable
+  remote target, and peer-down reaping of remote-parent forks).
 - **Fork lifecycle tests** (`tests/fork_test.py`): a fork stays alive
   while its parent stays connected and exits on its own when the
   parent's connection closes or an explicit terminate is issued; the
