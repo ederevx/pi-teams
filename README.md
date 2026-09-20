@@ -51,11 +51,14 @@ coordinate natively instead of through the shared tree.
   child environment, and EOF on that pipe (pi gone) drops the endpoint
   instead of leaving an orphan. Forks reuse the running pi runtime
   (`process.execPath` plus its entry script) instead of the `pi` name,
-  so a Windows launcher shim is never spawned directly. A default fork
-  is a named session stored in the parent's session directory, so it
-  appears in `/resume`; GC reaps only its process, leaving the session
-  file for later resumption. When a fork starts, the pi child registers
-  through the same extension.
+  so a Windows launcher shim is never spawned directly. Every fork is a
+  named session stored in the parent's session directory (or the
+  default store), so it appears in `/resume`; `--no-session` is refused
+  and custom args inherit the parent's directory and a display name.
+  `/team spawn` reports the session it created, and the fork's own
+  `notice` records the exact session file. GC reaps only the process,
+  leaving the session file for later resumption. When a fork starts,
+  the pi child registers through the same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the

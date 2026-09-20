@@ -66,6 +66,7 @@ interface AgentInfo {
 	role: string;
 	pid: number;
 	parent: string | null;
+	session: string | null;
 	online: boolean;
 }
 
@@ -273,29 +274,23 @@ export class TeamAgent {
 		return { name, argv };
 	}
 
-	spawn(name: string, argv: string[]): void {
+	spawn(name: string, argv: string[]): string {
 		const forkId =
 			`fork-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
+		const sessionName = name || forkId;
 		const invocation = piInvocation();
-		const args = argv.length
-			? argv
-			: [
-				...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
-				"--name", name || forkId,
-				"-p",
-				"You are a teammate of the agent that forked you. " +
-				"Check /team ls for teammates and use /team send " +
-				"to coordinate.",
-			];
+		const args = this.sessionArgs(argv, sessionName);
 		const env = {
 			...process.env,
 			TEAM_ID: forkId,
-			TEAM_NAME: name || forkId,
+			TEAM_NAME: sessionName,
 			TEAM_ROLE: "fork",
 			TEAM_PARENT_ID: this.id,
-			TEAM_SESSION: process.env.PI_SESSION_FILE || "",
-			PI_SESSION_FILE: process.env.PI_SESSION_FILE || "",
 		};
+		// The child is its own session; never hand it the parent's session
+		// identity through the environment.
+		delete env.TEAM_SESSION;
+		delete env.PI_SESSION_FILE;
 		this.ensureBroker();
 		// The child is its own pi; detach it so the broker, not process
 		// parentage, owns its lifetime. The environment carries the fork
@@ -306,6 +301,53 @@ export class TeamAgent {
 			{ env, detached: true, stdio: "ignore", windowsHide: true },
 		);
 		child?.unref();
+		return sessionName;
+	}
+
+	/** Teammates must be persistent, named sessions so /resume can find
+	 *  them: inject the parent's session dir and a display name when the
+	 *  caller omitted them, and refuse --no-session outright. */
+	private sessionArgs(argv: string[], sessionName: string): string[] {
+		const hasFlag = (flag: string) =>
+			argv.includes(flag) || argv.some((a) => a.startsWith(`${flag}=`));
+		if (hasFlag("--no-session")) {
+			throw new Error(
+				"teammates must have a session; --no-session is not allowed");
+		}
+		if (argv.length === 0) {
+			return [
+				...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
+				"--name", sessionName,
+				"-p",
+				"You are a teammate of the agent that forked you. " +
+				"Check /team ls for teammates and use /team send " +
+				"to coordinate.",
+			];
+		}
+		const args = [...argv];
+		if (!hasFlag("--name") && !hasFlag("-n")) {
+			args.unshift("--name", sessionName);
+		}
+		if (!hasFlag("--session-dir") && this.sessionDir) {
+			args.unshift("--session-dir", this.sessionDir);
+		}
+		return args;
+	}
+
+	sessionDirLabel(): string {
+		return this.sessionDir || "the default session store";
+	}
+
+	/** Tells the parent which session this fork came up as, so the parent
+	 *  can name it without polling the broker. */
+	async announceSession(sessionFile: string | null | undefined): Promise<void> {
+		const parent = process.env.TEAM_PARENT_ID;
+		if (!parent || !sessionFile) return;
+		try {
+			await this.send(parent, "notice", `session ${sessionFile}`);
+		} catch {
+			// Broker unavailable; the registry still records the session.
+		}
 	}
 
 	deregister(): void {
@@ -326,8 +368,9 @@ export class TeamAgent {
 		const lines = agents
 			.slice(0, 8)
 			.map((a) =>
-				`- ${a.id} ${a.name} (${a.role}, ${a.online ? "online" : "offline"}): ` +
-				`/team send ${a.id} text <message>`);
+				`- ${a.id} ${a.name} (${a.role}, ${a.online ? "online" : "offline"}` +
+				(a.session ? `, session ${basename(a.session)}` : "") +
+				`): /team send ${a.id} text <message>`);
 		const content =
 			`## pi-teams teammates (broker: ${stateRoot})\n` +
 			`${lines.join("\n") || "- none live yet"}\n` +
@@ -365,6 +408,9 @@ export function logTeamMessage(
  *  Registered as the TeamAgent's deliver callback. */
 function deliverToAgent(pi: ExtensionAPI, message: TeamMessage): void {
 	logTeamMessage(pi, "received", message);
+	// A notice is bookkeeping (for example a teammate announcing its
+	// session); record it without forcing a model turn.
+	if (message.kind === "notice") return;
 	const payload =
 		typeof message.payload === "string"
 			? message.payload
@@ -407,8 +453,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		app.ensureBroker();
-		app.rememberSession(ctx.sessionManager.getSessionFile());
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		app.rememberSession(sessionFile);
 		app.hold(ctx.cwd);
+		void app.announceSession(sessionFile);
 	});
 
 	pi.on("agent_start", async () => {
@@ -440,7 +488,8 @@ export default function (pi: ExtensionAPI) {
 				const agents = await app.snapshot();
 				const lines = agents.map((a) =>
 					`${a.id}\t${a.name}\t${a.role}\t${a.online ? "online" : "offline"}` +
-					(a.parent ? `\tchild-of ${a.parent}` : ""));
+					(a.parent ? `\tchild-of ${a.parent}` : "") +
+					(a.session ? `\tsession ${basename(a.session)}` : ""));
 				ctx.ui.notify(
 					`pi-teams: ${agents.length} agent(s)\n${lines.join("\n")}`,
 					"info",
@@ -463,12 +512,20 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sub === "spawn") {
 				const { name, argv } = app.parseSpawn(rest);
-				app.spawn(name, argv);
-				ctx.ui.notify(
-					`pi-teams: spawned ${name || "fork"} ` +
-					`(${argv.length ? argv.join(" ") : "default teammate"})`,
-					"info",
-				);
+				try {
+					const sessionName = app.spawn(name, argv);
+					ctx.ui.notify(
+						`pi-teams: teammate "${sessionName}" started as ` +
+						`session "${sessionName}" in ${app.sessionDirLabel()}; ` +
+						"it will appear in /resume once it writes",
+						"info",
+					);
+				} catch (err) {
+					ctx.ui.notify(
+						`pi-teams: ${err instanceof Error ? err.message : String(err)}`,
+						"warning",
+					);
+				}
 				return;
 			}
 			if (sub === "kill") {

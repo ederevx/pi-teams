@@ -183,11 +183,16 @@ test("spawn detaches the teammate with fork identity in the environment", () => 
 	process.env.PI_TEAMS_PI = "pi-test";
 	try {
 		const { agent, calls } = makeAgent();
-		agent.spawn("worker", ["--model", "x", "-p", "hi"]);
+		agent.rememberSession(join(sessionDir, "sess.jsonl"));
+		const sessionName = agent.spawn("worker", ["--model", "x", "-p", "hi"]);
+		assert.equal(sessionName, "worker");
 		assert.equal(calls.length, 1);
 		const call = calls[0];
 		assert.equal(call.file, "pi-test");
-		assert.deepEqual(call.args, ["--model", "x", "-p", "hi"]);
+		assert.deepEqual(call.args, [
+			"--session-dir", sessionDir, "--name", "worker",
+			"--model", "x", "-p", "hi",
+		]);
 		assert.equal(call.options.detached, true);
 		assert.equal(call.options.stdio, "ignore");
 		assert.equal(call.options.windowsHide, true);
@@ -195,7 +200,37 @@ test("spawn detaches the teammate with fork identity in the environment", () => 
 		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
 		assert.equal(call.options.env.TEAM_NAME, "worker");
 		assert.ok(call.options.env.TEAM_ID.startsWith("fork-"));
+		// The child must not inherit the parent's session identity.
+		assert.equal(call.options.env.TEAM_SESSION, undefined);
+		assert.equal(call.options.env.PI_SESSION_FILE, undefined);
 		assert.equal(call.unrefed, true);
+	} finally {
+		delete process.env.PI_TEAMS_PI;
+	}
+});
+
+test("spawn refuses --no-session and names custom-arg teammates", () => {
+	publishEndpoint(true);
+	process.env.PI_TEAMS_PI = "pi-test";
+	try {
+		const { agent, calls } = makeAgent();
+		agent.rememberSession(join(sessionDir, "sess.jsonl"));
+		assert.throws(
+			() => agent.spawn("worker", ["--no-session", "-p", "hi"]),
+			/--no-session is not allowed/);
+		assert.equal(calls.length, 0, "nothing spawned on refusal");
+
+		// Custom args without session flags inherit the dir and a name.
+		agent.spawn("worker", ["--model", "x", "-p", "hi"]);
+		assert.deepEqual(calls[0].args, [
+			"--session-dir", sessionDir, "--name", "worker",
+			"--model", "x", "-p", "hi",
+		]);
+		// An explicit --name is respected.
+		agent.spawn("other", ["--name", "chosen", "-p", "hi"]);
+		assert.deepEqual(calls[1].args, [
+			"--session-dir", sessionDir, "--name", "chosen", "-p", "hi",
+		]);
 	} finally {
 		delete process.env.PI_TEAMS_PI;
 	}
