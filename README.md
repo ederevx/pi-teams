@@ -48,8 +48,10 @@ coordinate natively instead of through the shared tree.
   identity. A stdin pipe owned by the extension keeps the hold alive
   exactly as long as its pi; identity and fork parentage ride in the
   child environment, and EOF on that pipe (pi gone) drops the endpoint
-  instead of leaving an orphan. When a fork starts, the pi child
-  registers through the same extension.
+  instead of leaving an orphan. Forks reuse the running pi runtime
+  (`process.execPath` plus its entry script) instead of the `pi` name,
+  so a Windows launcher shim is never spawned directly. When a fork
+  starts, the pi child registers through the same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel.
