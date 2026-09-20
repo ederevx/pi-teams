@@ -600,6 +600,159 @@ export interface TeammateRef {
 	session: string;
 }
 
+/** Resolves a host label to its live agents. Every broker prefixes its
+ *  agents' ids with the host label, so a peer's agents are addressed
+ *  exactly like local ones; only the backend that reaches them differs. */
+export class AgentDirectory {
+	private readonly snapshot: () => Promise<AgentInfo[]>;
+	private readonly host: string;
+
+	constructor(snapshot: () => Promise<AgentInfo[]>, host: string) {
+		this.snapshot = snapshot;
+		this.host = host;
+	}
+
+	/** A host-less target or this host is local. */
+	isLocal(host: string): boolean {
+		return !host || host === this.host;
+	}
+
+	/** The live main agent that owns `host`, or a fallback agent there.
+	 *  This is the target a host-addressed request is delivered to. */
+	async mainAgent(host: string): Promise<AgentInfo | null> {
+		const agents = await this.snapshot();
+		const own = (a: AgentInfo): boolean =>
+			a.origin === host || a.id.startsWith(`${host}:`);
+		return agents.find((a) => own(a) && a.role === "main")
+			?? agents.find(own) ?? null;
+	}
+}
+
+/** One spawn interface; only the backend differs by host. */
+export interface SpawnBackend {
+	spawn(
+		name: string,
+		task: string,
+		options: SpawnOptions,
+	): Promise<TeammateRef | null>;
+}
+
+/** Spawns the teammate's process on this host. */
+export class LocalSpawnBackend implements SpawnBackend {
+	private readonly launch: (
+		name: string,
+		task: string,
+		options: SpawnOptions,
+	) => TeammateRef;
+
+	constructor(
+		launch: (
+			name: string,
+			task: string,
+			options: SpawnOptions,
+		) => TeammateRef,
+	) {
+		this.launch = launch;
+	}
+
+	async spawn(
+		name: string,
+		task: string,
+		options: SpawnOptions,
+	): Promise<TeammateRef | null> {
+		return this.launch(name, task, options);
+	}
+}
+
+/** Asks a linked peer host's main agent to spawn the teammate. The peer
+ *  owns the process and session; this agent only requested the work. */
+export class PeerSpawnBackend implements SpawnBackend {
+	private readonly host: string;
+	private readonly directory: AgentDirectory;
+	private readonly send: (
+		to: string,
+		kind: string,
+		text: string,
+	) => Promise<string>;
+	private readonly wait: (
+		requestId: string,
+		timeoutMs: number,
+	) => Promise<TeammateRef | null>;
+
+	constructor(
+		host: string,
+		directory: AgentDirectory,
+		send: (to: string, kind: string, text: string) => Promise<string>,
+		wait: (requestId: string, timeoutMs: number) =>
+			Promise<TeammateRef | null>,
+	) {
+		this.host = host;
+		this.directory = directory;
+		this.send = send;
+		this.wait = wait;
+	}
+
+	async spawn(
+		name: string,
+		task: string,
+		options: SpawnOptions,
+	): Promise<TeammateRef | null> {
+		const target = await this.directory.mainAgent(this.host);
+		if (!target) return null;
+		const requestId =
+			`spawn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+		const pending = this.wait(requestId, 15000);
+		await this.send(target.id, "spawn", JSON.stringify({
+			task, name, requestId,
+		}));
+		return pending;
+	}
+}
+
+/** A host address is routed through one interface: a host-less or
+ *  this-host spawn uses the local backend, any other host is a linked
+ *  peer whose request travels over the broker's peer link. */
+export class SpawnRouter {
+	private readonly host: string;
+	private readonly local: SpawnBackend;
+	private readonly makePeer: (host: string) => SpawnBackend;
+	private readonly peers = new Map<string, SpawnBackend>();
+
+	constructor(
+		host: string,
+		local: SpawnBackend,
+		makePeer: (host: string) => SpawnBackend,
+	) {
+		this.host = host;
+		this.local = local;
+		this.makePeer = makePeer;
+	}
+
+	backendFor(host: string): SpawnBackend {
+		if (!host || host === this.host) return this.local;
+		let backend = this.peers.get(host);
+		if (!backend) {
+			backend = this.makePeer(host);
+			this.peers.set(host, backend);
+		}
+		return backend;
+	}
+
+	spawn(
+		host: string,
+		name: string,
+		task: string,
+		options: SpawnOptions,
+	): Promise<TeammateRef | null> {
+		return this.backendFor(host).spawn(name, task, options);
+	}
+
+	/** Releases the cached per-host backends; GC on deregister. */
+	clear(): void {
+		this.peers.clear();
+	}
+}
+
 export class TeamAgent {
 	private readonly runner: ProcessHost;
 	private readonly deliver: DeliverFn;
@@ -616,6 +769,8 @@ export class TeamAgent {
 	private readonly teammates = new Set<SpawnedProcess>();
 	private readonly bridges = new Map<string, PeerBridge>();
 	private readonly peersFile: string;
+	private readonly directory: AgentDirectory;
+	private readonly spawnRouter: SpawnRouter;
 	private readonly waiters =
 		new Map<string, Set<(message: TeamMessage | null) => void>>();
 	private readonly recentResults = new Map<string, TeamMessage>();
@@ -646,6 +801,17 @@ export class TeamAgent {
 		this.id = process.env.TEAM_ID || this.makeMainId();
 		this.role = process.env.TEAM_ID ? "fork" : "main";
 		this.parent = process.env.TEAM_PARENT_ID || "";
+		this.directory = new AgentDirectory(() => this.snapshot(), this.host);
+		this.spawnRouter = new SpawnRouter(
+			this.host,
+			new LocalSpawnBackend((name, task, options) =>
+				this.spawnTask(name, task, options)),
+			(peerHost) => new PeerSpawnBackend(
+				peerHost,
+				this.directory,
+				(to, kind, text) => this.send(to, kind, text),
+				(requestId, ms) => this.waitForSpawn(requestId, ms)),
+		);
 	}
 
 	/** A fresh main-agent id. The host label makes the id globally
@@ -928,27 +1094,15 @@ export class TeamAgent {
 		return new Map(agentIds.map((id, i) => [id, results[i]]));
 	}
 
-	/** Asks a peer host's main agent to spawn a teammate, and returns the
-	 *  new id once it answers. The peer host owns the process and session;
-	 *  this agent only requested the work. */
-	async spawnRemote(
+	/** Spawns a teammate on `host` (empty or this host = local) behind a
+	 *  single interface; the router selects the local or peer backend. */
+	async spawn(
 		host: string,
 		name: string,
 		task: string,
+		options: SpawnOptions = {},
 	): Promise<TeammateRef | null> {
-		const agents = await this.snapshot();
-		const own = (a: AgentInfo): boolean =>
-			a.origin === host || a.id.startsWith(`${host}:`);
-		const target = agents.find((a) => own(a) && a.role === "main")
-			?? agents.find(own);
-		if (!target) return null;
-		const requestId =
-			`spawn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-		const pending = this.waitForSpawn(requestId, 15000);
-		await this.send(target.id, "spawn", JSON.stringify({
-			task, name, requestId,
-		}));
-		return pending;
+		return this.spawnRouter.spawn(host, name, task, options);
 	}
 
 	private waitForSpawn(
@@ -1047,9 +1201,11 @@ export class TeamAgent {
 		return this.id;
 	}
 
-	/** Asks a live agent to re-register itself as this agent's teammate;
-	 *  the target owns the identity change and reports its new fork id. */
-	async attachRemote(
+	/** Asks a live agent to re-register itself as this agent's teammate.
+	 *  The target may be local or on a linked peer; the broker routes the
+	 *  same control message either way, and the target owns the identity
+	 *  change and reports its new fork id. */
+	async attach(
 		target: string,
 		name?: string,
 	): Promise<TeammateRef | null> {
@@ -1409,6 +1565,7 @@ export class TeamAgent {
 		this.pendingSpawns.clear();
 		for (const settle of [...this.pendingAttaches.values()]) settle(null);
 		this.pendingAttaches.clear();
+		this.spawnRouter.clear();
 	}
 
 	deregister(): void {
@@ -1577,38 +1734,27 @@ export default async function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const model = ctx?.model;
-			const remote = params.host && params.host !== app.host
+			const host = params.host && params.host !== app.host
 				? params.host
 				: "";
-			if (remote) {
-				const ref = await app.spawnRemote(
-					remote, params.name || "", params.task);
-				if (!ref) {
-					throw new Error(`no peer agent on ${remote}`);
-				}
-				return {
-					content: [{
-						type: "text",
-						text: `spawned teammate ${ref.id} on ${remote}; ` +
-							`call team_wait with id "${ref.id}" to block for ` +
-							`its report.`,
-					}],
-					details: ref,
-				};
-			}
-			const ref = app.spawnTask(params.name || "", params.task, {
+			const ref = await app.spawn(host, params.name || "", params.task, {
 				provider: model?.provider,
 				model: model?.id,
 				thinking: ctx?.thinkingLevel,
 				context: params.context,
 			});
+			if (!ref) {
+				throw new Error(host
+					? `no peer agent on ${host}`
+					: "spawn failed");
+			}
+			const where = host ? ` on ${host}` : ` as session "${ref.session}"`;
 			return {
 				content: [{
 					type: "text",
-					text: `spawned teammate ${ref.id} as session ` +
-						`"${ref.session}"; wait with team_wait id ` +
-						`"${ref.id}", or continue and it reports as a ` +
-						`pi-teams message.`,
+					text: `spawned teammate ${ref.id}${where}; call ` +
+						`team_wait with id "${ref.id}" to block for its ` +
+						`report.`,
 				}],
 				details: ref,
 			};
@@ -1636,7 +1782,7 @@ export default async function (pi: ExtensionAPI) {
 			})),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			const ref = await app.attachRemote(
+			const ref = await app.attach(
 				params.target, params.name || "");
 			if (!ref) {
 				throw new Error(`could not attach ${params.target}`);
