@@ -110,8 +110,16 @@ function makeRunner(run) {
 	const runner = {
 		run: run ?? (() =>
 			Promise.resolve({ stdout: "{}", stderr: "", code: 0 })),
-		spawnHidden(file, args, options) {
-			return spawnStub(calls, file, args, options);
+		spawnHidden(file, args, options = {}) {
+			return spawnStub(calls, file, args, {
+				...options, windowsHide: true,
+			});
+		},
+		spawnDetached(file, args, options = {}) {
+			return spawnStub(calls, file, args, {
+				...options, windowsHide: true,
+				detached: process.platform !== "win32",
+			});
 		},
 	};
 	return { calls, runner };
@@ -496,7 +504,7 @@ test("spawn starts a detached broker only when none is published", () => {
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0].file, process.env.PYTHON || "python3");
 	assert.deepEqual(calls[0].args, [join(binDir, "teamd"), "--root", stateRoot, "start"]);
-	assert.equal(calls[0].options.detached, true);
+	assert.equal(calls[0].options.detached, process.platform !== "win32");
 	assert.equal(calls[0].options.stdio, "ignore");
 	assert.equal(calls[0].options.windowsHide, true);
 	assert.equal(calls[0].unrefed, true);
@@ -537,7 +545,7 @@ test("SshPeerBridge reads the endpoint, tunnels it, and reaps on close", async (
 	const forward = tunnel.args[tunnel.args.indexOf("-L") + 1];
 	assert.ok(forward.endsWith(":127.0.0.1:5555"));
 	assert.equal(tunnel.args[tunnel.args.length - 1], "peer.example");
-	assert.equal(tunnel.options.detached, true);
+	assert.equal(tunnel.options.detached, process.platform !== "win32");
 	assert.equal(tunnel.unrefed, true);
 	bridge.close();
 	assert.equal(tunnel.killed, true);
@@ -613,10 +621,14 @@ test("ProcessRunner hides every child console", async () => {
 	assert.equal(result.stderr, "err");
 	assert.equal(result.code, 0);
 	assert.equal(calls[0].options.windowsHide, true);
-	const child = runner.spawnHidden("ssh", ["y"], { detached: true });
-	assert.ok(child);
+	const hidden = runner.spawnHidden("ssh", ["y"]);
+	assert.ok(hidden);
 	assert.equal(calls[1].options.windowsHide, true);
-	assert.equal(calls[1].options.detached, true);
+	assert.equal(calls[1].options.detached, undefined);
+	const detached = runner.spawnDetached("ssh", ["z"]);
+	assert.ok(detached);
+	assert.equal(calls[2].options.windowsHide, true);
+	assert.equal(calls[2].options.detached, process.platform !== "win32");
 });
 
 test("an SSH tunnel that dies on its own fires the exit callback", async () => {

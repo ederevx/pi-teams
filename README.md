@@ -157,7 +157,9 @@ That chains, in order:
 - **OOP lint** (`tests/oop_lint.py`): no module-level mutable state, no
   `global`, no bare `except`, no `var` in the extension.
 - **Extension tests** (`tests/extension_test.mjs`): every child launch
-  goes through ProcessRunner with `windowsHide` set, `spawnTask` builds
+  goes through ProcessRunner with `windowsHide` set, and `spawnDetached`
+  never combines detachment with a hidden console on Windows;
+  `spawnTask` builds
   the teammate template from a task alone, resolves pi from the running
   runtime, refuses an inherit request without a parent session, and no
   custom spawn path exists; `SshPeerBridge` reads the endpoint, opens
