@@ -29,8 +29,9 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { existsSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 const home = homedir();
@@ -70,6 +71,21 @@ function waitSeconds(requested?: number): number {
 	return Number.isFinite(env) && env > 0 ? env : DEFAULT_WAIT_SECONDS;
 }
 
+/** Resolves a free loopback port for an SSH local forward. */
+function freePort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = createServer();
+		server.on("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			const port = typeof address === "object" && address
+				? address.port
+				: 0;
+			server.close(() => resolve(port));
+		});
+	});
+}
+
 /**
  * How to launch another pi without a shell. Reusing the running runtime
  * avoids spawning a Windows launcher shim (pi.cmd/pi.ps1) directly,
@@ -96,6 +112,8 @@ interface AgentInfo {
 	parent: string | null;
 	session: string | null;
 	online: boolean;
+	origin?: string;
+	remote?: boolean;
 }
 
 interface SpawnedProcess {
@@ -126,6 +144,9 @@ export interface SpawnOptions {
 	provider?: string;
 	model?: string;
 	thinking?: string;
+	/** Override the parent id, for a teammate spawned on behalf of a
+	 *  remote agent. Defaults to this agent. */
+	parent?: string;
 	/** "fresh" (default) starts a clean context and never carries the
 	 *  parent's history; "inherit" forks the parent session so the
 	 *  teammate can reuse its warm prompt-cache prefix. */
@@ -146,9 +167,13 @@ export class TeamAgent {
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
 	private readonly teammates = new Set<SpawnedProcess>();
+	private readonly tunnels = new Set<SpawnedProcess>();
 	private readonly waiters =
 		new Map<string, Set<(message: TeamMessage | null) => void>>();
 	private readonly recentResults = new Map<string, TeamMessage>();
+	private readonly pendingSpawns =
+		new Map<string, (ref: TeammateRef | null) => void>();
+	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
 
@@ -157,9 +182,11 @@ export class TeamAgent {
 		this.spawnProcess = spawnProcess;
 		this.deliver = deliver;
 		this.python = resolvePython();
+		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
 		this.id =
 			process.env.TEAM_ID ||
-			`pi-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
+			`${this.host}:pi-${process.pid}-` +
+			Math.random().toString(16).slice(2, 10);
 	}
 
 	private launch(
@@ -254,6 +281,14 @@ export class TeamAgent {
 		} catch {
 			// The hold prints one JSON object per line; a malformed line
 			// is dropped rather than crashing the session.
+			return;
+		}
+		if (message.kind === "spawn-ack" || message.kind === "spawn-error") {
+			this.resolveSpawn(message);
+			return;
+		}
+		if (message.kind === "spawn") {
+			this.handleSpawnRequest(message);
 			return;
 		}
 		if (message.kind !== "result" || message.to !== this.id) {
@@ -382,6 +417,82 @@ export class TeamAgent {
 		return new Map(agentIds.map((id, i) => [id, results[i]]));
 	}
 
+	/** Asks a peer host's main agent to spawn a teammate, and returns the
+	 *  new id once it answers. The peer host owns the process and session;
+	 *  this agent only requested the work. */
+	async spawnRemote(
+		host: string,
+		name: string,
+		task: string,
+	): Promise<TeammateRef | null> {
+		const agents = await this.snapshot();
+		const own = (a: AgentInfo): boolean =>
+			a.origin === host || a.id.startsWith(`${host}:`);
+		const target = agents.find((a) => own(a) && a.role === "main")
+			?? agents.find(own);
+		if (!target) return null;
+		const requestId =
+			`spawn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+		const pending = this.waitForSpawn(requestId, 15000);
+		await this.send(target.id, "spawn", JSON.stringify({
+			task, name, requestId,
+		}));
+		return pending;
+	}
+
+	private waitForSpawn(
+		requestId: string,
+		timeoutMs: number,
+	): Promise<TeammateRef | null> {
+		return new Promise((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const settle = (ref: TeammateRef | null): void => {
+				if (timer) clearTimeout(timer);
+				this.pendingSpawns.delete(requestId);
+				resolve(ref);
+			};
+			this.pendingSpawns.set(requestId, settle);
+			timer = setTimeout(() => settle(null), timeoutMs);
+		});
+	}
+
+	private resolveSpawn(message: TeamMessage): void {
+		const payload = (message.payload ?? {}) as {
+			requestId?: string; id?: string; session?: string;
+		};
+		if (!payload.requestId) return;
+		const settle = this.pendingSpawns.get(payload.requestId);
+		if (!settle) return;
+		this.pendingSpawns.delete(payload.requestId);
+		if (message.kind === "spawn-ack" && payload.id) {
+			settle({ id: payload.id, session: payload.session || payload.id });
+		} else {
+			settle(null);
+		}
+	}
+
+	/** A peer host asked this agent to spawn a teammate: this host owns
+	 *  the process and session and reports the new id back. */
+	private handleSpawnRequest(message: TeamMessage): void {
+		const payload = (message.payload ?? {}) as {
+			task?: string; name?: string; requestId?: string;
+		};
+		if (!payload.task) return;
+		try {
+			const ref = this.spawnTask(payload.name || "", payload.task, {
+				parent: message.from,
+			});
+			void this.send(message.from, "spawn-ack", JSON.stringify({
+				requestId: payload.requestId, id: ref.id,
+				session: ref.session,
+			}));
+		} catch {
+			void this.send(message.from, "spawn-error", JSON.stringify({
+				requestId: payload.requestId,
+			}));
+		}
+	}
+
 	async terminate(agentId: string): Promise<void> {
 		await this.exec(
 			this.python,
@@ -402,7 +513,8 @@ export class TeamAgent {
 				"cannot inherit context: this session has no file to fork");
 		}
 		const args = this.teammateArgs(session, options, inherit);
-		this.launchTeammate(forkId, session, args, this.taskPrompt(session, task));
+		this.launchTeammate(forkId, session, args,
+			this.taskPrompt(session, task), options.parent);
 		return { id: forkId, session };
 	}
 
@@ -426,7 +538,8 @@ export class TeamAgent {
 	}
 
 	private makeForkId(): string {
-		return `fork-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
+		return `${this.host}:fork-${process.pid}-` +
+			Math.random().toString(16).slice(2, 10);
 	}
 
 	private taskPrompt(session: string, task: string): string {
@@ -450,9 +563,10 @@ export class TeamAgent {
 		session: string,
 		args: string[],
 		prompt: string,
+		parent?: string,
 	): void {
 		const invocation = piInvocation();
-		const env = this.teammateEnv(forkId, session);
+		const env = this.teammateEnv(forkId, session, parent);
 		this.ensureBroker();
 		// The extension holds the teammate's RPC stdin open: the teammate
 		// stays alive for messages and exits when this pi goes away (the
@@ -484,6 +598,7 @@ export class TeamAgent {
 	private teammateEnv(
 		forkId: string,
 		session: string,
+		parent?: string,
 	): Record<string, string | undefined> {
 		const env: Record<string, string | undefined> = { ...process.env };
 		for (const key of Object.keys(env)) {
@@ -493,7 +608,7 @@ export class TeamAgent {
 			TEAM_ID: forkId,
 			TEAM_NAME: session,
 			TEAM_ROLE: "fork",
-			TEAM_PARENT_ID: this.id,
+			TEAM_PARENT_ID: parent || this.id,
 			TEAM_ROOT: stateRoot,
 		});
 		return env;
@@ -513,6 +628,53 @@ export class TeamAgent {
 			}
 		}
 		this.teammates.clear();
+	}
+
+	private stopTunnels(): void {
+		for (const tunnel of this.tunnels) {
+			try {
+				tunnel.kill();
+			} catch {
+				// already gone
+			}
+		}
+		this.tunnels.clear();
+	}
+
+	/** Links a peer host's loopback broker: read its endpoint read-only
+	 *  over the existing SSH session, open a loopback-only ssh -L tunnel
+	 *  to it, and tell the local broker to peer. Returns the peer label. */
+	async peerAdd(sshTarget: string, label: string): Promise<string> {
+		const remoteState = process.env.PI_TEAMS_REMOTE_STATE
+			|| "$HOME/.local/state/pi-teams";
+		const result = await this.exec(
+			"ssh", [sshTarget, "cat", `${remoteState}/endpoint`]);
+		const endpoint = JSON.parse(String(result.stdout).trim()) as {
+			port: number; token: string; name?: string;
+		};
+		const peer = label || endpoint.name || sshTarget;
+		const port = await freePort();
+		const tunnel = this.launch("ssh", [
+			"-N", "-L",
+			`127.0.0.1:${port}:127.0.0.1:${endpoint.port}`,
+			sshTarget,
+		], { stdio: "ignore", windowsHide: true, detached: true });
+		if (tunnel) {
+			this.tunnels.add(tunnel);
+			tunnel.on("exit", () => this.tunnels.delete(tunnel));
+			tunnel.unref();
+		}
+		await this.exec(this.python, [
+			teamBin, "--root", stateRoot, "peer", "add", peer,
+			`127.0.0.1:${port}:${endpoint.token}`,
+		]);
+		return peer;
+	}
+
+	async peerRemove(host: string): Promise<void> {
+		await this.exec(this.python, [
+			teamBin, "--root", stateRoot, "peer", "remove", host,
+		]);
 	}
 
 	sessionDirLabel(): string {
@@ -543,6 +705,7 @@ export class TeamAgent {
 		this.cancelWaits();
 		this.stopHold();
 		this.stopTeammates();
+		this.stopTunnels();
 	}
 
 	rememberSession(sessionFile?: string): void {
@@ -677,6 +840,10 @@ export default async function (pi: ExtensionAPI) {
 			name: Type.Optional(Type.String({
 				description: "Teammate and session name",
 			})),
+			host: Type.Optional(Type.String({
+				description:
+					"Peer host label to spawn on; defaults to this host",
+			})),
 			context: Type.Optional(Type.Union([
 				Type.Literal("fresh"),
 				Type.Literal("inherit"),
@@ -689,6 +856,25 @@ export default async function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const model = ctx?.model;
+			const remote = params.host && params.host !== app.host
+				? params.host
+				: "";
+			if (remote) {
+				const ref = await app.spawnRemote(
+					remote, params.name || "", params.task);
+				if (!ref) {
+					throw new Error(`no peer agent on ${remote}`);
+				}
+				return {
+					content: [{
+						type: "text",
+						text: `spawned teammate ${ref.id} on ${remote}; ` +
+							`call team_wait with id "${ref.id}" to block for ` +
+							`its report.`,
+					}],
+					details: ref,
+				};
+			}
 			const ref = app.spawnTask(params.name || "", params.task, {
 				provider: model?.provider,
 				model: model?.id,
@@ -780,6 +966,61 @@ export default async function (pi: ExtensionAPI) {
 			} finally {
 				app.setBusy(true);
 			}
+		},
+	});
+
+	// -- cross-host peers ------------------------------------------------
+	// One call links another host's broker over an existing SSH session:
+	// the extension reads the peer endpoint read-only, opens a loopback
+	// ssh -L tunnel, and tells the local broker to federate.
+	pi.registerTool({
+		name: "team_peer",
+		label: "link a peer host",
+		description:
+			"Connect another host's pi-teams broker over an existing SSH " +
+			"session. add fetches the peer's loopback endpoint read-only, " +
+			"opens a loopback-bound ssh -L tunnel, and links the two " +
+			"brokers so agents can message across hosts; remove drops the " +
+			"link. The peer host must already run pi-teams.",
+		promptSnippet: "Link another host's pi-teams broker over SSH",
+		promptGuidelines: [
+			"Call team_peer add <ssh-host> once to enable cross-host " +
+				"teammates. After that, team_spawn with host=<label> spawns " +
+				"on that host and messages route both ways.",
+		],
+		parameters: Type.Object({
+			action: Type.Union([
+				Type.Literal("add"),
+				Type.Literal("remove"),
+			]),
+			host: Type.String({
+				description: "SSH host to reach (also the default peer label)",
+			}),
+			label: Type.Optional(Type.String({
+				description: "Peer label override",
+			})),
+		}),
+		async execute(_toolCallId, params) {
+			if (params.action === "add") {
+				const peer = await app.peerAdd(
+					params.host, params.label || "");
+				return {
+					content: [{
+						type: "text",
+						text: `linked peer ${peer} over ssh ${params.host}; ` +
+							`use team_spawn host=${peer} to spawn there.`,
+					}],
+					details: { peer },
+				};
+			}
+			await app.peerRemove(params.host);
+			return {
+				content: [{
+					type: "text",
+					text: `unlinked peer ${params.host}`,
+				}],
+				details: undefined,
+			};
 		},
 	});
 

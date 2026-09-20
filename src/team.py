@@ -190,6 +190,14 @@ class TeamClient:
         return self.request("terminate", expected=("ack", "error"),
                             to=agent_id, why=why)
 
+    def peer_add(self, host, endpoint):
+        return self.request("peer-add", expected=("ack", "error"),
+                            host=host, endpoint=endpoint)
+
+    def peer_remove(self, host):
+        return self.request("peer-remove", expected=("ack", "error"),
+                            host=host)
+
     def deregister(self):
         reply = self.request("deregister", expected=("ack", "error"))
         self.close()
@@ -336,6 +344,10 @@ def main(argv=None):
     p_term = sub.add_parser("terminate")
     p_term.add_argument("to")
     p_term.add_argument("why", nargs="?", default="requested")
+    p_peer = sub.add_parser("peer")
+    p_peer.add_argument("action", choices=("add", "remove"))
+    p_peer.add_argument("host")
+    p_peer.add_argument("endpoint", nargs="?")
 
     args = parser.parse_args(argv)
     if args.command is None:
@@ -360,6 +372,16 @@ def main(argv=None):
         ))
     elif args.command == "terminate":
         print(json.dumps(client.terminate(args.to, args.why)))
+    elif args.command == "peer":
+        if args.action == "add":
+            if not args.endpoint:
+                parser.error("peer add needs host:port:token")
+            host, port, token = args.endpoint.split(":", 2)
+            print(json.dumps(client.peer_add(args.host, {
+                "host": host, "port": int(port), "token": token,
+            })))
+        else:
+            print(json.dumps(client.peer_remove(args.host)))
     else:
         parser.error("unknown command %r" % args.command)
     return 0
