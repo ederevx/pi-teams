@@ -12,7 +12,7 @@ import unittest
 
 from harness import make_root, wait_endpoint, wait_until
 from team import TeamClient
-from teamd import TeamBroker
+from teamd import PeerLink, TeamBroker
 
 IDLE_ROOMY = 30.0
 
@@ -426,6 +426,54 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertTrue(wait_until(
                 lambda: "beta:fork-remote" not in self._ids_via(root_b)),
                 "reaped remote fork still in the registry")
+        finally:
+            broker_b.stop()
+            thread_b.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_replaced_peer_does_not_reap_current_forks(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"])
+        try:
+            broker_a.link_peer("beta", broker_b.root.read_endpoint())
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            fork = TeamClient(root_b, heartbeat=None)
+            fork.id = "beta:fork-keep"
+            fork.role = "fork"
+            fork.parent = "alpha:caller"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            # A stale link dropping must not reap the live link's forks.
+            stale = PeerLink(broker_b, "alpha", conn=None)
+            broker_b._peer_down(stale)
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "a stale link drop reaped a live fork")
+            self.assertIn("beta:fork-keep", self._ids_via(root_b))
+            # Pending relays for the host are purged when the live link
+            # finally drops, and its forks are reaped.
+            probe = TeamClient(root_b, heartbeat=None)
+            probe.id = "beta:probe"
+            probe.register()
+            broker_b._peer_pending["rid-x"] = (probe._conn, "alpha")
+            broker_a.stop()
+            thread_a.join(timeout=3)
+            self.assertTrue(wait_until(
+                lambda: "rid-x" not in broker_b._peer_pending),
+                "pending relay leaked past peer down")
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=6),
+                "remote fork not reaped on peer down")
         finally:
             broker_b.stop()
             thread_b.join(timeout=3)
