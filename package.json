@@ -22,7 +22,8 @@
   ],
   "files": [
     "extensions/",
-    "src/",
+    "src/teamd.py",
+    "src/team.py",
     "scripts/",
     "README.md",
     "LICENSE"
