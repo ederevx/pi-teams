@@ -4,6 +4,10 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.7 — 2026-09-20
+
+- Add native `team_send` and `team_ls` tools; no shell or raw ssh.
+
 ## v0.3.6 — 2026-09-20
 
 - Fix peer spawn replies and rebuild peer links on the next session.
