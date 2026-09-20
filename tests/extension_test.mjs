@@ -8,10 +8,9 @@
  *     and forwards the agent identity through the environment;
  *   - spawn forwards the fork identity (parent/role) in the environment
  *     and detaches the teammate;
- *   - a default spawn is a named session in the parent's session
- *     directory, so the teammate is resumable after its process is GC'd;
- *   - /team spawn parses a standalone "--" separator, never the "--"
- *     of "--name".
+ *   - spawnTask builds the common teammate template (session, model,
+ *     and the report-back instruction) from a task alone, and no
+ *     custom spawn path exists.
  *
  * Runs on Node's built-in test runner; the extension is imported with
  * Node's TypeScript stripping. No broker or pi process is started.
@@ -212,36 +211,11 @@ test("hold forwards inbound messages to the agent", () => {
 	agent.stopHold();
 });
 
-test("spawn detaches the teammate with fork identity in the environment", () => {
-	publishEndpoint(true);
-	process.env.PI_TEAMS_PI = "pi-test";
-	try {
-		const { agent, calls } = makeAgent();
-		agent.rememberSession(join(sessionDir, "sess.jsonl"));
-		const ref = agent.spawn("worker", ["--model", "x", "-p", "hi"]);
-		assert.equal(ref.session, "worker");
-		assert.ok(ref.id.startsWith("fork-"));
-		assert.equal(calls.length, 1);
-		const call = calls[0];
-		assert.equal(call.file, "pi-test");
-		assert.deepEqual(call.args, [
-			"--session-dir", sessionDir, "--name", "worker",
-			"--model", "x", "-p", "hi",
-		]);
-		assert.equal(call.options.detached, true);
-		assert.equal(call.options.stdio, "ignore");
-		assert.equal(call.options.windowsHide, true);
-		assert.equal(call.options.env.TEAM_ROLE, "fork");
-		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
-		assert.equal(call.options.env.TEAM_NAME, "worker");
-		assert.ok(call.options.env.TEAM_ID.startsWith("fork-"));
-		// The child must not inherit the parent's session identity.
-		assert.equal(call.options.env.TEAM_SESSION, undefined);
-		assert.equal(call.options.env.PI_SESSION_FILE, undefined);
-		assert.equal(call.unrefed, true);
-	} finally {
-		delete process.env.PI_TEAMS_PI;
-	}
+test("teammates can only be spawned through spawnTask", () => {
+	const { agent } = makeAgent();
+	assert.equal(typeof agent.spawnTask, "function");
+	assert.equal(typeof agent.spawn, "undefined", "no custom spawn method");
+	assert.equal(typeof agent.parseSpawn, "undefined", "no argv parser");
 });
 
 test("spawnTask builds the teammate template from a task alone", () => {
@@ -273,54 +247,25 @@ test("spawnTask builds the teammate template from a task alone", () => {
 	}
 });
 
-test("spawn refuses --no-session and names custom-arg teammates", () => {
-	publishEndpoint(true);
-	process.env.PI_TEAMS_PI = "pi-test";
-	try {
-		const { agent, calls } = makeAgent();
-		agent.rememberSession(join(sessionDir, "sess.jsonl"));
-		assert.throws(
-			() => agent.spawn("worker", ["--no-session", "-p", "hi"]),
-			/--no-session is not allowed/);
-		assert.equal(calls.length, 0, "nothing spawned on refusal");
-
-		// Custom args without session flags inherit the dir and a name.
-		agent.spawn("worker", ["--model", "x", "-p", "hi"]);
-		assert.deepEqual(calls[0].args, [
-			"--session-dir", sessionDir, "--name", "worker",
-			"--model", "x", "-p", "hi",
-		]);
-		// An explicit --name is respected.
-		agent.spawn("other", ["--name", "chosen", "-p", "hi"]);
-		assert.deepEqual(calls[1].args, [
-			"--session-dir", sessionDir, "--name", "chosen", "-p", "hi",
-		]);
-	} finally {
-		delete process.env.PI_TEAMS_PI;
-	}
-});
-
-test("spawn resolves pi from the running runtime and names a resume session", () => {
+test("spawnTask resolves pi from the running runtime", () => {
 	// Windows wraps pi as a .cmd/.ps1 shim that child_process cannot
 	// execute without a shell; the runtime plus its entry script is
-	// spawnable everywhere. The default teammate is a named session in
-	// the parent's session directory, so /resume can find it after GC.
+	// spawnable everywhere.
 	publishEndpoint(true);
 	delete process.env.PI_TEAMS_PI;
 	const { agent, calls } = makeAgent();
 	agent.rememberSession(join(sessionDir, "sess.jsonl"));
-	agent.spawn("", []);
+	agent.spawnTask("worker", "do it");
 	assert.equal(calls.length, 1);
 	const call = calls[0];
 	assert.equal(call.file, process.execPath);
 	assert.equal(call.args[0], process.argv[1]);
 	assert.deepEqual(call.args.slice(1, 3), ["--session-dir", sessionDir]);
 	assert.equal(call.args[3], "--name");
-	assert.ok(call.args[4].startsWith("fork-"));
+	assert.equal(call.args[4], "worker");
 	assert.equal(call.args[5], "-p");
-	assert.ok(call.args[6].length > 0);
+	assert.ok(call.args[6].includes("do it"));
 	assert.ok(!call.args.includes("--no-session"));
-	assert.ok(call.options.env.TEAM_NAME.startsWith("fork-"));
 });
 
 test("spawn starts a detached broker only when none is published", () => {
@@ -338,27 +283,6 @@ test("spawn starts a detached broker only when none is published", () => {
 	publishEndpoint(true);
 	agent.ensureBroker();
 	assert.equal(calls.length, 1);
-});
-
-test("parseSpawn treats only a standalone -- as the argv separator", () => {
-	const { agent } = makeAgent();
-	assert.deepEqual(agent.parseSpawn("--name worker"), { name: "worker", argv: [] });
-	assert.deepEqual(agent.parseSpawn("--name worker -- --model x -p hello"), {
-		name: "worker",
-		argv: ["--model", "x", "-p", "hello"],
-	});
-	assert.deepEqual(agent.parseSpawn("-- --model x -p hello"), {
-		name: "",
-		argv: ["--model", "x", "-p", "hello"],
-	});
-	assert.deepEqual(agent.parseSpawn("--name worker --"), { name: "worker", argv: [] });
-	assert.deepEqual(agent.parseSpawn(""), { name: "", argv: [] });
-	// Quoted prompts survive as one argument.
-	assert.deepEqual(
-		agent.parseSpawn('--name worker -- -p "do the thing" --model x'),
-		{ name: "worker", argv: ["-p", "do the thing", "--model", "x"] });
-	assert.deepEqual(agent.parseSpawn("--name worker -- -p 'quoted value'"),
-		{ name: "worker", argv: ["-p", "quoted value"] });
 });
 
 test("deregister closes the held connection", () => {
