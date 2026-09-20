@@ -1,6 +1,6 @@
 {
   "name": "pi-teams",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Cross-agent communication, self-forks, and SSH-tunneled cross-host peers for the pi coding agent.",
   "license": "MIT",
@@ -37,5 +37,13 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   }
 }
