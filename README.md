@@ -207,7 +207,8 @@ scripts/uninstall.sh    # remove exactly what install.sh wrote
 ```
 
 Adoption rule: validate on `main` (tests green) and only then install,
-never the reverse.
+never the reverse. Each release tags the validated HEAD and records the
+commits since the previous tag in `CHANGELOG.md`.
 
 ## Roadmap
 
