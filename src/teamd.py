@@ -20,7 +20,7 @@ a pid is alive, which keeps the broker portable.
 
 Protocol (one JSON object per line, both directions):
   hello/{op, token}            mandatory first message; ack on success
-  register/{op,id,name,role,parent,cwd,session}
+  register/{op,id,name,role,parent,cwd,session,busy_file}
   send/{op,to,from,kind,payload,ts}  ping/{op}  ls/{op}
   terminate/{op,to,why}        deregister/{op}  shutdown/{op}
 Reply objects use op "ack", "error", "registry", "message",
@@ -43,6 +43,7 @@ ENDPOINT_NAME = "endpoint"
 REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"
 PEERS_NAME = "peers.json"
+BUSY_SUFFIX = ".busy"
 
 
 class TeamRoot:
@@ -191,7 +192,7 @@ class TeamBroker:
     """Registry + relay for connected agents on one loopback endpoint."""
 
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
-                 fork_idle=None, host=None):
+                 fork_idle=None, busy_grace=None, host=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
@@ -206,6 +207,14 @@ class TeamBroker:
         self.fork_idle = float(
             fork_idle if fork_idle is not None
             else os.environ.get("PI_TEAMS_FORK_IDLE", "300")
+        )
+        # A .busy file whose agent is no longer registered and whose mtime
+        # is older than this grace belongs to an old session (a reload,
+        # crash, or reaped fork); the orphan sweep removes it. Registered
+        # agents keep their file however old its mtime is.
+        self.busy_grace = float(
+            busy_grace if busy_grace is not None
+            else os.environ.get("PI_TEAMS_BUSY_GRACE", "120")
         )
         self.token = secrets.token_hex(16)
         self._registry = {}
@@ -448,6 +457,7 @@ class TeamBroker:
             "cwd": str(msg.get("cwd") or os.getcwd()),
             "session": msg.get("session") or None,
             "owner_pid": msg.get("owner_pid") or None,
+            "busy_file": msg.get("busy_file") or None,
             "origin": self.host,
             "since_ts": time.time(),
             "last_seen": time.time(),
@@ -493,8 +503,9 @@ class TeamBroker:
 
     def _drop_entry(self, agent_id):
         with self._lock:
-            self._registry.pop(agent_id, None)
+            entry = self._registry.pop(agent_id, None)
             self._clients.pop(agent_id, None)
+        self._remove_busy_file(entry)
         self._persist_and_notify()
 
     def _drop_conn(self, agent_id):
@@ -504,9 +515,10 @@ class TeamBroker:
             conn = self._clients.get(agent_id)
             if conn is not None:
                 self._clients.pop(agent_id, None)
-            had_entry = agent_id in self._registry
-            self._registry.pop(agent_id, None)
+            entry = self._registry.pop(agent_id, None)
+            had_entry = entry is not None
         if had_entry:
+            self._remove_busy_file(entry)
             self._persist_and_notify()
 
     # -- messaging ---------------------------------------------------
@@ -562,6 +574,7 @@ class TeamBroker:
                 conn.close()
             except OSError:
                 pass
+        self._remove_busy_file(entry)
         self._kill_owner(entry or {}, why)
 
     def _terminate(self, agent_id, why):
@@ -603,6 +616,7 @@ class TeamBroker:
 
     def _sweep(self):
         self._expire_peer_relays()
+        self._gc_orphan_busy_files(time.time())
         doomed_fork, doomed_idle = self._classify(time.time())
         if not doomed_fork and not doomed_idle:
             return
@@ -646,12 +660,58 @@ class TeamBroker:
         # thread ends instead of looping on an open connection forever.
         with self._lock:
             conn = self._clients.pop(agent_id, None)
-            self._registry.pop(agent_id, None)
+            entry = self._registry.pop(agent_id, None)
         if conn is not None:
             try:
                 conn.close()
             except OSError:
                 pass
+        self._remove_busy_file(entry)
+
+    # -- busy-file GC ------------------------------------------------
+
+    def _gc_orphan_busy_files(self, now):
+        # A busy file is published by the extension, not the broker. One
+        # whose agent is no longer registered and has not been touched for
+        # the grace window belongs to an old session; remove it. A
+        # registered agent (even a busy fork with an old mtime) keeps its
+        # file.
+        try:
+            files = list(self.root.base.glob("*" + BUSY_SUFFIX))
+        except OSError:
+            return
+        with self._lock:
+            live = {
+                str(pathlib.Path(entry["busy_file"]).resolve())
+                for entry in self._registry.values()
+                if entry.get("busy_file")
+            }
+        for path in files:
+            try:
+                if str(path.resolve()) in live:
+                    continue
+                if path.stat().st_mtime > now - self.busy_grace:
+                    continue
+            except OSError:
+                continue
+            self._unlink_under_root(str(path))
+
+    def _remove_busy_file(self, entry):
+        path = (entry or {}).get("busy_file")
+        if path:
+            self._unlink_under_root(path)
+
+    def _unlink_under_root(self, path):
+        # Guard the delete to the broker's own root so a malformed or
+        # hostile path can never remove a file elsewhere.
+        try:
+            target = pathlib.Path(path).resolve()
+            base = self.root.base.resolve()
+            if base != target.parent and base not in target.parents:
+                return
+            target.unlink()
+        except OSError:
+            pass
 
     # -- peer federation ---------------------------------------------
 
@@ -904,6 +964,7 @@ def main(argv=None):
     parser.add_argument("--host", default=None)
     parser.add_argument("--idle-timeout", type=float, default=15.0)
     parser.add_argument("--fork-idle", type=float, default=None)
+    parser.add_argument("--busy-grace", type=float, default=None)
     parser.add_argument("--sweep-interval", type=float, default=1.0)
     parser.add_argument("command", nargs="?", choices=["start", "stop"],
                         default="start")
@@ -914,7 +975,8 @@ def main(argv=None):
         return 0
     TeamBroker(args.root, idle_timeout=args.idle_timeout,
                sweep_interval=args.sweep_interval,
-               fork_idle=args.fork_idle, host=args.host).run()
+               fork_idle=args.fork_idle, busy_grace=args.busy_grace,
+               host=args.host).run()
     return 0
 
 

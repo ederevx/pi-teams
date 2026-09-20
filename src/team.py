@@ -87,6 +87,7 @@ class TeamClient:
             "cwd": os.getcwd(),
             "session": self.session,
             "owner_pid": self.owner_pid,
+            "busy_file": self.busy_file,
         }
 
     def set_identity(self, agent_id=None, name=None, role=None, parent=None,
