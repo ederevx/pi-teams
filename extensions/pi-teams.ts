@@ -336,18 +336,22 @@ export class TeamAgent {
 		prompt: string,
 	): void {
 		const invocation = piInvocation();
-		const env = {
-			...process.env,
+		// A teammate is its own root session, not a nested view of the
+		// parent: drop every inherited variable that binds a process to a
+		// parent session or host, whichever layer set it, then hand the
+		// child this fork's own identity below. Pi removes its session
+		// variables for child shells the same way.
+		const env: Record<string, string | undefined> = { ...process.env };
+		for (const key of Object.keys(env)) {
+			if (/^(PI|TEAM)_(SESSION|HOST)/.test(key)) delete env[key];
+		}
+		Object.assign(env, {
 			TEAM_ID: forkId,
 			TEAM_NAME: session,
 			TEAM_ROLE: "fork",
 			TEAM_PARENT_ID: this.id,
 			TEAM_ROOT: stateRoot,
-		};
-		// The child is its own session; never hand it the parent's session
-		// identity through the environment.
-		delete env.TEAM_SESSION;
-		delete env.PI_SESSION_FILE;
+		});
 		this.ensureBroker();
 		// The extension holds the teammate's RPC stdin open: the teammate
 		// stays alive for messages and exits when this pi goes away (the

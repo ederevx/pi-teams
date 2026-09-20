@@ -223,33 +223,48 @@ test("teammates can only be spawned through spawnTask", () => {
 
 test("spawnTask builds the teammate template from a task alone", () => {
 	publishEndpoint(true);
-	const { agent, calls } = makeAgent();
-	agent.rememberSession(join(sessionDir, "sess.jsonl"));
-	const ref = agent.spawnTask("worker", "summarize the diff", {
-		provider: "openrouter", model: "m", thinking: "low",
-	});
-	assert.equal(ref.session, "worker");
-	assert.ok(ref.id.startsWith("fork-"));
-	const call = calls[0];
-	assert.equal(call.file, process.execPath);
-	assert.equal(call.args[0], process.argv[1]);
-	assert.deepEqual(call.args.slice(1, 3), ["--mode", "rpc"]);
-	assert.ok(call.args.includes("--session-dir"));
-	assert.ok(call.args.includes("--name"));
-	assert.ok(call.args.includes("--provider"));
-	assert.ok(call.args.includes("--model"));
-	assert.ok(call.args.includes("--thinking"));
-	// The task is delivered as an RPC prompt, never as a -p task.
-	assert.ok(!call.args.includes("-p"));
-	assert.deepEqual(call.options.stdio, ["pipe", "ignore", "ignore"]);
-	assert.equal(call.stdinWrites.length, 1);
-	const sent = JSON.parse(call.stdinWrites[0].trim());
-	assert.equal(sent.type, "prompt");
-	assert.match(sent.message, /summarize the diff/);
-	assert.match(sent.message, /TEAM_PARENT_ID/);
-	assert.match(sent.message, /TEAM_ROOT/);
-	assert.equal(call.options.env.TEAM_ROOT, stateRoot);
-	assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
+	process.env.PI_SESSION_BINDING = "1";
+	process.env.PI_HOST_BINDING = "pi-parent";
+	process.env.TEAM_SESSION = "parent-session";
+	try {
+		const { agent, calls } = makeAgent();
+		agent.rememberSession(join(sessionDir, "sess.jsonl"));
+		const ref = agent.spawnTask("worker", "summarize the diff", {
+			provider: "openrouter", model: "m", thinking: "low",
+		});
+		assert.equal(ref.session, "worker");
+		assert.ok(ref.id.startsWith("fork-"));
+		const call = calls[0];
+		assert.equal(call.file, process.execPath);
+		assert.equal(call.args[0], process.argv[1]);
+		assert.deepEqual(call.args.slice(1, 3), ["--mode", "rpc"]);
+		assert.ok(call.args.includes("--session-dir"));
+		assert.ok(call.args.includes("--name"));
+		assert.ok(call.args.includes("--provider"));
+		assert.ok(call.args.includes("--model"));
+		assert.ok(call.args.includes("--thinking"));
+		// The task is delivered as an RPC prompt, never as a -p task.
+		assert.ok(!call.args.includes("-p"));
+		assert.deepEqual(call.options.stdio, ["pipe", "ignore", "ignore"]);
+		assert.equal(call.stdinWrites.length, 1);
+		const sent = JSON.parse(call.stdinWrites[0].trim());
+		assert.equal(sent.type, "prompt");
+		assert.match(sent.message, /summarize the diff/);
+		assert.match(sent.message, /TEAM_PARENT_ID/);
+		assert.match(sent.message, /TEAM_ROOT/);
+		assert.equal(call.options.env.TEAM_ROOT, stateRoot);
+		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
+		// The teammate must not inherit the parent's session or host
+		// binding, whichever layer set it; its own identity is set fresh.
+		assert.equal(call.options.env.PI_SESSION_BINDING, undefined);
+		assert.equal(call.options.env.PI_HOST_BINDING, undefined);
+		assert.equal(call.options.env.PI_SESSION_FILE, undefined);
+		assert.equal(call.options.env.TEAM_SESSION, undefined);
+	} finally {
+		delete process.env.PI_SESSION_BINDING;
+		delete process.env.PI_HOST_BINDING;
+		delete process.env.TEAM_SESSION;
+	}
 });
 
 test("spawnTask resolves pi from the running runtime", () => {
