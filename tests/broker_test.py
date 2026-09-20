@@ -179,6 +179,8 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertEqual(endpoint["host"], "127.0.0.1")
         self.assertTrue(endpoint["port"] > 0)
         self.assertTrue(len(endpoint["token"]) >= 32)
+        self.assertTrue(endpoint.get("version"),
+                        "the endpoint must carry a source stamp")
 
     def test_register_and_discover(self):
         self._agent("alpha", role="main")

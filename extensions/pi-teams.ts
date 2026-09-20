@@ -29,8 +29,9 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:net";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -195,6 +196,7 @@ export class TeamAgent {
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
+	private teamdVersionCache: string | undefined;
 
 	constructor(exec: ExecFn, spawnProcess: SpawnFn = nodeSpawn, deliver: DeliverFn = () => {}) {
 		this.exec = exec;
@@ -226,7 +228,54 @@ export class TeamAgent {
 	}
 
 	ensureBroker(): void {
-		if (existsSync(join(stateRoot, "endpoint"))) return;
+		const endpoint = this.endpointInfo();
+		// A matching stamp means the running broker is this build; a stale
+		// or missing stamp means it predates a reload/install, so replace
+		// it. This is what ties a broker restart to /reload.
+		if (endpoint && endpoint.version === this.teamdVersion()) return;
+		if (endpoint) this.stopBroker();
+		this.startBroker();
+	}
+
+	/** The published endpoint, or null when none is readable yet. */
+	private endpointInfo(): { version?: string } | null {
+		try {
+			return JSON.parse(
+				readFileSync(join(stateRoot, "endpoint"), "utf8"),
+			) as { version?: string };
+		} catch {
+			return null;
+		}
+	}
+
+	/** The installed broker's source stamp; empty when unreadable. */
+	private teamdVersion(): string {
+		if (this.teamdVersionCache === undefined) {
+			try {
+				this.teamdVersionCache = createHash("sha256")
+					.update(readFileSync(teamdBin))
+					.digest("hex")
+					.slice(0, 16);
+			} catch {
+				this.teamdVersionCache = "";
+			}
+		}
+		return this.teamdVersionCache;
+	}
+
+	/** Stop a stale broker and wait for it to release the lock. */
+	private stopBroker(): void {
+		try {
+			spawnSync(this.python, [teamdBin, "--root", stateRoot, "stop"], {
+				stdio: "ignore", windowsHide: true,
+			});
+		} catch {
+			// best effort; the start below retries the broker lock.
+		}
+	}
+
+	/** Launch the detached broker; the broker lock admits only one. */
+	private startBroker(): void {
 		// The broker never exits; detach it so it outlives the session
 		// that happened to start it.
 		const child = this.launch(

@@ -52,6 +52,12 @@ coordinate natively instead of through the shared tree.
   PI_TEAMS_SESSION_GRACE (default 1h; PI_TEAMS_SESSIONS_ROOT overrides the
   scan root). A user's own session and a live fork's file are never
   touched, and deletions are guarded to the sessions root.
+- **Reload-tied broker restart**: the broker stamps its endpoint with a
+  hash of its own source. On session start (which `/reload` re-runs) the
+  extension compares that stamp with the installed broker and
+  stops+starts the broker only when they differ, so a reload adopts new
+  broker/GC code without a manual restart while an unchanged reload
+  leaves the broker alone.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
