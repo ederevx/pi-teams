@@ -258,8 +258,19 @@ class TeamClient:
     def _watch_stdin(self):
         # When the spawner hosts us on a pipe or a PTY, EOF on stdin
         # means the hosting process is gone: exit so the endpoint dies
-        # with its pi instead of pinging forever as an orphan.
+        # with its pi instead of pinging forever as an orphan. Watch
+        # every stdin except a real interactive console, whose input
+        # must never be consumed. A console is recognized with
+        # os.get_terminal_size, not isatty: on Windows isatty reports
+        # true for the NUL device too, so a hold launched with a
+        # detached stdin would never see its EOF and would outlive its
+        # host.
         dead = threading.Event()
+        try:
+            os.get_terminal_size(sys.stdin.fileno())
+            return dead
+        except (OSError, ValueError):
+            pass
 
         def watch():
             try:
@@ -270,8 +281,7 @@ class TeamClient:
             except (OSError, ValueError):
                 dead.set()
 
-        if not sys.stdin.isatty():
-            threading.Thread(target=watch, daemon=True).start()
+        threading.Thread(target=watch, daemon=True).start()
         return dead
 
     def _emit(self, msg):
