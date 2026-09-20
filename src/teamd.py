@@ -117,6 +117,8 @@ class PeerLink:
         self.conn = conn
         self.connected = conn is not None
         self._buf = b""
+        self._send_lock = threading.Lock()
+        self._drop_lock = threading.Lock()
 
     def open(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -134,9 +136,10 @@ class PeerLink:
         if not self.connected or self.conn is None:
             return False
         try:
-            self.conn.sendall(
-                (json.dumps(obj, separators=(",", ":")) + "\n").encode()
-            )
+            with self._send_lock:
+                self.conn.sendall(
+                    (json.dumps(obj, separators=(",", ":")) + "\n").encode()
+                )
             return True
         except OSError:
             self.drop()
@@ -171,10 +174,11 @@ class PeerLink:
         self.owner._peer_message(self, msg)
 
     def drop(self):
-        if not self.connected and self.conn is None:
-            return
-        self.connected = False
-        conn, self.conn = self.conn, None
+        with self._drop_lock:
+            if not self.connected and self.conn is None:
+                return
+            self.connected = False
+            conn, self.conn = self.conn, None
         if conn is not None:
             try:
                 conn.close()
@@ -521,7 +525,7 @@ class TeamBroker:
         if peer is not None and peer.connected:
             rid = secrets.token_hex(8)
             with self._lock:
-                self._peer_pending[rid] = sender_conn
+                self._peer_pending[rid] = (sender_conn, peer.host)
             sent = peer.send({
                 "op": "peer-relay", "id": rid, "to": target,
                 "from": msg.get("from") or sender_id,
@@ -655,7 +659,8 @@ class TeamBroker:
             return False
         host = self._parent_host(parent)
         if host != self.host:
-            return host not in self._peers
+            with self._lock:
+                return host not in self._peers
         return True
 
     def _snapshot_all(self):
@@ -741,22 +746,37 @@ class TeamBroker:
 
     def _finish_peer_relay(self, msg):
         with self._lock:
-            sender = self._peer_pending.pop(msg.get("id"), None)
-        if sender is None:
+            entry = self._peer_pending.pop(msg.get("id"), None)
+        if entry is None:
             return
+        sender, _host = entry
         if msg.get("ok"):
             self._reply(sender, op="ack")
         else:
             self._reply(sender, op="error", error="undeliverable")
 
     def _peer_down(self, peer):
+        # A replaced link must not reap: only the peer that is still the
+        # current link owns its host's remote forks and registry view.
         with self._lock:
-            if self._peers.get(peer.host) is peer:
+            was_current = self._peers.get(peer.host) is peer
+            if was_current:
                 self._peers.pop(peer.host, None)
+                self._remote.pop(peer.host, None)
             for conn, other in list(self._peers_by_conn.items()):
                 if other is peer:
                     self._peers_by_conn.pop(conn, None)
-            self._remote.pop(peer.host, None)
+            stale = [
+                (rid, entry)
+                for rid, entry in self._peer_pending.items()
+                if entry[1] == peer.host
+            ] if was_current else []
+            for rid, _entry in stale:
+                self._peer_pending.pop(rid, None)
+        if not was_current:
+            return
+        for _rid, (sender, _host) in stale:
+            self._reply(sender, op="error", error="undeliverable")
         self._reap_peer(peer.host)
 
     def _reap_peer(self, host):
