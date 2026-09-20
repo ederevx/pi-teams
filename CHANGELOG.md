@@ -4,6 +4,10 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.2 — 2026-09-20
+
+- Hide child consoles and split the SSH peer bridge.
+
 ## v0.3.1 — 2026-09-20
 
 - Mark the pi-bundled peers optional so a git install does not vendor them.
