@@ -179,7 +179,7 @@ the `pi` key and carries the `pi-package` keyword, so pi can install it
 directly.
 
 ```
-pi install git:github.com/ederevx/pi-teams@v0.1.0
+pi install git:github.com/ederevx/pi-teams@v0.2.0
 pi install npm:pi-teams          # once published to npm
 pi install /absolute/path/to/pi-teams
 ```
