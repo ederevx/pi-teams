@@ -4,6 +4,11 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.6 — 2026-09-20
+
+- Fix peer spawn replies and rebuild peer links on the next session.
+- Attach a live session as a teammate; detach restores a main identity.
+
 ## v0.3.5 — 2026-09-20
 
 - Keep the broker persistent via a windowless interpreter.
