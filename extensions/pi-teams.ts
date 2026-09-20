@@ -763,6 +763,7 @@ export class TeamAgent {
 	private role: string;
 	private parent = "";
 	private attachedName = "";
+	private teamOwner = false;
 	private cwd = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
@@ -1043,17 +1044,27 @@ export class TeamAgent {
 	}
 
 	/** Whether this session is a team member: spawned as a teammate (role
-	 *  fork) or attached to one. Messaging and waiting are member-only
-	 *  operations. */
-	isTeammate(): boolean {
-		return this.role === "fork";
+	 *  fork), attached to one, or the owner of spawned or attached
+	 *  teammates (spawning implies attachment). Messaging and waiting are
+	 *  member-only operations. */
+	async isTeammate(): Promise<boolean> {
+		if (this.role === "fork" || this.teamOwner) return true;
+		return this.ownsTeammates();
+	}
+
+	/** Whether another live agent is parented to this session. Deriving
+	 *  it from the registry keeps the fact across a reload instead of
+	 *  relying on in-memory state alone. */
+	private async ownsTeammates(): Promise<boolean> {
+		const agents = await this.snapshot();
+		return agents.some((a) => a.parent === this.id);
 	}
 
 	/** Gate for member-only agent operations; throws with the fix when
 	 *  this session is not a team member. Control traffic (acks, notices)
 	 *  uses the raw send path and is not gated. */
-	requireTeammate(action: string): void {
-		if (this.isTeammate()) return;
+	async requireTeammate(action: string): Promise<void> {
+		if (await this.isTeammate()) return;
 		throw new Error(
 			`${action} requires being a team member; attach first with ` +
 			`team_attach or /team attach <parent>`);
@@ -1119,7 +1130,11 @@ export class TeamAgent {
 		task: string,
 		options: SpawnOptions = {},
 	): Promise<TeammateRef | null> {
-		return this.spawnRouter.spawn(host, name, task, options);
+		const ref = await this.spawnRouter.spawn(host, name, task, options);
+		// Spawning a teammate makes this session a team member too, so it
+		// can message and wait without a separate attach.
+		if (ref) this.teamOwner = true;
+		return ref;
 	}
 
 	private waitForSpawn(
@@ -1852,7 +1867,7 @@ export default async function (pi: ExtensionAPI) {
 			})),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-			app.requireTeammate("team_wait");
+			await app.requireTeammate("team_wait");
 			const targetIds = (params.ids && params.ids.length > 0)
 				? params.ids
 				: params.id ? [params.id] : [];
@@ -1914,7 +1929,7 @@ export default async function (pi: ExtensionAPI) {
 			})),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			app.requireTeammate("team_send");
+			await app.requireTeammate("team_send");
 			const reply = await app.send(
 				params.to, params.kind || "text", params.text);
 			return {
@@ -2063,7 +2078,7 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify("usage: /team send <id> [kind] <text>", "warning");
 					return;
 				}
-				if (!app.isTeammate()) {
+				if (!(await app.isTeammate())) {
 					ctx.ui.notify(
 						"pi-teams: /team send requires being a team member; " +
 						"attach first with /team attach <parent>", "warning");
