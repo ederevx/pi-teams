@@ -107,11 +107,12 @@ coordinate natively instead of through the shared tree.
   timed-out wait still receives each report as a message.
 - **Tools**: the extension exposes `team_ls`, `team_send`,
   `team_spawn`, `team_wait`, `team_attach`, and `team_peer` as agent
-  tools. Sending and waiting are member-only: a session must be a team
-  member (attached or spawned) before `team_send` and `team_wait`
-  work, and the extension tells a non-member to attach first. Listing,
-  spawning, attaching, and peer linking stay open, so a session can
-  join a team and link peers without a shell or raw `ssh`.
+  tools. Sending and waiting are member-only: a session is a team member
+  once it is attached, spawned, or has spawned or attached a teammate,
+  and `team_send`/`team_wait` refuse otherwise with a pointer to
+  `team_attach`. Listing, spawning, attaching, and peer linking stay
+  open, so a session can join a team and link peers without a shell or
+  raw `ssh`.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the

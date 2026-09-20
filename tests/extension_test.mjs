@@ -927,16 +927,18 @@ test("deregister resolves a pending attach instead of hanging it", async () => {
 	assert.equal(ref, null);
 });
 
-test("member-only operations refuse a non-team session", () => {
+test("member-only operations refuse a non-team session", async () => {
 	const savedId = process.env.TEAM_ID;
 	delete process.env.TEAM_ID;
 	const { runner } = makeRunner(() =>
 		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
 	const agent = new TeamAgent(runner, () => {});
 	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	assert.equal(agent.isTeammate(), false);
-	assert.throws(() => agent.requireTeammate("team_send"), /team member/);
-	assert.throws(() => agent.requireTeammate("team_wait"), /team member/);
+	assert.equal(await agent.isTeammate(), false);
+	await assert.rejects(() => agent.requireTeammate("team_send"),
+		/team member/);
+	await assert.rejects(() => agent.requireTeammate("team_wait"),
+		/team member/);
 });
 
 test("attaching makes a session a teammate that passes the gate", async () => {
@@ -947,12 +949,47 @@ test("attaching makes a session a teammate that passes the gate", async () => {
 	const agent = new TeamAgent(runner, () => {});
 	if (savedId !== undefined) process.env.TEAM_ID = savedId;
 	agent.hold("/work");
-	assert.equal(agent.isTeammate(), false);
+	assert.equal(await agent.isTeammate(), false);
 	await agent.attachTo("parent-9", "helper");
-	assert.equal(agent.isTeammate(), true);
-	assert.doesNotThrow(() => agent.requireTeammate("team_send"));
+	assert.equal(await agent.isTeammate(), true);
+	await assert.doesNotReject(() => agent.requireTeammate("team_send"));
 	agent.detach();
-	assert.equal(agent.isTeammate(), false);
+	assert.equal(await agent.isTeammate(), false);
 	agent.stopHold();
+});
+
+test("spawning makes the spawner a teammate", async () => {
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	agent.hold("/work");
+	// The empty snapshot means only the spawn itself can grant membership.
+	assert.equal(await agent.isTeammate(), false);
+	const ref = await agent.spawn("", "kid", "do it");
+	assert.ok(ref, "local spawn returned no ref");
+	assert.equal(await agent.isTeammate(), true);
+	await assert.doesNotReject(() => agent.requireTeammate("team_send"));
+	agent.stopHold();
+});
+
+test("owning a registered teammate grants membership after reload", async () => {
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const holder = {};
+	const { runner } = makeRunner((file, args) => {
+		if (args.includes("ls")) {
+			return Promise.resolve({ stdout: JSON.stringify({ agents: [{
+				id: "x", name: "x", role: "fork", pid: 1,
+				parent: holder.agent.id, session: null, online: true,
+			}] }), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	holder.agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	assert.equal(await holder.agent.isTeammate(), true);
 });
 
