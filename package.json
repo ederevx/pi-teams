@@ -26,6 +26,7 @@
     "src/team.py",
     "scripts/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "pi": {
