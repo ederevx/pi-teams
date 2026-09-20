@@ -33,6 +33,7 @@ import { createServer } from "node:net";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const home = homedir();
 const stateRoot =
@@ -40,6 +41,19 @@ const stateRoot =
 	join(process.env.XDG_STATE_HOME || join(home, ".local", "state"),
 		"pi-teams");
 const binDir = process.env.PI_TEAMS_BIN || join(home, ".local", "bin");
+/** The package's bundled broker/client, when this extension is loaded
+ *  from a pi package: the sibling src/ holding teamd.py and team.py.
+ *  An explicit PI_TEAMS_BIN wins, so a manual install can override it. */
+function bundledSrcDir(): string {
+	try {
+		const here = dirname(fileURLToPath(import.meta.url));
+		const candidate = join(here, "..", "src");
+		if (existsSync(join(candidate, "teamd.py"))) return candidate;
+	} catch {
+		// not loaded as an ES module with a URL
+	}
+	return "";
+}
 /** Resolves a Python interpreter without a platform branch: an explicit
  *  PYTHON wins, otherwise the first of python3/python/py that answers
  *  (py is the launcher on Windows). */
@@ -58,8 +72,13 @@ function resolvePython(): string {
 	}
 	return "python3";
 }
-const teamdBin = join(binDir, "teamd");
-const teamBin = join(binDir, "team");
+const bundled = process.env.PI_TEAMS_BIN ? "" : bundledSrcDir();
+const teamdBin = bundled
+	? join(bundled, "teamd.py")
+	: join(binDir, "teamd");
+const teamBin = bundled
+	? join(bundled, "team.py")
+	: join(binDir, "team");
 
 /** Default bound for team_wait, overridable with PI_TEAMS_WAIT. */
 const DEFAULT_WAIT_SECONDS = 300;

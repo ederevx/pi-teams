@@ -1,0 +1,39 @@
+{
+  "name": "pi-teams",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cross-agent communication, self-forks, and SSH-tunneled cross-host peers for the pi coding agent.",
+  "license": "MIT",
+  "author": "Edrick Sinsuan <evcsinsuan@gmail.com>",
+  "homepage": "https://github.com/ederevx/pi-teams",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ederevx/pi-teams.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ederevx/pi-teams/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "agents",
+    "teams",
+    "broker"
+  ],
+  "files": [
+    "extensions/",
+    "src/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

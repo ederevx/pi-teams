@@ -152,6 +152,26 @@ Tests run on isolated roots under `TMPDIR`
 
 ## Deployment
 
+### As a pi package
+
+pi-teams is a pi package: `package.json` declares the extension under
+the `pi` key and carries the `pi-package` keyword, so pi can install it
+directly.
+
+```
+pi install git:github.com/ederevx/pi-teams@v0.1.0
+pi install npm:pi-teams
+pi install /absolute/path/to/pi-teams
+```
+
+The package ships the broker and client under `src/`, and the extension
+runs them from its own package directory (the sibling `src/`), so
+`pi install` needs no setup step. Set `PI_TEAMS_BIN` to a directory
+holding `teamd`/`team` to override that lookup, or for the manual layout
+below. The broker still starts on demand, one per `TEAM_ROOT`.
+
+### Manual install
+
 `scripts/install.sh` copies `src/teamd.py` and `src/team.py` into
 `$HOME/.local/bin`, installs the extension into the pi agent home
 extensions dir, and records installed bytes in a manifest;
