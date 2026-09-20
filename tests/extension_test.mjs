@@ -39,7 +39,6 @@ const sessionDir = join(scratch, "sessions");
 for (const key of Object.keys(process.env)) {
 	if (key.startsWith("TEAM_")) delete process.env[key];
 }
-delete process.env.PI_TEAMS_PI;
 process.env.TEAM_ROOT = stateRoot;
 process.env.PI_TEAMS_BIN = binDir;
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
@@ -57,6 +56,7 @@ function makeSpawn() {
 			args,
 			options,
 			stdinEnded: false,
+			stdinWrites: [],
 			killed: false,
 			unrefed: false,
 		};
@@ -65,6 +65,9 @@ function makeSpawn() {
 			stdin: {
 				end() {
 					record.stdinEnded = true;
+				},
+				write(data) {
+					record.stdinWrites.push(data);
 				},
 			},
 			stdout: {
@@ -220,31 +223,33 @@ test("teammates can only be spawned through spawnTask", () => {
 
 test("spawnTask builds the teammate template from a task alone", () => {
 	publishEndpoint(true);
-	process.env.PI_TEAMS_PI = "pi-test";
-	try {
-		const { agent, calls } = makeAgent();
-		agent.rememberSession(join(sessionDir, "sess.jsonl"));
-		const ref = agent.spawnTask("worker", "summarize the diff", {
-			provider: "openrouter", model: "m", thinking: "low",
-		});
-		assert.equal(ref.session, "worker");
-		assert.ok(ref.id.startsWith("fork-"));
-		const call = calls[0];
-		assert.deepEqual(call.args.slice(0, 4), [
-			"--session-dir", sessionDir, "--name", "worker",
-		]);
-		assert.ok(call.args.includes("--provider"));
-		assert.ok(call.args.includes("--model"));
-		assert.ok(call.args.includes("--thinking"));
-		const prompt = call.args[call.args.indexOf("-p") + 1];
-		assert.match(prompt, /summarize the diff/);
-		assert.match(prompt, /TEAM_PARENT_ID/);
-		assert.match(prompt, /TEAM_ROOT/);
-		assert.equal(call.options.env.TEAM_ROOT, stateRoot);
-		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
-	} finally {
-		delete process.env.PI_TEAMS_PI;
-	}
+	const { agent, calls } = makeAgent();
+	agent.rememberSession(join(sessionDir, "sess.jsonl"));
+	const ref = agent.spawnTask("worker", "summarize the diff", {
+		provider: "openrouter", model: "m", thinking: "low",
+	});
+	assert.equal(ref.session, "worker");
+	assert.ok(ref.id.startsWith("fork-"));
+	const call = calls[0];
+	assert.equal(call.file, process.execPath);
+	assert.equal(call.args[0], process.argv[1]);
+	assert.deepEqual(call.args.slice(1, 3), ["--mode", "rpc"]);
+	assert.ok(call.args.includes("--session-dir"));
+	assert.ok(call.args.includes("--name"));
+	assert.ok(call.args.includes("--provider"));
+	assert.ok(call.args.includes("--model"));
+	assert.ok(call.args.includes("--thinking"));
+	// The task is delivered as an RPC prompt, never as a -p task.
+	assert.ok(!call.args.includes("-p"));
+	assert.deepEqual(call.options.stdio, ["pipe", "ignore", "ignore"]);
+	assert.equal(call.stdinWrites.length, 1);
+	const sent = JSON.parse(call.stdinWrites[0].trim());
+	assert.equal(sent.type, "prompt");
+	assert.match(sent.message, /summarize the diff/);
+	assert.match(sent.message, /TEAM_PARENT_ID/);
+	assert.match(sent.message, /TEAM_ROOT/);
+	assert.equal(call.options.env.TEAM_ROOT, stateRoot);
+	assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
 });
 
 test("spawnTask resolves pi from the running runtime", () => {
@@ -252,7 +257,6 @@ test("spawnTask resolves pi from the running runtime", () => {
 	// execute without a shell; the runtime plus its entry script is
 	// spawnable everywhere.
 	publishEndpoint(true);
-	delete process.env.PI_TEAMS_PI;
 	const { agent, calls } = makeAgent();
 	agent.rememberSession(join(sessionDir, "sess.jsonl"));
 	agent.spawnTask("worker", "do it");
@@ -260,12 +264,29 @@ test("spawnTask resolves pi from the running runtime", () => {
 	const call = calls[0];
 	assert.equal(call.file, process.execPath);
 	assert.equal(call.args[0], process.argv[1]);
-	assert.deepEqual(call.args.slice(1, 3), ["--session-dir", sessionDir]);
-	assert.equal(call.args[3], "--name");
-	assert.equal(call.args[4], "worker");
-	assert.equal(call.args[5], "-p");
-	assert.ok(call.args[6].includes("do it"));
+	assert.deepEqual(call.args.slice(1, 3), ["--mode", "rpc"]);
 	assert.ok(!call.args.includes("--no-session"));
+});
+
+test("spawnTask context=inherit forks the parent session; fresh does not", () => {
+	publishEndpoint(true);
+	const { agent, calls } = makeAgent();
+	agent.rememberSession(join(sessionDir, "sess.jsonl"));
+	agent.spawnTask("a", "task a");
+	assert.ok(!calls[0].args.includes("--fork"), "fresh by default");
+	agent.spawnTask("b", "task b", { context: "inherit" });
+	assert.deepEqual(calls[1].args.slice(1, 4), ["--mode", "rpc", "--fork"]);
+	assert.equal(calls[1].args[4], join(sessionDir, "sess.jsonl"));
+
+	// Inheriting without a parent session is refused.
+	const bare = new TeamAgent(
+		() => Promise.resolve({ stdout: "{}" }),
+		() => ({ stdin: null, stdout: null, on() {}, unref() {}, kill() {} }),
+		() => {},
+	);
+	assert.throws(
+		() => bare.spawnTask("c", "task c", { context: "inherit" }),
+		/no file to fork/);
 });
 
 test("spawn starts a detached broker only when none is published", () => {
