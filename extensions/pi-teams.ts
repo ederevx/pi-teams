@@ -22,8 +22,9 @@
  * the session file survives for later resumption.
  *
  * The broker and client live in the pi-teams repository and are expected
- * at $HOME/.local/bin (or PI_TEAMS_BIN). Override the pi binary for
- * forks with PI_TEAMS_PI.
+ * at $HOME/.local/bin (or PI_TEAMS_BIN). The extension owns the whole
+ * teammate launch; there is intentionally no way to override the pi
+ * command or inject a custom spawn argv.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -61,11 +62,9 @@ const teamBin = `${binDir}/team`;
  * How to launch another pi without a shell. Reusing the running runtime
  * avoids spawning a Windows launcher shim (pi.cmd/pi.ps1) directly,
  * which child_process cannot execute; pi's own subagent helper resolves
- * it the same way. PI_TEAMS_PI overrides the command for forks.
+ * it the same way. This is the only launch path for teammates.
  */
 function piInvocation(): { command: string; args: string[] } {
-	const override = process.env.PI_TEAMS_PI;
-	if (override) return { command: override, args: [] };
 	const entry = process.argv[1];
 	if (entry && existsSync(entry) && !entry.startsWith("/$bunfs/root/")) {
 		return { command: process.execPath, args: [entry] };
@@ -88,7 +87,7 @@ interface AgentInfo {
 }
 
 interface SpawnedProcess {
-	stdin: { end(): void } | null;
+	stdin: { end(): void; write(data: string): void } | null;
 	stdout: { on(event: string, listener: (chunk: unknown) => void): void } | null;
 	on(event: string, listener: () => void): void;
 	unref(): void;
@@ -115,6 +114,10 @@ export interface SpawnOptions {
 	provider?: string;
 	model?: string;
 	thinking?: string;
+	/** "fresh" (default) starts a clean context and never carries the
+	 *  parent's history; "inherit" forks the parent session so the
+	 *  teammate can reuse its warm prompt-cache prefix. */
+	context?: "fresh" | "inherit";
 }
 
 export interface TeammateRef {
@@ -130,6 +133,7 @@ export class TeamAgent {
 	id: string = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
+	private readonly teammates = new Set<SpawnedProcess>();
 	private sessionFile = "";
 	private sessionDir = "";
 
@@ -290,15 +294,24 @@ export class TeamAgent {
 	spawnTask(name: string, task: string, options: SpawnOptions = {}): TeammateRef {
 		const forkId = this.makeForkId();
 		const session = name || forkId;
+		const inherit = options.context === "inherit";
+		if (inherit && !this.sessionFile) {
+			throw new Error(
+				"cannot inherit context: this session has no file to fork");
+		}
+		// The teammate is a persistent headless pi session, not a one-shot
+		// `pi -p` task: the extension owns the whole launch and delivers the
+		// task as an RPC prompt, so the teammate stays alive to be messaged.
 		const args = [
+			"--mode", "rpc",
+			...(inherit ? ["--fork", this.sessionFile] : []),
 			...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
 			"--name", session,
 			...(options.provider ? ["--provider", options.provider] : []),
 			...(options.model ? ["--model", options.model] : []),
 			...(options.thinking ? ["--thinking", options.thinking] : []),
-			"-p", this.taskPrompt(session, task),
 		];
-		this.launchTeammate(forkId, session, args);
+		this.launchTeammate(forkId, session, args, this.taskPrompt(session, task));
 		return { id: forkId, session };
 	}
 
@@ -316,7 +329,12 @@ export class TeamAgent {
 		);
 	}
 
-	private launchTeammate(forkId: string, session: string, args: string[]): void {
+	private launchTeammate(
+		forkId: string,
+		session: string,
+		args: string[],
+		prompt: string,
+	): void {
 		const invocation = piInvocation();
 		const env = {
 			...process.env,
@@ -331,15 +349,43 @@ export class TeamAgent {
 		delete env.TEAM_SESSION;
 		delete env.PI_SESSION_FILE;
 		this.ensureBroker();
-		// The child is its own pi; detach it so the broker, not process
-		// parentage, owns its lifetime. The environment carries the fork
-		// identity that pi.exec would have dropped.
+		// The extension holds the teammate's RPC stdin open: the teammate
+		// stays alive for messages and exits when this pi goes away (the
+		// pipe closes) or the broker GC signals it.
 		const child = this.launch(
 			invocation.command,
 			[...invocation.args, ...args],
-			{ env, detached: true, stdio: "ignore", windowsHide: true },
+			{ env, detached: true, stdio: ["pipe", "ignore", "ignore"], windowsHide: true },
 		);
-		child?.unref();
+		if (!child) return;
+		this.teammates.add(child);
+		child.on("exit", () => this.teammates.delete(child));
+		if (child.stdin) {
+			try {
+				child.stdin.write(
+					JSON.stringify({ type: "prompt", message: prompt }) + "\n");
+			} catch {
+				// The teammate died before the prompt landed; the broker GC
+				// reaps the entry.
+			}
+		}
+		child.unref();
+	}
+
+	private stopTeammates(): void {
+		for (const child of this.teammates) {
+			try {
+				child.stdin?.end();
+			} catch {
+				// already closed
+			}
+			try {
+				child.kill();
+			} catch {
+				// already gone
+			}
+		}
+		this.teammates.clear();
 	}
 
 	sessionDirLabel(): string {
@@ -360,6 +406,7 @@ export class TeamAgent {
 
 	deregister(): void {
 		this.stopHold();
+		this.stopTeammates();
 	}
 
 	rememberSession(sessionFile?: string): void {
@@ -470,18 +517,32 @@ export default async function (pi: ExtensionAPI) {
 		description:
 			"Spawn a pi-teams teammate that runs in its own persistent, " +
 			"resumable pi session and reports its result back as a team " +
-			"message. Give it exactly one task.",
+			"message. Give it exactly one task. The teammate is fresh by " +
+			"default (smallest context and cost); set context to inherit " +
+			"only when the task depends on this conversation, which forks " +
+			"the parent session and can reuse its warm prompt cache.",
 		promptSnippet:
 			"Spawn a pi-teams teammate to do a task in its own session",
 		promptGuidelines: [
 			"Use team_spawn to delegate a bounded task to a teammate: it " +
 				"runs as a separate pi session with its own /resume entry and " +
-				"sends its result back as a pi-teams message.",
+				"sends its result back as a pi-teams message. Pass a " +
+				"self-contained task; only set context=inherit when the " +
+				"teammate must see this conversation.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "The task the teammate must do" }),
 			name: Type.Optional(Type.String({
 				description: "Teammate and session name",
+			})),
+			context: Type.Optional(Type.Union([
+				Type.Literal("fresh"),
+				Type.Literal("inherit"),
+			], {
+				description:
+					"fresh (default) starts clean; inherit forks this " +
+					"conversation so a context-dependent task can reuse its " +
+					"warm prompt cache",
 			})),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -490,6 +551,7 @@ export default async function (pi: ExtensionAPI) {
 				provider: model?.provider,
 				model: model?.id,
 				thinking: ctx?.thinkingLevel,
+				context: params.context,
 			});
 			return {
 				content: [{

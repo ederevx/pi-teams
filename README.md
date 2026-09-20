@@ -55,13 +55,23 @@ coordinate natively instead of through the shared tree.
   spawned only by the `team_spawn` tool, so every one is a named,
   persistent pi session stored in the parent's session directory (or
   the default store) and appears in `/resume`; the fork's own `notice`
-  records the exact session file. The tool takes only a task (and an
-  optional name): the extension supplies the session, inherits the
-  current model and thinking level, and prepends the report-back
-  instruction, so no wrapper script or command line is needed. GC
-  reaps only the process, leaving the session file for later
-  resumption. When a fork starts, the pi child registers through the
-  same extension.
+  records the exact session file. A teammate is a persistent headless
+  pi RPC session, not a one-shot `pi -p` task: the extension owns the
+  launch, holds its stdin pipe open so the teammate stays alive for
+  messages, and closes the pipe when this pi goes away. There is no
+  override for the pi command, so the structured spawner is the only
+  launch path. The tool takes a task plus an optional name and context:
+  the extension supplies the session, inherits the current model and
+  thinking level, and prepends the report-back instruction. Teammates
+  are fresh by default: a clean context is
+  cheaper and avoids carrying the parent's history, and prompt-cache
+  retention does not change that because a cache read still bills for
+  the carried prefix on every later turn. `context=inherit` forks the
+  parent session for a task that genuinely needs this conversation; the
+  fork can reuse the parent's warm prefix cache only while the provider
+  still retains it (same model, within its TTL). GC reaps only the
+  process, leaving the session file for later resumption. When a fork
+  starts, the pi child registers through the same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the
@@ -88,8 +98,9 @@ That chains, in order:
 - **Extension tests** (`tests/extension_test.mjs`): the hold owns a
   stdin pipe and forwards identity and inbound messages, sent/received
   log entries are recorded, `spawnTask` builds the teammate template
-  from a task alone and resolves pi from the running runtime, no custom
-  spawn path exists, and the broker starts detached only when absent.
+  from a task alone, resolves pi from the running runtime, refuses an
+  inherit request without a parent session, and no custom spawn path
+  exists; the broker starts detached only when absent.
 - **Broker protocol tests** (`tests/broker_test.py`): handshake token
   rejection, endpoint publication, registration and discovery, relay
   delivery, undeliverable reports, deregistration, connection-close
