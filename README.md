@@ -128,6 +128,10 @@ and messages cross both ways.
   connection-based GC. Removing a peer closes its ssh tunnel, and a
   tunnel that dies on its own prunes the broker's link instead of
   pointing at a dead port. Pid signalling never crosses hosts.
+- **Durable links**: the extension remembers each peer's SSH target and
+  rebuilds the tunnel and broker link on the next session, so a reload
+  or restart never leaves the broker pointing at a dead loopback port.
+  A peer that cannot be reached is retried on the next session.
 - **Password-only hosts**: the peer path is non-interactive, so a host
   that needs a password or has an unknown key fails closed with a
   guided error instead of hanging. The agent then tells the user to run
@@ -164,7 +168,10 @@ That chains, in order:
   runtime, refuses an inherit request without a parent session, and no
   custom spawn path exists; `SshPeerBridge` reads the endpoint, opens
   the tunnel, and reaps it on close; a failed peer-add closes its
-  tunnel and a tunnel exit prunes the broker link; `team_wait` resolves
+  tunnel and a tunnel exit prunes the broker link; every outbound
+  `send` carries this agent's id so a peer's reply and a remote fork's
+  parent reach the real agent; a remembered peer is rebuilt on the next
+  session; `team_wait` resolves
   one or several awaited results without a second delivery and on
   timeout, abort, or shutdown; a password-only or unknown host fails
   with the one-line setup guidance and no tunnel; the broker starts
@@ -182,7 +189,8 @@ That chains, in order:
 - **Fork lifecycle tests** (`tests/fork_test.py`): a fork stays alive
   while its parent stays connected and exits on its own when the
   parent's connection closes or an explicit terminate is issued; the
-  registry is cleaned in both cases.
+  registry is cleaned in both cases; a `send --id` stamps the caller's
+  real id onto the relayed message.
 
 Tests run on isolated roots under `TMPDIR`
 (`~/tmp/pi-teams-sandbox`), never the system `/tmp`.
