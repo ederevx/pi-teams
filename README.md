@@ -160,7 +160,7 @@ directly.
 
 ```
 pi install git:github.com/ederevx/pi-teams@v0.1.0
-pi install npm:pi-teams
+pi install npm:pi-teams          # once published to npm
 pi install /absolute/path/to/pi-teams
 ```
 
