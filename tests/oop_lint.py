@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """OOP lint for pi-teams.
 
-Enforces the shared conventions on src/ and extensions/:
+Mechanically enforces the checkable part of the shared conventions on
+src/ and extensions/:
 - no module-level mutable state (dict/list/set literals or empty calls
-  assigned at module scope)
+  assigned at module scope), in Python or TypeScript
 - no `global` statements, no bare except clauses
-- no `var` in TypeScript, and no mutable module-level assignments there
-- state is owned by classes; every class is instantiated only through
-  its own constructor signature (no singleton globals).
+- no `var` in TypeScript
+
+State ownership, singleton absence, and single-responsibility method
+cohesion are reviewed manually; a source scan cannot see them.
 """
 
 import pathlib
