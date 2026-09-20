@@ -390,6 +390,7 @@ export interface PeerEndpoint {
  */
 export interface PeerBridge {
 	name: string;
+	peerHost: string;
 	connect(): Promise<PeerEndpoint>;
 	close(): void;
 	onExit(callback: () => void): void;
@@ -450,6 +451,7 @@ export class SshPeerBridge implements PeerBridge {
 	private tunnel: SpawnedProcess | null = null;
 	private exitCallback: (() => void) | null = null;
 	private closed = false;
+	peerHost = "";
 
 	constructor(
 		sshTarget: string,
@@ -468,14 +470,15 @@ export class SshPeerBridge implements PeerBridge {
 
 	async connect(): Promise<PeerEndpoint> {
 		const endpoint = await this.readEndpoint();
+		this.peerHost = endpoint.name || "";
 		this.name = this.label || endpoint.name || this.sshTarget;
 		const port = await this.reservePort();
 		const tunnel = this.runner.spawnDetached("ssh", [
 			"-N",
 			"-o", "BatchMode=yes",
 			"-o", "ExitOnForwardFailure=yes",
-			"-o", "ServerAliveInterval=15",
-			"-o", "ServerAliveCountMax=3",
+			"-o", "ServerAliveInterval=5",
+			"-o", "ServerAliveCountMax=2",
 			"-L",
 			`127.0.0.1:${port}:127.0.0.1:${endpoint.port}`,
 			this.sshTarget,
@@ -1463,6 +1466,13 @@ export class TeamAgent {
 		} catch (err) {
 			bridge.close();
 			throw err;
+		}
+		if (bridge.peerHost && bridge.peerHost === this.host) {
+			bridge.close();
+			throw new Error(
+				`peer ${sshTarget} reports host label "${bridge.peerHost}", ` +
+				"which collides with this host; set PI_TEAMS_HOST to a " +
+				"unique label on one host");
 		}
 		try {
 			await this.linkPeer(bridge.name, endpoint);
