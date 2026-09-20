@@ -888,3 +888,14 @@ test("attachRemote asks a target agent and returns its new fork id", async () =>
 	agent.stopHold();
 });
 
+test("deregister resolves a pending attach instead of hanging it", async () => {
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	const pending = agent.attachRemote("beta:main", "kid");
+	agent.deregister();
+	const ref = await pending;
+	assert.equal(ref, null);
+});
+

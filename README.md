@@ -105,6 +105,11 @@ coordinate natively instead of through the shared tree.
   publishes the agent as waiting, which the broker treats as
   not-working but keeps exempt from fork idle GC. A skipped or
   timed-out wait still receives each report as a message.
+- **Tools**: the extension exposes `team_ls`, `team_send`,
+  `team_spawn`, `team_wait`, `team_attach`, and `team_peer` as agent
+  tools. An agent lists and messages local or peer agents, spawns or
+  attaches teammates, and links peer hosts through the extension, with
+  no shell or raw `ssh` command of its own.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel. Inbound relayed messages are surfaced to the
@@ -129,8 +134,10 @@ and messages cross both ways.
   federation, and `team_wait` can block for it by id.
 - **Bidirectional messaging**: every agent id carries a host label
   (`<host>:pi-...`, `<host>:fork-...`); a message to a peer-hosted id is
-  relayed across the peer link, and an undeliverable target reports
-  back. Local `/team send`, `team_wait`, and reports are unchanged.
+  relayed across the peer link (the `team_send` tool or `/team send`),
+  and `team_ls` lists the federated agents. An undeliverable target
+  reports back. Local `/team send`, `team_wait`, and reports are
+  unchanged.
 - **Lifetime**: a teammate spawned for a remote parent is kept alive
   until the peer link drops, then reaped on its own host by
   connection-based GC. Removing a peer closes its ssh tunnel, and a

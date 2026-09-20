@@ -1407,6 +1407,8 @@ export class TeamAgent {
 		this.recentResults.clear();
 		for (const settle of [...this.pendingSpawns.values()]) settle(null);
 		this.pendingSpawns.clear();
+		for (const settle of [...this.pendingAttaches.values()]) settle(null);
+		this.pendingAttaches.clear();
 	}
 
 	deregister(): void {
@@ -1723,6 +1725,61 @@ export default async function (pi: ExtensionAPI) {
 			} finally {
 				app.setBusy(true);
 			}
+		},
+	});
+
+	// -- agent-facing messaging ------------------------------------------
+	// Sends through the local broker, so a peer-hosted target is relayed
+	// across the SSH-tunneled peer link without the agent touching ssh.
+	pi.registerTool({
+		name: "team_send",
+		label: "message an agent",
+		description:
+			"Send a pi-teams message to any live agent id, local or on a " +
+			"linked peer host. The broker relays it, so peer hosts work " +
+			"through the existing SSH tunnel. Returns the broker's ack.",
+		parameters: Type.Object({
+			to: Type.String({ description: "Target agent id" }),
+			text: Type.String({ description: "Message text" }),
+			kind: Type.Optional(Type.String({
+				description: "Message kind; defaults to text",
+			})),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const reply = await app.send(
+				params.to, params.kind || "text", params.text);
+			return {
+				content: [{
+					type: "text",
+					text: `sent ${params.kind || "text"} to ` +
+						`${params.to}: ${reply}`,
+				}],
+				details: { reply },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "team_ls",
+		label: "list agents",
+		description:
+			"List live pi-teams agents, including agents federated from a " +
+			"linked peer host, with their id, role, and online state.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+			const agents = await app.snapshot();
+			const lines = agents.map((a) =>
+				`${a.id}\t${a.role}\t${a.online ? "online" : "offline"}` +
+				(a.remote ? "\tpeer" : ""));
+			return {
+				content: [{
+					type: "text",
+					text: lines.length
+						? `pi-teams agents:\n${lines.join("\n")}`
+						: "pi-teams: no agents registered",
+				}],
+				details: { agents },
+			};
 		},
 	});
 
