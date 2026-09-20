@@ -198,7 +198,8 @@ class TeamBroker:
 
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
                  fork_idle=None, busy_grace=None, sessions_root=None,
-                 session_grace=None, restart_grace=None, host=None):
+                 session_grace=None, restart_grace=None, peer_grace=None,
+                 host=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
@@ -252,6 +253,14 @@ class TeamBroker:
             restart_grace if restart_grace is not None
             else os.environ.get("PI_TEAMS_RESTART_GRACE", "60")
         )
+        # A peer link that drops (a transient ssh flap or a per-session
+        # tunnel replacement) gets this long to reconnect before its
+        # remote-parented forks are reaped, so a brief partition does not
+        # kill forks whose parent host is still alive.
+        self.peer_grace = float(
+            peer_grace if peer_grace is not None
+            else os.environ.get("PI_TEAMS_PEER_GRACE", "15")
+        )
         self.last_active = time.time()
         self._registry = {}
         self._clients = {}
@@ -259,6 +268,7 @@ class TeamBroker:
         self._peers_by_conn = {}
         self._remote = {}
         self._peer_pending = {}
+        self._peer_down_at = {}
         self._lock = threading.RLock()
         self._running = False
         self._server = None
@@ -690,6 +700,7 @@ class TeamBroker:
     def _sweep(self):
         now = time.time()
         self._expire_peer_relays()
+        self._reap_expired_peers(now)
         self._gc_orphan_busy_files(now)
         if now - self._last_session_sweep >= self._session_sweep_interval:
             self._last_session_sweep = now
@@ -810,7 +821,10 @@ class TeamBroker:
         if (entry or {}).get("role") != "fork":
             return
         path = (entry or {}).get("session")
-        if path:
+        # Only a spawned teammate's transcript is broker-owned and safe to
+        # remove. An attached session carries no spawn marker and must
+        # stay in /resume after the fork is reaped.
+        if path and self._is_teammate_session(path):
             self._unlink_under(path, self.sessions_root)
 
     def _is_teammate_session(self, path):
@@ -866,8 +880,15 @@ class TeamBroker:
         host = self._parent_host(parent)
         if host == self.host:
             return True
+        now = time.time()
         with self._lock:
             if host not in self._peers:
+                down_at = self._peer_down_at.get(host)
+                # A link that just dropped may be a transient flap or a
+                # per-session tunnel replacement; keep the fork while the
+                # reconnect grace is open.
+                if down_at is not None and now - down_at < self.peer_grace:
+                    return False
                 return True
             agents = self._remote.get(host)
         if agents is None:
@@ -895,6 +916,7 @@ class TeamBroker:
             old = self._peers.get(host)
             self._peers[host] = peer
             self._peers_by_conn[conn] = peer
+            self._peer_down_at.pop(host, None)
         if old is not None and old is not peer and old.connected:
             old.drop()
         peer.send({"op": "peer-registry", "agents": self._snapshot()})
@@ -909,6 +931,7 @@ class TeamBroker:
         peer = PeerLink(self, host, endpoint=endpoint)
         with self._lock:
             self._peers[host] = peer
+            self._peer_down_at.pop(host, None)
         try:
             peer.open()
         except OSError:
@@ -996,7 +1019,23 @@ class TeamBroker:
         for _rid, entry in stale:
             self._reply(entry[0], op="error", error="undeliverable")
         if was_current:
-            self._reap_peer(peer.host)
+            with self._lock:
+                self._peer_down_at[peer.host] = time.time()
+
+    def _reap_expired_peers(self, now):
+        # A dropped peer link defers reaping for the reconnect grace; a
+        # host that never comes back has its remote-parented forks reaped
+        # here once the grace has passed.
+        with self._lock:
+            expired = [
+                host for host, down_at in self._peer_down_at.items()
+                if host not in self._peers
+                and now - down_at >= self.peer_grace
+            ]
+        for host in expired:
+            with self._lock:
+                self._peer_down_at.pop(host, None)
+            self._reap_peer(host)
 
     def _expire_peer_relays(self):
         # A peer that never answers must not leak the pending relay or

@@ -97,6 +97,21 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertTrue(os.path.exists(path),
                         "a main agent's session file must never be removed")
 
+    def test_attached_session_file_survives_deregister(self):
+        # An attached fork carries no spawn marker: it is the user's own
+        # transcript and must stay in /resume after the fork is reaped.
+        path = os.path.join(self.sessions_root, "attached.jsonl")
+        self._write_session(path, marker=False)
+        client = TeamClient(self.root)
+        client.id = "beta:attached"
+        client.role = "fork"
+        client.parent = "alpha:caller"
+        client.session = path
+        client.register()
+        client.deregister()
+        self.assertTrue(os.path.exists(path),
+                        "an attached session's transcript must not be removed")
+
     def test_orphan_teammate_session_is_swept(self):
         path = os.path.join(self.sessions_root, "orphan.jsonl")
         self._write_session(path, marker=True)
@@ -449,8 +464,12 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def _start_broker(self, root, host):
+        sessions = os.path.join(root, "sessions")
+        os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
-                            sweep_interval=0.1, host=host)
+                            sweep_interval=0.1, host=host,
+                            peer_grace=0.3, sessions_root=sessions,
+                            session_grace=0.3)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         wait_endpoint(root)
@@ -564,6 +583,52 @@ class BrokerProtocolTests(unittest.TestCase):
         finally:
             broker_b.stop()
             thread_b.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_peer_reconnect_within_grace_spares_forks(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"])
+        try:
+            caller = TeamClient(root_a, heartbeat=0.2)
+            caller.id = "alpha:caller"
+            caller.role = "main"
+            caller.register()
+            endpoint_a = broker_a.root.read_endpoint()
+            broker_a.link_peer("beta", broker_b.root.read_endpoint())
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            self.assertTrue(wait_until(lambda: any(
+                a.get("id") == "alpha:caller"
+                for a in broker_b._remote.get("alpha", []))))
+            fork = TeamClient(root_b, heartbeat=None)
+            fork.id = "beta:fork-flap"
+            fork.role = "fork"
+            fork.parent = "alpha:caller"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            time.sleep(1.0)
+            # Drop the live link, then restore it inside the grace: a
+            # transient flap must not kill a fork whose parent is alive.
+            broker_b._peer_down(broker_b._peers["alpha"])
+            self.assertTrue(broker_b.link_peer("alpha", endpoint_a))
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "a reconnected peer reaped its live fork")
+            self.assertIn("beta:fork-flap", self._ids_via(root_b))
+        finally:
+            broker_b.stop()
+            thread_b.join(timeout=3)
+            broker_a.stop()
+            thread_a.join(timeout=3)
             try:
                 dummy.kill()
             except OSError:
