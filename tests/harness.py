@@ -75,7 +75,10 @@ def stop_broker(root, proc):
 
 
 def team_proc(root, argv, env=None, stdin=subprocess.PIPE):
-    full = dict(os.environ)
+    # Strip ambient team identity so the suite is hermetic even when run
+    # from inside a pi-teams fork, whose process environment carries
+    # TEAM_ID/TEAM_NAME/TEAM_ROLE/TEAM_PARENT_ID.
+    full = {k: v for k, v in os.environ.items() if not k.startswith("TEAM_")}
     if env:
         full.update(env)
     return subprocess.Popen(

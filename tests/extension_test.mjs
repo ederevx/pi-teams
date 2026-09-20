@@ -8,6 +8,8 @@
  *     and forwards the agent identity through the environment;
  *   - spawn forwards the fork identity (parent/role) in the environment
  *     and detaches the teammate;
+ *   - a default spawn is a named session in the parent's session
+ *     directory, so the teammate is resumable after its process is GC'd;
  *   - /team spawn parses a standalone "--" separator, never the "--"
  *     of "--name".
  *
@@ -31,9 +33,16 @@ import test from "node:test";
 const scratch = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "pi-teams-ext-"));
 const stateRoot = join(scratch, "state");
 const binDir = join(scratch, "bin");
+const sessionDir = join(scratch, "sessions");
+// The suite must run identically inside a pi-teams fork, whose process
+// environment already carries TEAM_NAME/TEAM_ID/TEAM_ROLE; strip them so
+// ambient identity can never leak into the assertions below.
+for (const key of Object.keys(process.env)) {
+	if (key.startsWith("TEAM_")) delete process.env[key];
+}
+delete process.env.PI_TEAMS_PI;
 process.env.TEAM_ROOT = stateRoot;
 process.env.PI_TEAMS_BIN = binDir;
-process.env.PI_TEAMS_PI = "pi";
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
@@ -141,20 +150,26 @@ test("spawn detaches the teammate with fork identity in the environment", () => 
 	}
 });
 
-test("spawn resolves pi from the running runtime, not a shell shim", () => {
+test("spawn resolves pi from the running runtime and names a resume session", () => {
 	// Windows wraps pi as a .cmd/.ps1 shim that child_process cannot
 	// execute without a shell; the runtime plus its entry script is
-	// spawnable everywhere.
+	// spawnable everywhere. The default teammate is a named session in
+	// the parent's session directory, so /resume can find it after GC.
 	publishEndpoint(true);
 	delete process.env.PI_TEAMS_PI;
 	const { agent, calls } = makeAgent();
+	agent.rememberSession(join(sessionDir, "sess.jsonl"));
 	agent.spawn("", []);
 	assert.equal(calls.length, 1);
 	const call = calls[0];
 	assert.equal(call.file, process.execPath);
 	assert.equal(call.args[0], process.argv[1]);
-	assert.deepEqual(call.args.slice(1, 3), ["--no-session", "-p"]);
-	assert.ok(call.args[3].length > 0);
+	assert.deepEqual(call.args.slice(1, 3), ["--session-dir", sessionDir]);
+	assert.equal(call.args[3], "--name");
+	assert.ok(call.args[4].startsWith("fork-"));
+	assert.equal(call.args[5], "-p");
+	assert.ok(call.args[6].length > 0);
+	assert.ok(!call.args.includes("--no-session"));
 	assert.ok(call.options.env.TEAM_NAME.startsWith("fork-"));
 });
 
@@ -178,13 +193,13 @@ test("spawn starts a detached broker only when none is published", () => {
 test("parseSpawn treats only a standalone -- as the argv separator", () => {
 	const { agent } = makeAgent();
 	assert.deepEqual(agent.parseSpawn("--name worker"), { name: "worker", argv: [] });
-	assert.deepEqual(agent.parseSpawn("--name worker -- pi -p hello"), {
+	assert.deepEqual(agent.parseSpawn("--name worker -- --model x -p hello"), {
 		name: "worker",
-		argv: ["pi", "-p", "hello"],
+		argv: ["--model", "x", "-p", "hello"],
 	});
-	assert.deepEqual(agent.parseSpawn("-- pi -p hello"), {
+	assert.deepEqual(agent.parseSpawn("-- --model x -p hello"), {
 		name: "",
-		argv: ["pi", "-p", "hello"],
+		argv: ["--model", "x", "-p", "hello"],
 	});
 	assert.deepEqual(agent.parseSpawn("--name worker --"), { name: "worker", argv: [] });
 	assert.deepEqual(agent.parseSpawn(""), { name: "", argv: [] });

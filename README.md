@@ -33,8 +33,9 @@ coordinate natively instead of through the shared tree.
   PI_TEAMS_FORK_IDLE, default 300s; zero disables), the broker closes
   the fork's endpoint, drops the entry, and signals the owner pid, so
   the forked pi dies for real instead of outliving its parent as a
-  hold-shim ghost. A working teammate stays alive: the extension
-  publishes busy state from pi's own lifecycle events
+  hold-shim ghost. Only the process is reaped: a fork's session file
+  remains, so it can still be resumed. A working teammate stays alive:
+  the extension publishes busy state from pi's own lifecycle events
   (agent_start/agent_settled) and the hold streams it in its heartbeat,
   which resets the idle clock. Only forks are ever signalled; main
   agents are never touched.
@@ -50,8 +51,11 @@ coordinate natively instead of through the shared tree.
   child environment, and EOF on that pipe (pi gone) drops the endpoint
   instead of leaving an orphan. Forks reuse the running pi runtime
   (`process.execPath` plus its entry script) instead of the `pi` name,
-  so a Windows launcher shim is never spawned directly. When a fork
-  starts, the pi child registers through the same extension.
+  so a Windows launcher shim is never spawned directly. A default fork
+  is a named session stored in the parent's session directory, so it
+  appears in `/resume`; GC reaps only its process, leaving the session
+  file for later resumption. When a fork starts, the pi child registers
+  through the same extension.
 - **Awareness**: at session start the extension tells the agent which
   teammates are live, their endpoints, and that `/team send <id> ...`
   is the direct channel.
