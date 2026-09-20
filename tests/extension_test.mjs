@@ -343,7 +343,7 @@ test("spawnTask builds the teammate template from a task alone", () => {
 			provider: "openrouter", model: "m", thinking: "low",
 		});
 		assert.equal(ref.session, "worker");
-		assert.ok(ref.id.startsWith("fork-"));
+		assert.ok(ref.id.startsWith(`${agent.host}:fork-`));
 		const call = calls[0];
 		assert.equal(call.file, process.execPath);
 		assert.equal(call.args[0], process.argv[1]);
@@ -416,6 +416,63 @@ test("spawnTask context=inherit forks the parent session; fresh does not", () =>
 	assert.throws(
 		() => bare.spawnTask("c", "task c", { context: "inherit" }),
 		/no file to fork/);
+});
+
+test("spawnRemote asks a peer host and returns the spawned id", async () => {
+	const { calls, spawnProcess } = makeSpawn();
+	const sends = [];
+	const exec = (file, args) => {
+		if (args.includes("ls")) {
+			return Promise.resolve({ stdout: JSON.stringify({ agents: [{
+				id: "beta:main", name: "peer", role: "main", pid: 1,
+				parent: null, session: null, online: false, origin: "beta",
+				remote: true,
+			}] }) });
+		}
+		sends.push(args);
+		return Promise.resolve({ stdout: "{}" });
+	};
+	const agent = new TeamAgent(exec, spawnProcess, () => {});
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const pending = agent.spawnRemote("beta", "worker", "do it");
+	await new Promise((r) => setTimeout(r, 20));
+	const sent = sends.find((a) => a.includes("spawn"));
+	assert.ok(sent, "spawn request was not sent");
+	const request = JSON.parse(sent[sent.length - 1]);
+	onData(JSON.stringify({
+		from: "beta:main", to: agent.id, kind: "spawn-ack",
+		payload: { requestId: request.requestId, id: "beta:fork-1",
+			session: "worker" },
+	}) + "\n");
+	const ref = await pending;
+	assert.equal(ref.id, "beta:fork-1");
+	assert.equal(ref.session, "worker");
+	agent.stopHold();
+});
+
+test("an inbound spawn request is spawned locally and acked", async () => {
+	publishEndpoint(true);
+	const { calls, spawnProcess } = makeSpawn();
+	const sends = [];
+	const exec = (file, args) => {
+		sends.push(args);
+		return Promise.resolve({ stdout: "{}" });
+	};
+	const agent = new TeamAgent(exec, spawnProcess, () => {});
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	onData(JSON.stringify({
+		from: "alpha:main", to: agent.id, kind: "spawn",
+		payload: { requestId: "r1", name: "kid", task: "do x" },
+	}) + "\n");
+	await new Promise((r) => setTimeout(r, 20));
+	// The request spawned a local teammate and acked the requester.
+	assert.ok(calls.length >= 2, "no teammate process was spawned");
+	const ack = sends.find((a) => a.includes("spawn-ack"));
+	assert.ok(ack, "no spawn-ack was sent");
+	assert.ok(ack.includes("alpha:main"));
+	agent.stopHold();
 });
 
 test("spawn starts a detached broker only when none is published", () => {
