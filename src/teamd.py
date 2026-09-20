@@ -46,7 +46,8 @@ PID_NAME = "teamd.pid"
 PEERS_NAME = "peers.json"
 BUSY_SUFFIX = ".busy"
 # The extension's spawn prompt marks a forked teammate session; the broker
-# uses it to tell teammate sessions apart from a user's own sessions.
+# uses it to tell teammate sessions apart from a user's own sessions. Keep
+# in sync with taskPrompt() in extensions/pi-teams.ts.
 TEAMMATE_MARKER = "a teammate spawned by a parent pi session"
 
 
