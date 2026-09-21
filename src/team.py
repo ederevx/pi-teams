@@ -67,9 +67,13 @@ class ClientCli:
         p_term.add_argument("to")
         p_term.add_argument("why", nargs="?", default="requested")
         p_peer = sub.add_parser("peer")
-        p_peer.add_argument("action", choices=("add", "remove"))
-        p_peer.add_argument("host")
-        p_peer.add_argument("endpoint", nargs="?")
+        peer_sub = p_peer.add_subparsers(dest="action")
+        p_peer_add = peer_sub.add_parser("add")
+        p_peer_add.add_argument("--label")
+        p_peer_add.add_argument("--ssh", required=True)
+        p_peer_rm = peer_sub.add_parser("remove")
+        p_peer_rm.add_argument("label")
+        peer_sub.add_parser("list")
 
         args = parser.parse_args(argv)
         if args.command is None:
@@ -96,14 +100,14 @@ class ClientCli:
             print(json.dumps(client.terminate(args.to, args.why)))
         elif args.command == "peer":
             if args.action == "add":
-                if not args.endpoint:
-                    parser.error("peer add needs host:port:token")
-                host, port, token = args.endpoint.split(":", 2)
-                print(json.dumps(client.peer_add(args.host, {
-                    "host": host, "port": int(port), "token": token,
-                })))
+                label = args.label or args.ssh
+                print(json.dumps(client.peer_add(label, args.ssh)))
+            elif args.action == "remove":
+                print(json.dumps(client.peer_remove(args.label)))
+            elif args.action == "list":
+                print(json.dumps(client.peer_list(), indent=2))
             else:
-                print(json.dumps(client.peer_remove(args.host)))
+                parser.error("peer needs add, remove, or list")
         else:
             parser.error("unknown command %r" % args.command)
         return 0

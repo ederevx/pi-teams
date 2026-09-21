@@ -24,6 +24,7 @@ import threading
 import time
 
 from peer_link import PeerLink
+from peer_tunnel import PeerTunnel, PeerUnreachable
 from team_root import (
     DEFAULT_ROOT,
     ENDPOINT_NAME,
@@ -40,7 +41,7 @@ class TeamBroker:
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
                  fork_idle=None, busy_grace=None, sessions_root=None,
                  session_grace=None, restart_grace=None, peer_grace=None,
-                 host=None):
+                 host=None, tunnel_factory=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
@@ -110,6 +111,13 @@ class TeamBroker:
         self._remote = {}
         self._peer_pending = {}
         self._peer_down_at = {}
+        # SSH transport owned by the broker: a live tunnel per label, the
+        # durable label -> ssh config, and which tunnel opened each host's
+        # outbound link. The injected factory keeps ssh out of unit tests.
+        self._tunnels = {}
+        self._peer_config = {}
+        self._peer_owner = {}
+        self._tunnel_factory = tunnel_factory or PeerTunnel
         self._lock = threading.RLock()
         self._running = False
         self._server = None
@@ -208,6 +216,7 @@ class TeamBroker:
         for peer in peers:
             peer.endpoint = {}
             peer.drop()
+        self._close_tunnels()
         self._close_server()
 
     def _close_server(self):
@@ -297,31 +306,37 @@ class TeamBroker:
         if op == "register":
             agent_id = self._register(conn, msg)
         elif op == "send":
-            self._relay(msg, agent_id, conn)
+            self.dispatch(msg, agent_id, conn)
             self._touch(agent_id, work=True)
         elif op == "broadcast":
             self._broadcast(msg.get("kind"), msg.get("payload"),
                             exclude=agent_id)
             self._touch(agent_id, work=True)
         elif op == "ls":
-            self._reply(conn, op="registry", agents=self._snapshot_all())
+            self._reply(conn, op="registry", agents=self._snapshot_all(),
+                        peers=self.peer_list())
         elif op == "peer":
             self._accept_peer(conn, str(msg.get("host") or ""))
             self._reply(conn, op="ack")
-        elif op in ("peer-registry", "peer-relay", "peer-ack"):
+        elif op in ("peer-registry", "peer-relay", "peer-ack",
+                    "peer-control"):
             peer = self._peer_for(conn)
             if peer is not None:
                 peer.feed(msg)
         elif op == "peer-add":
-            ok = self.link_peer(str(msg.get("host") or ""),
-                               msg.get("endpoint") or {})
-            if ok:
-                self._reply(conn, op="ack")
+            try:
+                result = self.add_peer(str(msg.get("label") or ""),
+                                       str(msg.get("ssh") or ""))
+            except PeerUnreachable as err:
+                self._reply(conn, op="error", error="peer-unreachable",
+                            detail=err.detail, setup=err.setup)
             else:
-                self._reply(conn, op="error", error="peer-unreachable")
+                self._reply(conn, op="ack", **result)
         elif op == "peer-remove":
-            self._remove_peer(str(msg.get("host") or ""))
+            self.remove_peer(str(msg.get("label") or ""))
             self._reply(conn, op="ack")
+        elif op == "peer-list":
+            self._reply(conn, op="peers", peers=self.peer_list())
         elif op == "ping":
             # A plain ping is the endpoint shim's keepalive; a busy ping
             # marks the agent as actively working and keeps the fork's
@@ -332,8 +347,8 @@ class TeamBroker:
                         waiting=msg.get("waiting") is True)
             self._reply(conn, op="ack")
         elif op == "terminate":
-            self._terminate(msg.get("to"), msg.get("why") or "requested")
-            self._reply(conn, op="ack")
+            self.terminate(msg.get("to"), msg.get("why") or "requested",
+                           conn)
         elif op == "deregister":
             if agent_id:
                 self._drop_entry(agent_id)
@@ -424,7 +439,7 @@ class TeamBroker:
 
     # -- messaging ---------------------------------------------------
 
-    def _relay(self, msg, sender_id, sender_conn):
+    def dispatch(self, msg, sender_id, sender_conn):
         target = msg.get("to")
         with self._lock:
             conn = self._clients.get(target)
@@ -482,6 +497,32 @@ class TeamBroker:
     def _terminate(self, agent_id, why):
         self._evict(agent_id, why)
         self._persist_and_notify()
+
+    def terminate(self, target, why, conn=None):
+        """Evict a local agent, or ask its host's broker to evict it, and
+        answer the requester once. One entry point for local and peer."""
+        if self._parent_host(target) == self.host:
+            self._terminate(target, why)
+            if conn is not None:
+                self._reply(conn, op="ack")
+            return
+        peer = self._peers.get(self._parent_host(target))
+        if peer is None or not peer.connected:
+            if conn is not None:
+                self._reply(conn, op="error", error="undeliverable",
+                            target=target)
+            return
+        rid = secrets.token_hex(8)
+        with self._lock:
+            self._peer_pending[rid] = (conn, peer, time.time())
+        sent = peer.send({"op": "peer-control", "id": rid,
+                          "action": "terminate", "to": target, "why": why})
+        if not sent:
+            with self._lock:
+                self._peer_pending.pop(rid, None)
+            if conn is not None:
+                self._reply(conn, op="error", error="undeliverable",
+                            target=target)
 
     def _kill_owner(self, entry, why):
         # GC enforcement: a spawned teammate's termination must reach the
@@ -717,27 +758,49 @@ class TeamBroker:
     def _accept_peer(self, conn, host):
         if not host or host == self.host:
             return
+        # Both hosts may race an outbound tunnel to each other. Keep the
+        # deterministic winner (the lexicographically smaller host sends)
+        # so the pair settles on one link instead of flapping.
+        if self.host < host and self._tunnel_for(host) is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
         peer = PeerLink(self, host, conn=conn)
         with self._lock:
             old = self._peers.get(host)
             self._peers[host] = peer
             self._peers_by_conn[conn] = peer
             self._peer_down_at.pop(host, None)
+            self._peer_owner.pop(host, None)
         if old is not None and old is not peer and old.connected:
             old.drop()
+        # Our own outbound tunnel to this host is now redundant. Close it
+        # without dropping the inbound link we just installed: ownership
+        # is already cleared, so _tunnel_down will not remove the link.
+        redundant = self._tunnel_for(host)
+        if redundant is not None and self.host > host:
+            with self._lock:
+                self._tunnels.pop(redundant.label, None)
+                self._peer_config.pop(redundant.label, None)
+            redundant.close()
         peer.send({"op": "peer-registry", "agents": self._snapshot()})
 
-    def link_peer(self, host, endpoint, persist=True):
+    def link_peer(self, host, endpoint, persist=True, replace=False):
         if not host or host == self.host or not endpoint:
             return False
         with self._lock:
             existing = self._peers.get(host)
-        if existing is not None and existing.connected:
+        if existing is not None and existing.connected and not replace:
             return True
         peer = PeerLink(self, host, endpoint=endpoint)
         with self._lock:
+            old = self._peers.get(host)
             self._peers[host] = peer
             self._peer_down_at.pop(host, None)
+        if old is not None and old is not peer and old.connected:
+            old.drop()
         try:
             peer.open()
         except OSError:
@@ -752,7 +815,7 @@ class TeamBroker:
             self._persist_peers()
         return True
 
-    def _remove_peer(self, host):
+    def _remove_peer(self, host, reap=False):
         with self._lock:
             peer = self._peers.get(host)
         if peer is not None:
@@ -763,7 +826,118 @@ class TeamBroker:
         else:
             with self._lock:
                 self._remote.pop(host, None)
+        if reap:
+            with self._lock:
+                self._peer_down_at.pop(host, None)
+            self._reap_peer(host)
         self._persist_peers()
+
+    # -- broker-owned ssh transport ----------------------------------
+
+    def _tunnel_for(self, host):
+        with self._lock:
+            for tunnel in self._tunnels.values():
+                if tunnel.host == host:
+                    return tunnel
+        return None
+
+    def add_peer(self, label, ssh):
+        """Own the ssh tunnel to a peer and link it. Replaces any tunnel
+        or link already serving the same label or host."""
+        label = label or ssh
+        if not label or not ssh:
+            raise PeerUnreachable(
+                ssh, "label and ssh target are required", "")
+        old = self._tunnels.pop(label, None)
+        if old is not None:
+            with self._lock:
+                if self._peer_owner.get(old.host) is old:
+                    self._peer_owner.pop(old.host, None)
+            old.close()
+        with self._lock:
+            self._peer_config.pop(label, None)
+        tunnel = self._tunnel_factory(label, ssh, on_exit=self._tunnel_down)
+        endpoint = tunnel.start()
+        host = tunnel.host or label
+        # One host has one live link; a tunnel under another label for
+        # the same host is released before the new one takes ownership.
+        other = self._tunnel_for(host)
+        if other is not None and other is not tunnel:
+            with self._lock:
+                self._tunnels.pop(other.label, None)
+                self._peer_config.pop(other.label, None)
+                self._peer_owner.pop(host, None)
+            other.close()
+        if not self.link_peer(host, endpoint, persist=False, replace=True):
+            tunnel.close()
+            raise PeerUnreachable(
+                ssh, "the peer endpoint did not accept the link",
+                tunnel.setup_command())
+        with self._lock:
+            self._tunnels[label] = tunnel
+            self._peer_owner[host] = tunnel
+            self._peer_config[label] = {"ssh": ssh, "host": host}
+        self._persist_peers()
+        return {"label": label, "host": host, "endpoint": endpoint}
+
+    def remove_peer(self, label, reap=True):
+        """Close a peer's tunnel and drop its link. An explicit removal
+        reaps its remote-parented forks at once instead of waiting out the
+        reconnect grace."""
+        with self._lock:
+            tunnel = self._tunnels.pop(label, None)
+            self._peer_config.pop(label, None)
+        host = None
+        if tunnel is not None:
+            host = tunnel.host
+            with self._lock:
+                if self._peer_owner.get(host) is tunnel:
+                    self._peer_owner.pop(host, None)
+            tunnel.close()
+        if host:
+            self._remove_peer(host, reap=reap)
+        else:
+            self._persist_peers()
+
+    def _tunnel_down(self, tunnel):
+        # ssh exited on its own. Forget the tunnel but keep the durable
+        # config so the next broker start can restore it; drop the link
+        # only when this tunnel still owned it.
+        with self._lock:
+            if self._tunnels.get(tunnel.label) is tunnel:
+                self._tunnels.pop(tunnel.label, None)
+            owns = bool(tunnel.host) \
+                and self._peer_owner.get(tunnel.host) is tunnel
+            if owns:
+                self._peer_owner.pop(tunnel.host, None)
+        if owns:
+            self._remove_peer(tunnel.host)
+
+    def peer_list(self):
+        with self._lock:
+            config = {label: dict(meta)
+                      for label, meta in self._peer_config.items()}
+        peers = []
+        for label in sorted(config):
+            meta = config[label]
+            host = meta.get("host") or label
+            with self._lock:
+                peer = self._peers.get(host)
+            peers.append({
+                "label": label,
+                "host": host,
+                "online": bool(peer and peer.connected),
+                "ssh": meta.get("ssh") or "",
+            })
+        return peers
+
+    def _close_tunnels(self):
+        with self._lock:
+            tunnels = list(self._tunnels.values())
+            self._tunnels.clear()
+            self._peer_owner.clear()
+        for tunnel in tunnels:
+            tunnel.close()
 
     def _peer_message(self, peer, msg):
         op = msg.get("op")
@@ -774,6 +948,19 @@ class TeamBroker:
             self._deliver_peer(peer, msg)
         elif op == "peer-ack":
             self._finish_peer_relay(peer, msg)
+        elif op == "peer-control":
+            self._apply_peer_control(peer, msg)
+
+    def _apply_peer_control(self, peer, msg):
+        # A broker-level action from a peer, never addressed through an
+        # agent: act only on our own agents, then ack.
+        ok = False
+        if msg.get("action") == "terminate":
+            target = msg.get("to")
+            if self._parent_host(target) == self.host:
+                self._terminate(target, msg.get("why") or "requested")
+                ok = True
+        peer.send({"op": "peer-ack", "id": msg.get("id"), "ok": ok})
 
     def _deliver_peer(self, peer, msg):
         target = msg.get("to")
@@ -875,21 +1062,28 @@ class TeamBroker:
             self._persist_and_notify()
 
     def _load_peers(self):
-        for host, endpoint in self.root.read_peers().items():
-            self.link_peer(host, endpoint, persist=False)
-        # Garbage-collect persisted peers that no longer open: their
-        # loopback tunnel is owned by an extension, so an entry that
-        # cannot reconnect is dead weight, not a peer to retry forever.
+        for label, meta in self.root.read_peers().items():
+            if not isinstance(meta, dict):
+                continue
+            ssh = meta.get("ssh")
+            if not ssh:
+                continue
+            try:
+                self.add_peer(label, ssh)
+            except PeerUnreachable:
+                # Keep the durable config: the host may be down, and an
+                # explicit re-add or the next broker start retries.
+                with self._lock:
+                    self._peer_config[label] = {
+                        "ssh": ssh, "host": meta.get("host") or label,
+                    }
         self._persist_peers()
 
     def _persist_peers(self):
         with self._lock:
-            endpoints = {
-                host: peer.endpoint
-                for host, peer in self._peers.items()
-                if peer.endpoint
-            }
-        self.root.write_peers(endpoints)
+            config = {label: dict(meta)
+                      for label, meta in self._peer_config.items()}
+        self.root.write_peers(config)
 
     # -- low-level writes -------------------------------------------
 
@@ -922,6 +1116,7 @@ class TeamBroker:
             self._peers_by_conn.clear()
         for entry in pending:
             self._reply(entry[0], op="error", error="undeliverable")
+        self._close_tunnels()
         for conn in conns:
             try:
                 conn.close()

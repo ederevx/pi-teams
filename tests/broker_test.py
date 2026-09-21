@@ -10,11 +10,84 @@ import threading
 import time
 import unittest
 
-from harness import make_root, wait_endpoint, wait_until
+from harness import make_root, read_endpoint, wait_endpoint, wait_until
+from peer_tunnel import PeerTunnel, PeerUnreachable
 from team import TeamClient
 from teamd import TEAMMATE_MARKER, PeerLink, TeamBroker
 
 IDLE_ROOMY = 30.0
+
+
+class FakeTunnel:
+    """A PeerTunnel stand-in that links to a real peer endpoint."""
+
+    def __init__(self, label, ssh, endpoint, on_exit=None):
+        self.label = label
+        self.ssh = ssh
+        self.host = endpoint.get("name") or label
+        self.closed = False
+        self.started = False
+        self._endpoint = endpoint
+        self._on_exit = on_exit
+
+    def start(self):
+        self.started = True
+        return {"host": self._endpoint["host"],
+                "port": self._endpoint["port"],
+                "token": self._endpoint["token"], "name": self.host}
+
+    def close(self):
+        self.closed = True
+
+    def setup_command(self):
+        return "sh setup '%s'" % self.ssh
+
+    def flap(self):
+        # Simulate ssh exiting on its own; the broker's on_exit fires.
+        if self._on_exit is not None:
+            self._on_exit(self)
+
+
+class RecordingTunnelFactory:
+    """Builds FakeTunnels pointed at one peer root, recording them."""
+
+    def __init__(self, peer_root):
+        self.peer_root = peer_root
+        self.tunnels = []
+
+    def __call__(self, label, ssh, on_exit=None):
+        endpoint = read_endpoint(self.peer_root)
+        tunnel = FakeTunnel(label, ssh, endpoint, on_exit)
+        self.tunnels.append(tunnel)
+        return tunnel
+
+
+class PeerTunnelTests(unittest.TestCase):
+    def test_classifies_common_ssh_failures(self):
+        tunnel = PeerTunnel("l", "user@host")
+        self.assertIn("host key",
+                      tunnel._classify("Host key verification failed."))
+        self.assertIn("password",
+                      tunnel._classify("Permission denied (publickey)."))
+        self.assertEqual(tunnel._classify("  boom  \nsecond"), "boom")
+        self.assertEqual(tunnel._classify(""), "")
+
+    def test_setup_command_is_quoted_for_a_shell(self):
+        tunnel = PeerTunnel("l", "user@host")
+        command = tunnel.setup_command()
+        self.assertTrue(command.startswith("sh "))
+        self.assertIn("'user@host'", command)
+
+    def test_reserve_port_returns_a_free_loopback_port(self):
+        tunnel = PeerTunnel("l", "user@host")
+        port = tunnel._reserve_port()
+        self.assertGreater(port, 0)
+
+    def test_missing_ssh_is_unreachable(self):
+        tunnel = PeerTunnel("l", "user@host", which=lambda _name: None)
+        with self.assertRaises(PeerUnreachable) as caught:
+            tunnel.start()
+        self.assertIn("ssh is not installed", caught.exception.detail)
 
 
 class BrokerProtocolTests(unittest.TestCase):
@@ -463,13 +536,14 @@ class BrokerProtocolTests(unittest.TestCase):
             dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def _start_broker(self, root, host):
+    def _start_broker(self, root, host, tunnel_factory=None):
         sessions = os.path.join(root, "sessions")
         os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             sweep_interval=0.1, host=host,
                             peer_grace=0.3, sessions_root=sessions,
-                            session_grace=0.3)
+                            session_grace=0.3,
+                            tunnel_factory=tunnel_factory)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         wait_endpoint(root)
@@ -738,6 +812,133 @@ class BrokerProtocolTests(unittest.TestCase):
             except OSError:
                 pass
             dummy.wait(timeout=5)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_broker_owns_ssh_tunnel_and_links_peer(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        factory = RecordingTunnelFactory(root_b)
+        broker_a, thread_a = self._start_broker(
+            root_a, "alpha", tunnel_factory=factory)
+        try:
+            result = broker_a.add_peer("peer-b", "user@host")
+            self.assertEqual(result["host"], "beta")
+            self.assertTrue(factory.tunnels[0].started)
+            self.assertEqual(factory.tunnels[0].label, "peer-b")
+            self.assertTrue(
+                wait_until(lambda: "alpha" in broker_b._peers),
+                "peer link was never accepted")
+            listed = broker_a.peer_list()
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["label"], "peer-b")
+            self.assertEqual(listed[0]["host"], "beta")
+            self.assertTrue(listed[0]["online"])
+            # Durable config survives so a restart can rebuild the tunnel.
+            stored = broker_a.root.read_peers()
+            self.assertEqual(stored["peer-b"],
+                             {"ssh": "user@host", "host": "beta"})
+            # An explicit removal closes the tunnel and drops the link.
+            broker_a.remove_peer("peer-b")
+            self.assertTrue(factory.tunnels[0].closed)
+            self.assertTrue(
+                wait_until(lambda: "alpha" not in broker_b._peers),
+                "removed peer link stayed up")
+            self.assertEqual(broker_a.peer_list(), [])
+            self.assertEqual(broker_a.root.read_peers(), {})
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_tunnel_flap_drops_link_but_keeps_config(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        factory = RecordingTunnelFactory(root_b)
+        broker_a, thread_a = self._start_broker(
+            root_a, "alpha", tunnel_factory=factory)
+        try:
+            broker_a.add_peer("peer-b", "user@host")
+            self.assertTrue(wait_until(
+                lambda: broker_a.peer_list()[0]["online"]))
+            # ssh exits on its own: the link drops, the config is kept.
+            factory.tunnels[0].flap()
+            self.assertTrue(wait_until(
+                lambda: not broker_a.peer_list()[0]["online"]))
+            self.assertNotIn("beta", broker_a._peers)
+            self.assertEqual(
+                broker_a.root.read_peers()["peer-b"]["ssh"], "user@host")
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_persisted_peers_rebuild_on_start(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        factory = RecordingTunnelFactory(root_b)
+        broker_a, thread_a = self._start_broker(
+            root_a, "alpha", tunnel_factory=factory)
+        try:
+            broker_a.add_peer("peer-b", "user@host")
+            broker_a.stop()
+            thread_a.join(timeout=3)
+            # A fresh broker on the same root restores the link it owns.
+            factory2 = RecordingTunnelFactory(root_b)
+            broker_a2, thread_a2 = self._start_broker(
+                root_a, "alpha", tunnel_factory=factory2)
+            try:
+                self.assertTrue(wait_until(
+                    lambda: broker_a2.peer_list()
+                    and broker_a2.peer_list()[0]["online"]),
+                    "persisted peer was not rebuilt")
+                self.assertEqual(factory2.tunnels[0].ssh, "user@host")
+            finally:
+                broker_a2.stop()
+                thread_a2.join(timeout=3)
+        finally:
+            broker_b.stop()
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_terminate_routes_to_peer_host(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        try:
+            victim = TeamClient(root_b, heartbeat=None)
+            victim.id = "beta:victim"
+            victim.role = "cli"
+            victim.register()
+            self.assertTrue(wait_until(
+                lambda: "beta:victim" in self._ids_via(root_b)))
+            broker_a.link_peer("beta", broker_b.root.read_endpoint())
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            caller = TeamClient(root_a, heartbeat=None)
+            caller.id = "alpha:caller"
+            caller.register()
+            reply = caller.terminate("beta:victim", "requested")
+            self.assertEqual(reply.get("op"), "ack", reply)
+            self.assertTrue(wait_until(
+                lambda: "beta:victim" not in self._ids_via(root_b)),
+                "remote agent was not evicted")
+            caller.close()
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
             shutil.rmtree(root_a, ignore_errors=True)
             shutil.rmtree(root_b, ignore_errors=True)
 

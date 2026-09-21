@@ -202,13 +202,16 @@ class TeamClient:
         return self.request("terminate", expected=("ack", "error"),
                             to=agent_id, why=why)
 
-    def peer_add(self, host, endpoint):
+    def peer_add(self, label, ssh):
         return self.request("peer-add", expected=("ack", "error"),
-                            host=host, endpoint=endpoint)
+                            label=label, ssh=ssh)
 
-    def peer_remove(self, host):
+    def peer_remove(self, label):
         return self.request("peer-remove", expected=("ack", "error"),
-                            host=host)
+                            label=label)
+
+    def peer_list(self):
+        return self.request("peer-list", expected=("peers", "error"))
 
     def deregister(self):
         reply = self.request("deregister", expected=("ack", "error"))
