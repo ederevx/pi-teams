@@ -51,7 +51,8 @@ process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
 const { TeamAgent, ProcessRunner, SshPeerBridge, SshSetupGuide,
-	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory } =
+	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory,
+	ResultInbox } =
 	await import("../extensions/pi-teams.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
@@ -268,6 +269,100 @@ test("a result is delivered as a message, not held by a waiter", () => {
 	// it as an ordinary message.
 	assert.deepEqual(received.map((m) => m.payload), ["done"]);
 	agent.stopHold();
+});
+
+test("an active wait consumes a result that arrives during it", async () => {
+	const received = [];
+	const { agent, calls } = makeAgent((message) => received.push(message));
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const waiting = agent.waitForResults(["kid"], 5000, undefined,
+		() => false);
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "result", payload: "done",
+	}) + "\n");
+	const results = await waiting;
+	assert.equal(results.length, 1);
+	assert.equal(results[0].payload, "done");
+	// The tool result owns it, so it is not also delivered as a message.
+	assert.deepEqual(received, []);
+	agent.stopHold();
+});
+
+test("a result that arrived early is returned by the next wait", async () => {
+	const received = [];
+	const { agent, calls } = makeAgent((message) => received.push(message));
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "result", payload: "early",
+	}) + "\n");
+	// No waiter: the report is delivered as a message and buffered.
+	assert.deepEqual(received.map((m) => m.payload), ["early"]);
+	const results = await agent.waitForResults(
+		["kid"], 5000, undefined, () => false);
+	assert.equal(results[0].payload, "early");
+	agent.stopHold();
+});
+
+test("an active wait returns null on its bound", async () => {
+	const { agent } = makeAgent();
+	const results = await agent.waitForResults(
+		["nobody"], 20, undefined, () => false);
+	assert.deepEqual(results, [null]);
+});
+
+test("an active wait yields when a user message is queued", async () => {
+	const { agent } = makeAgent();
+	let pending = false;
+	const waiting = agent.waitForResults(
+		["kid"], 5000, undefined, () => pending);
+	setTimeout(() => { pending = true; }, 20);
+	assert.deepEqual(await waiting, [null]);
+});
+
+test("an active wait ends when the run aborts", async () => {
+	const { agent } = makeAgent();
+	const controller = new AbortController();
+	const waiting = agent.waitForResults(
+		["kid"], 5000, controller.signal, () => false);
+	setTimeout(() => controller.abort(), 10);
+	assert.deepEqual(await waiting, [null]);
+});
+
+test("deregister cancels an active wait", async () => {
+	const { agent } = makeAgent();
+	const waiting = agent.waitForResults(
+		["kid"], 5000, undefined, () => false);
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	agent.deregister();
+	assert.deepEqual(await waiting, [null]);
+});
+
+test("ResultInbox hands a result to its waiter exactly once", () => {
+	const inbox = new ResultInbox();
+	const seen = [];
+	const unwatch = inbox.watch("kid", (message) => seen.push(message));
+	assert.equal(inbox.deliver({
+		from: "kid", to: "me", kind: "result", payload: "x",
+	}), true);
+	assert.equal(seen.length, 1);
+	// The sender's waiter set is consumed, so a second result buffers.
+	assert.equal(inbox.deliver({
+		from: "kid", to: "me", kind: "result", payload: "y",
+	}), false);
+	assert.equal(inbox.take("kid").payload, "y");
+	unwatch();
+});
+
+test("ResultInbox cancels every waiter and drops buffered results", () => {
+	const inbox = new ResultInbox();
+	const cancelled = [];
+	inbox.watch("kid", (message) => cancelled.push(message));
+	inbox.deliver({ from: "z", to: "me", kind: "result", payload: "x" });
+	inbox.cancelAll();
+	assert.deepEqual(cancelled, [null]);
+	assert.equal(inbox.take("z"), undefined);
 });
 
 test("requireSameTeam lets a root reach any agent", async () => {
