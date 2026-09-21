@@ -72,7 +72,8 @@ coordinate natively instead of through the shared tree.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
-  `/team ls|status|send|attach|detach|kill`. The hold and forked pi are
+  `/team ls|status|send|attach|detach|kill` and `/team-reload`. The hold
+  and forked pi are
   launched with Node's `child_process`, not `pi.exec`: `pi.exec` opens
   a child's stdin to `/dev/null` and drops the `env` option, which
   would make the hold exit on its first read and strip a fork of its
@@ -102,10 +103,18 @@ coordinate natively instead of through the shared tree.
   still retains it (same model, within its TTL). GC reaps only the
   process, leaving the session file for later resumption. When a fork
   starts, the pi child registers through the same extension.
-  `team_wait` is passive: it never blocks, so a waiting agent stays
-  idle and keeps receiving messages; each report arrives as an ordinary
-  pi-teams message that starts a new turn. Idle waiting keeps fork idle
-  GC in force.
+  `team_wait` actively waits: it blocks until each named teammate
+  reports, returning the reports as the tool result. The wait stays
+  steerable and interruptible: Escape aborts it through the run's abort
+  signal, and a queued user message makes it yield early so the steer is
+  delivered at once. A report not consumed by the wait still arrives as
+  an ordinary pi-teams message. While it waits the agent is published as
+  waiting, so the broker keeps a waiting fork exempt from idle GC.
+- **Reload**: `/team-reload` runs pi's normal extension reload named for
+  teams, so a team update does not need the pi-daemon's all-extension
+  reload. It reloads the extension and re-registers the hold; the broker
+  adopts new `teamd` code on its own idle clock, so the reload never
+  forces the broker to drop live holds.
 - **Tools**: the extension exposes `team_ls`, `team_send`,
   `team_spawn`, `team_wait`, `team_attach`, and `team_peer` as agent
   tools. Sending and waiting are member-only, and a teammate may only
@@ -137,7 +146,7 @@ and messages cross both ways.
   that host's main agent through the same agent directory and asks it to
   spawn, so the peer host owns the process, session, and reaping. The
   caller never branches on local versus ssh, and the teammate reports
-  back through the federation. `team_wait` can block for it by id.
+  back through the federation. `team_wait` waits for it by id.
 - **Bidirectional messaging**: every agent id carries a host label
   (`<host>:pi-...`, `<host>:fork-...`); a message to a peer-hosted id is
   relayed across the peer link (the `team_send` tool or `/team send`),
@@ -229,7 +238,7 @@ the `pi` key and carries the `pi-package` keyword, so pi can install it
 directly.
 
 ```
-pi install git:github.com/ederevx/pi-teams@v0.3.12
+pi install git:github.com/ederevx/pi-teams@v0.3.13
 pi install npm:pi-teams          # once published to npm
 pi install /absolute/path/to/pi-teams
 ```

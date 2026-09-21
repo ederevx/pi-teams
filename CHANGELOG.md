@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.13 — 2026-09-20
+
+- Make `team_wait` an active poll that returns reports and yields to a
+  queued user message.
+- Add `/team-reload` to reload the team extension in place.
+- Own waiters and buffered early reports in a `ResultInbox` released on
+  deregister.
+
 ## v0.3.12 — 2026-09-20
 
 - Keep an attached session's transcript when its remote parent is reaped.
