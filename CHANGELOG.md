@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.1 — 2026-09-21
+
+- Add the `team_tail` tool (`ChatTail` module): returns the last N lines
+  of the newest pi chat-history transcript so an agent can see its own
+  conversation.
+- Surface cross-host spawn failures: a linked peer that advertises zero
+  agents is a remote-side precondition, so `team_spawn` now reports the
+  advertised agent count and the fix, and `team_ls` prints a footer for
+  linked peers that advertise no agents.
+
 ## v0.4.0 — 2026-09-21
 
 - Split the monolithic extension and broker into responsibility modules;

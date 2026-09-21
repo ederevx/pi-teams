@@ -838,6 +838,11 @@ export class TeamAgent {
 		}
 	}
 
+	/** Labels of host brokers linked via team_peer (durable map). */
+	linkedPeers(): string[] {
+		return Object.keys(this.readPeerTargets()).sort();
+	}
+
 	private rememberPeer(label: string, sshTarget: string): void {
 		const targets = this.readPeerTargets();
 		targets[label] = sshTarget;
