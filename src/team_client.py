@@ -210,8 +210,10 @@ class TeamClient:
         return self.request("ls", expected=("registry", "error"))
 
     def terminate(self, agent_id, why="requested"):
+        # A peer-terminate waits for the target host's broker to ack or
+        # for the pending-relay window, so allow more than a round trip.
         return self.request("terminate", expected=("ack", "error"),
-                            to=agent_id, why=why)
+                            timeout=20, to=agent_id, why=why)
 
     def peer_add(self, label, ssh):
         return self.request("peer-add", expected=("ack", "error"),

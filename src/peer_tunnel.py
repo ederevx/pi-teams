@@ -118,12 +118,17 @@ class PeerTunnel:
                 self.setup_command())
 
     def _read_endpoint(self):
-        result = subprocess.run(
-            [self._ssh_bin, "-o", "BatchMode=yes",
-             "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1",
-             self.ssh, "cat", "%s/endpoint" % self._remote_state],
-            capture_output=True, text=True, timeout=25,
-        )
+        try:
+            result = subprocess.run(
+                [self._ssh_bin, "-o", "BatchMode=yes",
+                 "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1",
+                 self.ssh, "cat", "%s/endpoint" % self._remote_state],
+                capture_output=True, text=True, timeout=25,
+                encoding="utf-8", errors="replace",
+            )
+        except (OSError, subprocess.TimeoutExpired) as err:
+            raise PeerUnreachable(self.ssh, str(err) or "ssh timed out",
+                                  self.setup_command())
         if result.returncode != 0:
             raise PeerUnreachable(self.ssh,
                                   self._classify(result.stderr or ""),

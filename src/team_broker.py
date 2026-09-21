@@ -781,9 +781,10 @@ class TeamBroker:
         # is already cleared, so _tunnel_down will not remove the link.
         redundant = self._tunnel_for(host)
         if redundant is not None and self.host > host:
+            # Keep the durable config: the label stays a known peer even
+            # though the inbound link now serves the host.
             with self._lock:
                 self._tunnels.pop(redundant.label, None)
-                self._peer_config.pop(redundant.label, None)
             redundant.close()
         peer.send({"op": "peer-registry", "agents": self._snapshot()})
 
@@ -795,21 +796,20 @@ class TeamBroker:
         if existing is not None and existing.connected and not replace:
             return True
         peer = PeerLink(self, host, endpoint=endpoint)
+        try:
+            peer.open()
+        except OSError:
+            # open() closed its own socket on failure; this link never
+            # went live, so do not run it through _peer_down, which would
+            # mark the host down and start the fork-reap grace. A failed
+            # replacement must leave any working link in place.
+            return False
         with self._lock:
             old = self._peers.get(host)
             self._peers[host] = peer
             self._peer_down_at.pop(host, None)
         if old is not None and old is not peer and old.connected:
             old.drop()
-        try:
-            peer.open()
-        except OSError:
-            # open() closed its own socket on failure; this link never
-            # went live, so do not run it through _peer_down, which would
-            # mark the host down and start the fork-reap grace.
-            with self._lock:
-                self._peers.pop(host, None)
-            return False
         peer.send({"op": "peer-registry", "agents": self._snapshot()})
         if persist:
             self._persist_peers()
@@ -859,6 +859,21 @@ class TeamBroker:
         tunnel = self._tunnel_factory(label, ssh, on_exit=self._tunnel_down)
         endpoint = tunnel.start()
         host = tunnel.host or label
+        with self._lock:
+            existing = self._peers.get(host)
+            owns_link = self._peer_owner.get(host) is not None
+        if (existing is not None and existing.connected and not owns_link
+                and self.host > host):
+            # A connected inbound link already serves this host, and this
+            # host is the larger label, so the smaller host owns the
+            # outbound direction. Keep the working link and spend the new
+            # tunnel instead of tearing down the pair.
+            tunnel.close()
+            with self._lock:
+                self._peer_config[label] = {"ssh": ssh, "host": host}
+            self._persist_peers()
+            return {"label": label, "host": host,
+                    "endpoint": existing.endpoint}
         # One host has one live link; a tunnel under another label for
         # the same host is released before the new one takes ownership.
         other = self._tunnel_for(host)
