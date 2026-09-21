@@ -10,8 +10,9 @@ coordinate natively instead of through the shared tree.
 
 ## What it provides
 
-- **Broker** (`src/teamd.py`): a loopback TCP registry and relay on
-  `127.0.0.1` with an ephemeral port and a random token, published
+- **Broker** (`src/teamd.py`, a thin CLI over `src/team_broker.py`,
+  `src/team_root.py`, and `src/peer_link.py`): a loopback TCP registry
+  and relay on `127.0.0.1` with an ephemeral port and a random token, published
   atomically in `TEAM_ROOT/endpoint` (default `~/.local/state/
   pi-teams`). Every connection must present the token in a hello
   handshake before any op. A per-root broker lock (a `.broker.lock`
@@ -21,9 +22,10 @@ coordinate natively instead of through the shared tree.
   exchange JSON-lines messages, discover each other, and are swept when
   their connection goes idle past the heartbeat timeout. The registry
   is mirrored to `registry.json` atomically for non-connected readers.
-- **Client** (`src/team.py`): one persistent connection per agent is the
-  endpoint; while it stays open the agent is reachable and relayed
-  messages arrive on it. CLI: `team register`, `team ls`, `team send
+- **Client** (`src/team.py`, a thin CLI over `src/team_client.py`): one
+  persistent connection per agent is the endpoint; while it stays open
+  the agent is reachable and relayed messages arrive on it. CLI: `team
+  register`, `team ls`, `team send
   <id> <kind> <text>`, `team follow`, `team terminate <id>`,
   `team deregister`.
 - **Fork lifetime and GC**: a fork registers with its parent's team id
@@ -69,7 +71,9 @@ coordinate natively instead of through the shared tree.
   teammate too. `/team detach` returns the session to a plain main agent
   so it is no longer reaped. The session file is preserved, so an
   attached session stays in `/resume`.
-- **Extension** (`extensions/pi-teams.ts`): registers the running pi,
+- **Extension** (`extensions/pi-teams.ts`, a thin entry that composes
+  the responsibility modules under `extensions/pi-teams/`): registers
+  the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
   `/team ls|status|send|attach|detach|kill`. The hold
@@ -184,7 +188,9 @@ That chains, in order:
   structure, 80-column prose wrap (URLs and code may exceed), no
   trailing whitespace or tabs, balanced fences, required sections.
 - **OOP lint** (`tests/oop_lint.py`): no module-level mutable state, no
-  `global`, no bare `except`, no `var` in the extension.
+  `global`, no bare `except`, no `var` in the extension, one top-level
+  class per source file, and no file over 1200 lines, so a
+  responsibility cannot accrete into a monolithic single file.
 - **Extension tests** (`tests/extension_test.mjs`): every child launch
   goes through ProcessRunner with `windowsHide` set; `spawnDetached`
   never detaches on Windows, and the persistent broker launches through
@@ -233,7 +239,7 @@ the `pi` key and carries the `pi-package` keyword, so pi can install it
 directly.
 
 ```
-pi install git:github.com/ederevx/pi-teams@v0.3.14
+pi install git:github.com/ederevx/pi-teams@v0.4.0
 pi install npm:pi-teams          # once published to npm
 pi install /absolute/path/to/pi-teams
 ```
@@ -246,12 +252,14 @@ below. The broker still starts on demand, one per `TEAM_ROOT`.
 
 ### Manual install
 
-`scripts/install.sh` copies `src/teamd.py` and `src/team.py` into
-`$HOME/.local/bin` (plus `scripts/peer-ssh-setup.sh` as the
-`peer-ssh-setup` helper), installs the extension into the pi agent home
-extensions dir, and records installed bytes in a manifest;
-`scripts/uninstall.sh` removes exactly what was installed. Both stage
-every write through a same-directory temp file before the atomic move.
+`scripts/install.sh` copies every `src/*.py` into `$HOME/.local/bin`
+(the entries as `teamd` and `team`, the rest as importable modules,
+plus `scripts/peer-ssh-setup.sh` as the `peer-ssh-setup` helper),
+installs the extension entry and its `pi-teams/` module directory into
+the pi agent home extensions dir, and records installed bytes in a
+manifest; `scripts/uninstall.sh` removes exactly what was installed.
+Files are staged through a same-directory temp file before the atomic
+move; the extension module directory is staged whole and swapped in.
 On Windows, run both scripts from Git Bash (the shell pi itself uses
 there). Restart pi sessions after installing so the extension loads;
 the broker starts on demand per session.
