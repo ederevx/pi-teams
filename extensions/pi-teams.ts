@@ -31,7 +31,6 @@ import {
 export { TeamAgent } from "./pi-teams/agent.ts";
 export { ChatTail } from "./pi-teams/chat-tail.ts";
 export { ProcessRunner } from "./pi-teams/process-runner.ts";
-export { SshPeerBridge, SshSetupGuide } from "./pi-teams/peer.ts";
 export {
 	WindowlessPython,
 	windowlessCandidates,
@@ -39,6 +38,9 @@ export {
 export { logTeamMessage } from "./pi-teams/messages.ts";
 export { AgentDirectory } from "./pi-teams/directory.ts";
 export { ResultInbox } from "./pi-teams/inbox.ts";
+export { PendingRequests } from "./pi-teams/pending.ts";
+export { BrokerOps } from "./pi-teams/broker-ops.ts";
+export { SpawnService } from "./pi-teams/spawn.ts";
 
 export default async function (pi: ExtensionAPI) {
 	const app = new TeamAgent(
@@ -271,7 +273,7 @@ export default async function (pi: ExtensionAPI) {
 
 	// -- agent-facing messaging ------------------------------------------
 	// Sends through the local broker, so a peer-hosted target is relayed
-	// across the SSH-tunneled peer link without the agent touching ssh.
+	// across the broker's peer link without the agent touching ssh.
 	pi.registerTool({
 		name: "team_send",
 		label: "message an agent",
@@ -281,7 +283,7 @@ export default async function (pi: ExtensionAPI) {
 			"(attached or spawned), and a teammate may only message its " +
 			"own team - ask your parent to attach an outsider first. The " +
 			"broker relays it, so peer hosts work through the existing " +
-			"SSH tunnel. Returns the broker's ack.",
+			"peer link. Returns the broker's ack.",
 		parameters: Type.Object({
 			to: Type.String({ description: "Target agent id" }),
 			text: Type.String({ description: "Message text" }),
@@ -314,16 +316,18 @@ export default async function (pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 			const agents = await app.snapshot();
+			const peers = await app.peers();
 			const lines = agents.map((a) =>
 				`${a.id}\t${a.role}\t${a.online ? "online" : "offline"}` +
 				(a.remote ? "\tpeer" : ""));
 			const remote = agents.filter((a) => a.remote);
-			const quietPeers = app.linkedPeers().filter(
-				(label) => !remote.some((a) => a.origin === label));
+			const quietPeers = peers.filter(
+				(p) => !remote.some((a) => a.origin === p.host));
 			const body = lines.join("\n");
-			const footer = quietPeers.map((label) =>
-				`peer ${label}: linked, 0 agents advertised (start that ` +
-				`host's pi session to federate)`);
+			const footer = quietPeers.map((p) =>
+				`peer ${p.label} (${p.host}): ` +
+				`${p.online ? "linked, 0 agents advertised" : "offline"} ` +
+				`(start that host's pi session to federate)`);
 			const parts = [body || "pi-teams: no agents registered"];
 			parts.push(...footer);
 			return {
@@ -364,17 +368,16 @@ export default async function (pi: ExtensionAPI) {
 
 	// -- cross-host peers ------------------------------------------------
 	// One call links another host's broker over an existing SSH session:
-	// the extension reads the peer endpoint read-only, opens a loopback
-	// ssh -L tunnel, and tells the local broker to federate.
+	// the broker fetches the peer endpoint and owns the ssh tunnel.
 	pi.registerTool({
 		name: "team_peer",
 		label: "link a peer host",
 		description:
 			"Connect another host's pi-teams broker over an existing SSH " +
-			"session. add fetches the peer's loopback endpoint read-only, " +
-			"opens a loopback-bound ssh -L tunnel, and links the two " +
-			"brokers so agents can message across hosts; remove drops the " +
-			"link. The peer host must already run pi-teams.",
+			"session. add asks the broker to fetch the peer's loopback " +
+			"endpoint and own the ssh tunnel, then links the two brokers " +
+			"so agents can message across hosts; remove drops the link. " +
+			"The peer host must already run pi-teams.",
 		promptSnippet: "Link another host's pi-teams broker over SSH",
 		promptGuidelines: [
 			"Call team_peer add <ssh-host> once to enable cross-host " +
@@ -399,16 +402,16 @@ export default async function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params) {
 			if (params.action === "add") {
-				const sshTarget = app.peerTarget(params.host);
 				const peer = await app.peerAdd(
-					sshTarget, params.label || "");
+					params.host, params.label || "");
 				return {
 					content: [{
 						type: "text",
-						text: `linked peer ${peer} over ssh ${sshTarget}; ` +
-							`use team_spawn host=${peer} to spawn there.`,
+						text: `linked peer ${peer.host} (${peer.label}) ` +
+							`over ssh ${params.host}; use team_spawn ` +
+							`host=${peer.host} to spawn there.`,
 					}],
-					details: { peer },
+					details: peer,
 				};
 			}
 			await app.peerRemove(params.host);
@@ -427,7 +430,6 @@ export default async function (pi: ExtensionAPI) {
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		app.rememberSession(sessionFile);
 		app.hold(ctx.cwd);
-		void app.restorePeers();
 		void app.announceSession(sessionFile);
 	});
 

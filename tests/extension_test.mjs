@@ -50,7 +50,7 @@ process.env.PYTHON = process.env.PYTHON || "python3";
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
-const { TeamAgent, ProcessRunner, SshPeerBridge, SshSetupGuide,
+const { TeamAgent, ProcessRunner, PendingRequests,
 	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory,
 	ResultInbox } =
 	await import("../extensions/pi-teams.ts");
@@ -136,7 +136,7 @@ function makeAgent(deliver = () => {}) {
 	const { calls, runner } = makeRunner();
 	const windowless = (python) => new WindowlessPython(python, () => false);
 	return {
-		agent: new TeamAgent(runner, deliver, undefined, windowless),
+		agent: new TeamAgent(runner, deliver, windowless),
 		calls,
 	};
 }
@@ -633,85 +633,61 @@ test("deregister closes the held connection", () => {
 	assert.equal(calls[0].killed, true);
 });
 
-test("SshPeerBridge reads the endpoint, tunnels it, and reaps on close", async () => {
-	const runCalls = [];
-	const endpoint = JSON.stringify({ port: 5555, token: "tok", name: "hz" });
-	const { calls, runner } = makeRunner((file, args) => {
-		runCalls.push({ file, args });
-		return Promise.resolve({ stdout: endpoint, stderr: "", code: 0 });
+test("peerAdd asks the broker to own the ssh tunnel", async () => {
+	const runs = [];
+	const { runner } = makeRunner((_file, args) => {
+		runs.push(args);
+		return Promise.resolve({ stdout: JSON.stringify({
+			op: "ack", label: "hz", host: "hz-server",
+		}), stderr: "", code: 0 });
 	});
-	const bridge = new SshPeerBridge("peer.example", "", runner);
-	const ep = await bridge.connect();
-	assert.equal(ep.host, "127.0.0.1");
-	assert.equal(ep.token, "tok");
-	assert.equal(ep.name, "hz");
-	assert.ok(ep.port > 0);
-	assert.ok(runCalls[0].args.includes("BatchMode=yes"));
-	assert.ok(runCalls[0].args.includes("peer.example"));
-	assert.ok(runCalls[0].args.includes("cat"));
-	const tunnel = calls.find((c) => c.file === "ssh");
-	assert.ok(tunnel, "no ssh tunnel was spawned");
-	assert.ok(tunnel.args.includes("-N"));
-	assert.ok(tunnel.args.includes("ExitOnForwardFailure=yes"));
-	const forward = tunnel.args[tunnel.args.indexOf("-L") + 1];
-	assert.ok(forward.endsWith(":127.0.0.1:5555"));
-	assert.equal(tunnel.args[tunnel.args.length - 1], "peer.example");
-	assert.equal(tunnel.options.detached, process.platform !== "win32");
-	assert.equal(tunnel.unrefed, true);
-	bridge.close();
-	assert.equal(tunnel.killed, true);
-	bridge.close();
-	assert.equal(tunnel.killed, true);
+	const agent = new TeamAgent(runner, () => {});
+	const peer = await agent.peerAdd("peer.example", "hz");
+	assert.equal(peer.host, "hz-server");
+	const add = runs.find((a) => a.includes("peer") && a.includes("add"));
+	assert.ok(add, "no broker peer-add was run");
+	assert.ok(add.includes("--label"));
+	assert.ok(add.includes("hz"));
+	assert.ok(add.includes("--ssh"));
+	assert.ok(add.includes("peer.example"));
 });
 
-test("SshPeerBridge guides a password-only host to the one-line setup", async () => {
-	const { calls, runner } = makeRunner(() => Promise.resolve({
-		stdout: "", stderr: "Permission denied (publickey,password).",
-		code: 255,
-	}));
-	const bridge = new SshPeerBridge("peer.example", "", runner);
-	await assert.rejects(() => bridge.connect(), (err) => {
-		assert.match(err.message, /not usable non-interactively/);
-		assert.match(err.message, /password/);
-		assert.match(err.message, /peer-ssh-setup/);
-		assert.match(err.message, /peer.example/);
-		return true;
-	});
-	assert.equal(calls.find((c) => c.file === "ssh"), undefined,
-		"no tunnel must spawn when auth fails");
-});
-
-test("SshPeerBridge classifies an unknown host key", async () => {
+test("peerAdd relays the broker's setup guidance on failure", async () => {
 	const { runner } = makeRunner(() => Promise.resolve({
-		stdout: "", stderr: "Host key verification failed.", code: 255,
-	}));
-	const bridge = new SshPeerBridge("host", "", runner);
-	await assert.rejects(() => bridge.connect(), /host key is not known/);
-});
-
-test("SshPeerBridge rejects an unreadable endpoint with guidance", async () => {
-	const { runner } = makeRunner(() => Promise.resolve({
-		stdout: "welcome banner\n", stderr: "", code: 0,
-	}));
-	const bridge = new SshPeerBridge("host", "", runner);
-	await assert.rejects(() => bridge.connect(),
-		/endpoint file could not be read/);
-});
-
-test("the setup command shell-quotes the script and target", () => {
-	const guide = new SshSetupGuide("/opt/pi-teams/peer-ssh-setup.sh");
-	const command = guide.command("weird host'o");
-	assert.ok(command.startsWith("sh '/opt/pi-teams/peer-ssh-setup.sh' "));
-	assert.ok(command.includes("'weird host'\\''o'"));
-});
-
-test("peerAdd surfaces setup guidance and spawns no tunnel", async () => {
-	const { calls, runner } = makeRunner(() => Promise.resolve({
-		stdout: "", stderr: "Permission denied (publickey).", code: 255,
+		stdout: JSON.stringify({
+			op: "error", error: "peer-unreachable",
+			detail: "the host needs a password or a different key",
+			setup: "sh /opt/pi-teams/peer-ssh-setup 'peer.example'",
+		}), stderr: "", code: 0,
 	}));
 	const agent = new TeamAgent(runner, () => {});
-	await assert.rejects(() => agent.peerAdd("host", "h"), /peer-ssh-setup/);
-	assert.equal(calls.find((c) => c.file === "ssh"), undefined);
+	await assert.rejects(() => agent.peerAdd("peer.example", "hz"),
+		(err) => {
+			assert.match(err.message, /not usable non-interactively/);
+			assert.match(err.message, /peer-ssh-setup/);
+			return true;
+		});
+});
+
+test("peers lists what the broker owns; peerRemove resolves by host", async () => {
+	const runs = [];
+	const { runner } = makeRunner((_file, args) => {
+		runs.push(args);
+		if (args.includes("list")) {
+			return Promise.resolve({ stdout: JSON.stringify({
+				op: "peers", peers: [{ label: "hz", host: "hz-server",
+					online: true, ssh: "peer.example" }],
+			}), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	const peers = await agent.peers();
+	assert.equal(peers[0].host, "hz-server");
+	await agent.peerRemove("hz-server");
+	const remove = runs.find((a) =>
+		a.includes("peer") && a.includes("remove"));
+	assert.ok(remove && remove.includes("hz"));
 });
 
 test("ProcessRunner hides every child console", async () => {
@@ -771,132 +747,36 @@ test("WindowlessPython resolves a probed twin only off Windows", () => {
 	assert.equal(none.resolve(), "python3");
 });
 
-test("an SSH tunnel that dies on its own fires the exit callback", async () => {
-	const { calls, runner } = makeRunner(() =>
-		Promise.resolve({ stdout: JSON.stringify({ port: 1, token: "t" }),
-			stderr: "", code: 0 }));
-	const bridge = new SshPeerBridge("host", "label", runner);
-	let exits = 0;
-	bridge.onExit(() => {
-		exits += 1;
-	});
-	await bridge.connect();
-	const exit = calls[0]["on:exit"];
-	assert.equal(typeof exit, "function");
-	exit();
-	assert.equal(exits, 1);
+test("PendingRequests resolves a waiter from its reply", async () => {
+	const pending = new PendingRequests();
+	const wait = pending.register("r1", 5000);
+	pending.settle({
+		from: "x", to: "me", kind: "spawn-ack",
+		payload: { requestId: "r1", id: "f1", session: "s" },
+	}, "spawn-ack");
+	assert.deepEqual(await wait, { id: "f1", session: "s" });
 });
 
-test("peerAdd registers the bridge endpoint and peerRemove reaps it", async () => {
-	const sends = [];
-	const { calls, runner } = makeRunner((file, args) => {
-		sends.push(args);
-		if (file === "ssh") {
-			return Promise.resolve({ stdout: JSON.stringify({
-				port: 4444, token: "tok", name: "hz" }),
-				stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	const peer = await agent.peerAdd("peer.example", "hz");
-	assert.equal(peer, "hz");
-	const add = sends.find((a) => a.includes("peer") && a.includes("add"));
-	assert.ok(add, "no broker peer-add was sent");
-	assert.ok(add.includes("hz"));
-	assert.ok(add.some((a) => a.startsWith("127.0.0.1:")));
-	const tunnel = calls.find((c) => c.file === "ssh");
-	assert.ok(tunnel, "no ssh tunnel was spawned");
-	await agent.peerRemove("hz");
-	assert.equal(tunnel.killed, true);
-	const remove = sends.find((a) =>
-		a.includes("peer") && a.includes("remove"));
-	assert.ok(remove, "no broker peer-remove was sent");
+test("PendingRequests fails a waiter on a non-ack reply", async () => {
+	const pending = new PendingRequests();
+	const wait = pending.register("r2", 5000);
+	pending.settle({
+		from: "x", to: "me", kind: "spawn-error",
+		payload: { requestId: "r2" },
+	}, "spawn-ack");
+	assert.equal(await wait, null);
 });
 
-test("a tunnel exit prunes the peer from the broker", async () => {
-	const sends = [];
-	const { calls, runner } = makeRunner((file, args) => {
-		sends.push(args);
-		if (file === "ssh") {
-			return Promise.resolve({ stdout: JSON.stringify({
-				port: 3333, token: "t", name: "hz" }),
-				stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	await agent.peerAdd("host", "hz");
-	const tunnel = calls.find((c) => c.file === "ssh");
-	tunnel["on:exit"]();
-	await new Promise((r) => setTimeout(r, 20));
-	assert.ok(sends.some((a) => a.includes("remove") && a.includes("hz")));
+test("PendingRequests times out and cancels without leaking", async () => {
+	const pending = new PendingRequests();
+	assert.equal(await pending.register("r3", 10), null);
+	const waiting = pending.register("r4", 5000);
+	pending.cancelAll();
+	assert.equal(await waiting, null);
+	// A later register resolves at once after cancellation.
+	assert.equal(await pending.register("r5", 5000), null);
 });
 
-test("peerAdd closes the tunnel when broker registration fails", async () => {
-	const { calls, runner } = makeRunner((file) => {
-		if (file === "ssh") {
-			return Promise.resolve({ stdout: JSON.stringify({
-				port: 4000, token: "t" }), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "", stderr: "boom", code: 1 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	await assert.rejects(() => agent.peerAdd("host", "h"),
-		/rejected peer/);
-	const tunnel = calls.find((c) => c.file === "ssh");
-	assert.equal(tunnel.killed, true);
-});
-
-test("send carries this agent's id so a peer can reply to it", async () => {
-	const runs = [];
-	const { runner } = makeRunner((file, args) => {
-		runs.push(args);
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	await agent.send("beta:main", "spawn", "{}");
-	const sent = runs.find((a) => a.includes("send"));
-	assert.ok(sent, "send was not run");
-	const at = sent.indexOf("--id");
-	assert.ok(at >= 0, "send did not pass --id");
-	assert.equal(sent[at + 1], agent.id);
-});
-
-test("peerAdd remembers and peerRemove forgets the ssh target", async () => {
-	const peersFile = join(stateRoot, "peers-ssh.json");
-	writeFileSync(peersFile, "{}\n");
-	const { runner } = makeRunner((file) => {
-		if (file === "ssh") {
-			return Promise.resolve({ stdout: JSON.stringify({
-				port: 6001, token: "t", name: "hz" }), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	await agent.peerAdd("peer.example", "hz");
-	const saved = JSON.parse(readFileSync(peersFile, "utf-8"));
-	assert.equal(saved.hz, "peer.example");
-	await agent.peerRemove("hz");
-	const after = JSON.parse(readFileSync(peersFile, "utf-8"));
-	assert.equal(after.hz, undefined);
-});
-
-test("restorePeers rebuilds a remembered ssh peer", async () => {
-	const peersFile = join(stateRoot, "peers-ssh.json");
-	writeFileSync(peersFile, JSON.stringify({ hz: "peer.example" }) + "\n");
-	const { calls, runner } = makeRunner((file) => {
-		if (file === "ssh") {
-			return Promise.resolve({ stdout: JSON.stringify({
-				port: 6002, token: "t", name: "hz" }), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	await agent.restorePeers();
-	assert.ok(calls.some((c) => c.file === "ssh"),
-		"restorePeers did not rebuild the tunnel");
-});
 
 test("attachTo re-registers as a fork and notifies the parent", async () => {
 	const sends = [];
