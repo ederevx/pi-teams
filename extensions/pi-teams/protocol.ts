@@ -13,6 +13,17 @@ export interface TeamMessage {
 
 export type DeliverFn = (message: TeamMessage) => void;
 
+/** A spawned or attached teammate's id and session name. */
+export interface TeammateRef {
+	id: string;
+	session: string;
+}
+
+/** Mints a collision-resistant id for a request/response exchange. */
+export function requestId(prefix: string): string {
+	return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
 /** Default bound for an active team_wait, overridable with PI_TEAMS_WAIT. */
 export const DEFAULT_WAIT_SECONDS = 300;
 

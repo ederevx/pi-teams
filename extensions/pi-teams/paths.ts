@@ -37,28 +37,9 @@ function bundledSrcDir(): string {
 	return "";
 }
 
-/** The package's bundled scripts/ (the user-run setup helper), when
- *  loaded from a pi package. An explicit PI_TEAMS_BIN wins. */
-function bundledScriptsDir(): string {
-	try {
-		const here = dirname(fileURLToPath(import.meta.url));
-		const candidate = join(here, "..", "..", "scripts");
-		if (existsSync(join(candidate, "peer-ssh-setup.sh"))) {
-			return candidate;
-		}
-	} catch {
-		// not loaded as an ES module with a URL
-	}
-	return "";
-}
-
 const bundled = process.env.PI_TEAMS_BIN ? "" : bundledSrcDir();
 export const teamdBin = bundled ? join(bundled, "teamd.py") : join(binDir, "teamd");
 export const teamBin = bundled ? join(bundled, "team.py") : join(binDir, "team");
-const bundledScripts = process.env.PI_TEAMS_BIN ? "" : bundledScriptsDir();
-export const peerSetupScript = bundledScripts
-	? join(bundledScripts, "peer-ssh-setup.sh")
-	: join(binDir, "peer-ssh-setup");
 
 /**
  * How to launch another pi without a shell. Reusing the running runtime

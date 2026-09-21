@@ -1,11 +1,19 @@
 /**
- * Spawn routing. SpawnBackend is the one spawn interface; only the
- * backend differs by host, and SpawnRouter selects it. A local spawn
- * launches the process here; a peer spawn asks the peer host's main
- * agent to spawn.
+ * Spawn routing. One service owns the single spawn path: a host-less or
+ * this-host spawn launches the teammate's process here, any other host
+ * asks that host's main agent through the broker. Only the address
+ * differs, so no separate per-host backend exists.
  */
 
 import type { AgentDirectory } from "./directory.ts";
+import type { BrokerOps } from "./broker-ops.ts";
+import {
+	requestId,
+	type TeammateRef,
+} from "./protocol.ts";
+import type { PendingRequests } from "./pending.ts";
+
+export type { TeammateRef } from "./protocol.ts";
 
 export interface SpawnOptions {
 	provider?: string;
@@ -20,22 +28,13 @@ export interface SpawnOptions {
 	context?: "fresh" | "inherit";
 }
 
-export interface TeammateRef {
-	id: string;
-	session: string;
-}
-
-/** One spawn interface; only the backend differs by host. */
-export interface SpawnBackend {
-	spawn(
-		name: string,
-		task: string,
-		options: SpawnOptions,
-	): Promise<TeammateRef | null>;
-}
-
-/** Spawns the teammate's process on this host. */
-export class LocalSpawnBackend implements SpawnBackend {
+/** The single spawn path: local launch here, or a request to a peer
+ *  host's main agent over the broker's existing link. */
+export class SpawnService {
+	private readonly host: string;
+	private readonly directory: AgentDirectory;
+	private readonly broker: BrokerOps;
+	private readonly pending: PendingRequests;
 	private readonly launch: (
 		name: string,
 		task: string,
@@ -43,109 +42,54 @@ export class LocalSpawnBackend implements SpawnBackend {
 	) => TeammateRef;
 
 	constructor(
+		host: string,
+		directory: AgentDirectory,
+		broker: BrokerOps,
+		pending: PendingRequests,
 		launch: (
 			name: string,
 			task: string,
 			options: SpawnOptions,
 		) => TeammateRef,
 	) {
+		this.host = host;
+		this.directory = directory;
+		this.broker = broker;
+		this.pending = pending;
 		this.launch = launch;
 	}
 
 	async spawn(
+		host: string,
 		name: string,
 		task: string,
 		options: SpawnOptions,
 	): Promise<TeammateRef | null> {
-		return this.launch(name, task, options);
-	}
-}
-
-/** Asks a linked peer host's main agent to spawn the teammate. The peer
- *  owns the process and session; this agent only requested the work. */
-export class PeerSpawnBackend implements SpawnBackend {
-	private readonly host: string;
-	private readonly directory: AgentDirectory;
-	private readonly send: (
-		to: string,
-		kind: string,
-		text: string,
-	) => Promise<string>;
-	private readonly wait: (
-		requestId: string,
-		timeoutMs: number,
-	) => Promise<TeammateRef | null>;
-
-	constructor(
-		host: string,
-		directory: AgentDirectory,
-		send: (to: string, kind: string, text: string) => Promise<string>,
-		wait: (requestId: string, timeoutMs: number) =>
-			Promise<TeammateRef | null>,
-	) {
-		this.host = host;
-		this.directory = directory;
-		this.send = send;
-		this.wait = wait;
-	}
-
-	async spawn(
-		name: string,
-		task: string,
-		options: SpawnOptions,
-	): Promise<TeammateRef | null> {
-		const target = await this.directory.mainAgent(this.host);
-		if (!target) return null;
-		const requestId =
-			`spawn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-		const pending = this.wait(requestId, 15000);
-		await this.send(target.id, "spawn", JSON.stringify({
-			task, name, requestId,
-		}));
-		return pending;
-	}
-}
-
-/** A host address is routed through one interface: a host-less or
- *  this-host spawn uses the local backend, any other host is a linked
- *  peer whose request travels over the broker's peer link. */
-export class SpawnRouter {
-	private readonly host: string;
-	private readonly local: SpawnBackend;
-	private readonly makePeer: (host: string) => SpawnBackend;
-	private readonly peers = new Map<string, SpawnBackend>();
-
-	constructor(
-		host: string,
-		local: SpawnBackend,
-		makePeer: (host: string) => SpawnBackend,
-	) {
-		this.host = host;
-		this.local = local;
-		this.makePeer = makePeer;
-	}
-
-	backendFor(host: string): SpawnBackend {
-		if (!host || host === this.host) return this.local;
-		let backend = this.peers.get(host);
-		if (!backend) {
-			backend = this.makePeer(host);
-			this.peers.set(host, backend);
+		if (!host || host === this.host) {
+			return this.launch(name, task, options);
 		}
-		return backend;
+		return this.remote(host, name, task, options);
 	}
 
-	spawn(
+	private async remote(
 		host: string,
 		name: string,
 		task: string,
 		options: SpawnOptions,
 	): Promise<TeammateRef | null> {
-		return this.backendFor(host).spawn(name, task, options);
-	}
-
-	/** Releases the cached per-host backends; GC on deregister. */
-	clear(): void {
-		this.peers.clear();
+		const target = await this.directory.mainAgent(host);
+		if (!target) return null;
+		const id = requestId("spawn");
+		const wait = this.pending.register(id, 15000);
+		await this.broker.send(target.id, "spawn", JSON.stringify({
+			task,
+			name,
+			requestId: id,
+			provider: options.provider,
+			model: options.model,
+			thinking: options.thinking,
+			context: options.context,
+		}));
+		return wait;
 	}
 }

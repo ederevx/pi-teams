@@ -11,7 +11,8 @@ coordinate natively instead of through the shared tree.
 ## What it provides
 
 - **Broker** (`src/teamd.py`, a thin CLI over `src/team_broker.py`,
-  `src/team_root.py`, and `src/peer_link.py`): a loopback TCP registry
+  `src/team_root.py`, `src/peer_link.py`, and `src/peer_tunnel.py`): a
+  loopback TCP registry
   and relay on `127.0.0.1` with an ephemeral port and a random token, published
   atomically in `TEAM_ROOT/endpoint` (default `~/.local/state/
   pi-teams`). Every connection must present the token in a hello
@@ -135,15 +136,16 @@ Two machines that already have SSH between them can federate their
 pi-teams brokers, so an agent on one host spawns a teammate on the other
 and messages cross both ways.
 
-- **One-call setup**: `team_peer add <ssh-host>` reads the peer's
-  loopback endpoint over the existing SSH session (read-only), opens a
-  loopback-bound `ssh -L` tunnel to that broker, and links the two
-  brokers. No broker rebinding, no TLS, no manual tunnel.
+- **One-call setup**: `team_peer add <ssh-host>` asks the broker to
+  read the peer's loopback endpoint over the existing SSH session and
+  own a loopback-bound `ssh -L` tunnel to that broker, then links the
+  two brokers. No broker rebinding, no TLS, no manual tunnel, and the
+  agent never touches ssh.
 - **Remote spawn**: `team_spawn` takes an optional `host`. One spawn
-  interface routes internally: a host-less or this-host request uses the
-  local backend (it launches the process), and any other host resolves
-  that host's main agent through the same agent directory and asks it to
-  spawn, so the peer host owns the process, session, and reaping. The
+  service routes internally: a host-less or this-host request launches
+  the process here, and any other host resolves that host's main agent
+  through the same agent directory and asks it to spawn, so the peer
+  host owns the process, session, and reaping. The
   caller never branches on local versus ssh, and the teammate reports
   back through the federation. `team_wait` waits for it by id.
 - **Bidirectional messaging**: every agent id carries a host label
@@ -151,16 +153,16 @@ and messages cross both ways.
   relayed across the peer link (the `team_send` tool or `/team send`),
   and `team_ls` lists the federated agents. An undeliverable target
   reports back. Local `/team send`, `team_wait`, and reports are
-  unchanged.
+  unchanged. A `/team kill` of a peer-hosted id is routed to its host.
 - **Lifetime**: a teammate spawned for a remote parent is kept alive
   until the peer link drops, then reaped on its own host by
   connection-based GC. Removing a peer closes its ssh tunnel, and a
   tunnel that dies on its own prunes the broker's link instead of
   pointing at a dead port. Pid signalling never crosses hosts.
-- **Durable links**: the extension remembers each peer's SSH target and
-  rebuilds the tunnel and broker link on the next session, so a reload
-  or restart never leaves the broker pointing at a dead loopback port.
-  A peer that cannot be reached is retried on the next session.
+- **Durable links**: the broker remembers each peer's SSH target and
+  rebuilds the tunnel and broker link when the broker restarts, so a
+  reload or restart never leaves the broker pointing at a dead loopback
+  port.
 - **Password-only hosts**: the peer path is non-interactive, so a host
   that needs a password or has an unknown key fails closed with a
   guided error instead of hanging. The agent then tells the user to run
@@ -197,12 +199,14 @@ That chains, in order:
   a windowless Python interpreter there; `spawnTask` builds
   the teammate template from a task alone, resolves pi from the running
   runtime, refuses an inherit request without a parent session, and no
-  custom spawn path exists; `SshPeerBridge` reads the endpoint, opens
-  the tunnel, and reaps it on close; a failed peer-add closes its
-  tunnel and a tunnel exit prunes the broker link; every outbound
-  `send` carries this agent's id so a peer's reply and a remote fork's
-  parent reach the real agent; a remembered peer is rebuilt on the next
-  session; a report is delivered as a message rather than held by a
+  custom spawn path exists; one spawn service addresses a local process
+  or a peer host's main agent; `peerAdd` asks the broker to own the
+  ssh tunnel and relays its setup guidance on failure; the broker-op
+  client carries every request/response call; a pending request resolves
+  from its reply, fails on a non-ack, and times out or cancels without
+  leaking; every outbound `send` carries this agent's id so a peer's
+  reply and a remote fork's parent reach the real agent; a report is
+  delivered as a message rather than held by a
   waiter; a teammate may only reach its own team while a root is
   unrestricted; an attach re-registers the session as a fork and
   notifies the parent, an inbound attach request converts the session

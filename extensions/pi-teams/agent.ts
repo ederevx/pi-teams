@@ -1,17 +1,11 @@
 /**
  * TeamAgent: the pi session's live identity and every team operation. It
- * owns the hold connection, the launched teammates, peer bridges, the
+ * owns the hold connection, the launched teammates, the spawn/attach
  * spawn/attach request bookkeeping, the waiter inbox, and lifecycle
  * cleanup. Identity is read from the environment once, then owned here.
  */
 
-import {
-	existsSync,
-	readFileSync,
-	renameSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -27,24 +21,19 @@ import {
 	WindowlessPython,
 	type InterpreterResolver,
 } from "./interpreter.ts";
-import {
-	SshPeerBridge,
-	type BridgeFactory,
-	type PeerBridge,
-	type PeerEndpoint,
-} from "./peer.ts";
+import { BrokerOps, type PeerInfo } from "./broker-ops.ts";
 import { AgentDirectory, type AgentInfo } from "./directory.ts";
 import {
-	LocalSpawnBackend,
-	PeerSpawnBackend,
-	SpawnRouter,
+	SpawnService,
 	type SpawnOptions,
 	type TeammateRef,
 } from "./spawn.ts";
+import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
 import {
 	DEFAULT_WAIT_SECONDS,
 	WAIT_POLL_MS,
+	requestId,
 	type DeliverFn,
 	type TeamMessage,
 } from "./protocol.ts";
@@ -52,7 +41,6 @@ import {
 export class TeamAgent {
 	private readonly runner: ProcessHost;
 	private readonly deliver: DeliverFn;
-	private readonly makeBridge: BridgeFactory;
 	private readonly python: string;
 	private readonly windowless: InterpreterResolver;
 	id: string = "";
@@ -65,15 +53,10 @@ export class TeamAgent {
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
 	private readonly teammates = new Set<SpawnedProcess>();
-	private readonly bridges = new Map<string, PeerBridge>();
-	private readonly openingBridges = new Set<PeerBridge>();
-	private readonly peersFile: string;
 	private readonly directory: AgentDirectory;
-	private readonly spawnRouter: SpawnRouter;
-	private readonly pendingSpawns =
-		new Map<string, (ref: TeammateRef | null) => void>();
-	private readonly pendingAttaches =
-		new Map<string, (ref: TeammateRef | null) => void>();
+	private readonly brokerOps: BrokerOps;
+	private readonly pending = new PendingRequests();
+	private readonly spawns: SpawnService;
 	private readonly inbox = new ResultInbox();
 	readonly host: string;
 	private sessionFile = "";
@@ -82,33 +65,22 @@ export class TeamAgent {
 	constructor(
 		runner: ProcessHost,
 		deliver: DeliverFn = () => {},
-		bridgeFactory?: BridgeFactory,
 		windowlessFactory: (python: string) => InterpreterResolver =
 			(python) => new WindowlessPython(python),
 	) {
 		this.runner = runner;
 		this.deliver = deliver;
-		this.makeBridge = bridgeFactory
-			?? ((sshTarget, label) =>
-				new SshPeerBridge(sshTarget, label, runner));
 		this.python = resolvePython();
 		this.windowless = windowlessFactory(this.python);
-		this.peersFile = join(stateRoot, "peers-ssh.json");
 		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
 		this.id = process.env.TEAM_ID || this.makeMainId();
 		this.role = process.env.TEAM_ID ? "fork" : "main";
 		this.parent = process.env.TEAM_PARENT_ID || "";
 		this.directory = new AgentDirectory(() => this.snapshot(), this.host);
-		this.spawnRouter = new SpawnRouter(
-			this.host,
-			new LocalSpawnBackend((name, task, options) =>
-				this.spawnTask(name, task, options)),
-			(peerHost) => new PeerSpawnBackend(
-				peerHost,
-				this.directory,
-				(to, kind, text) => this.send(to, kind, text),
-				(requestId, ms) => this.waitForSpawn(requestId, ms)),
-		);
+		this.brokerOps = new BrokerOps(runner, this.python);
+		this.spawns = new SpawnService(
+			this.host, this.directory, this.brokerOps, this.pending,
+			(name, task, options) => this.spawnTask(name, task, options));
 	}
 
 	/** A fresh main-agent id. The host label makes the id globally
@@ -239,7 +211,7 @@ export class TeamAgent {
 			return;
 		}
 		if (message.kind === "spawn-ack" || message.kind === "spawn-error") {
-			this.resolveSpawn(message);
+			this.pending.settle(message, "spawn-ack");
 			return;
 		}
 		if (message.kind === "spawn") {
@@ -247,7 +219,7 @@ export class TeamAgent {
 			return;
 		}
 		if (message.kind === "attach-ack" || message.kind === "attach-error") {
-			this.resolveAttach(message);
+			this.pending.settle(message, "attach-ack");
 			return;
 		}
 		if (message.kind === "attach") {
@@ -303,30 +275,14 @@ export class TeamAgent {
 	}
 
 	async snapshot(): Promise<AgentInfo[]> {
-		const result = await this.runner.run(
-			this.python,
-			[teamBin, "--root", stateRoot, "ls"],
-			{ timeout: 3000 },
-		);
-		try {
-			const parsed = JSON.parse(result.stdout as string);
-			return (parsed.agents || []) as AgentInfo[];
-		} catch {
-			return [];
-		}
+		return this.brokerOps.snapshot();
 	}
 
 	async send(to: string, kind: string, text: string): Promise<string> {
 		// The peer's spawn handler replies to the message's `from`, and a
 		// spawned fork is parented to it, so an unregistered sender would
 		// strand both. Hand this agent's id to the transient client.
-		const result = await this.runner.run(
-			this.python,
-			[teamBin, "--root", stateRoot, "send",
-				"--id", this.id, to, kind, text],
-			{ timeout: 3000 },
-		);
-		return String(result.stdout).trim();
+		return this.brokerOps.send(to, kind, text, this.id);
 	}
 
 	/** Whether this session is a team member: spawned as a teammate (role
@@ -411,65 +367,39 @@ export class TeamAgent {
 	}
 
 	/** Spawns a teammate on `host` (empty or this host = local) behind a
-	 *  single interface; the router selects the local or peer backend. */
+	 *  single interface; the service addresses the local process or the
+	 *  peer host's main agent. */
 	async spawn(
 		host: string,
 		name: string,
 		task: string,
 		options: SpawnOptions = {},
 	): Promise<TeammateRef | null> {
-		const ref = await this.spawnRouter.spawn(host, name, task, options);
+		const ref = await this.spawns.spawn(host, name, task, options);
 		// Spawning a teammate makes this session a team member too, so it
 		// can message and wait without a separate attach.
 		if (ref) this.teamOwner = true;
 		return ref;
 	}
 
-	private waitForSpawn(
-		requestId: string,
-		timeoutMs: number,
-	): Promise<TeammateRef | null> {
-		return new Promise((resolve) => {
-			if (this.closed) {
-				resolve(null);
-				return;
-			}
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const settle = (ref: TeammateRef | null): void => {
-				if (timer) clearTimeout(timer);
-				this.pendingSpawns.delete(requestId);
-				resolve(ref);
-			};
-			this.pendingSpawns.set(requestId, settle);
-			timer = setTimeout(() => settle(null), timeoutMs);
-		});
-	}
-
-	private resolveSpawn(message: TeamMessage): void {
-		const payload = (message.payload ?? {}) as {
-			requestId?: string; id?: string; session?: string;
-		};
-		if (!payload.requestId) return;
-		const settle = this.pendingSpawns.get(payload.requestId);
-		if (!settle) return;
-		this.pendingSpawns.delete(payload.requestId);
-		if (message.kind === "spawn-ack" && payload.id) {
-			settle({ id: payload.id, session: payload.session || payload.id });
-		} else {
-			settle(null);
-		}
-	}
-
 	/** A peer host asked this agent to spawn a teammate: this host owns
-	 *  the process and session and reports the new id back. */
+	 *  the process and session and reports the new id back. Context
+	 *  inheritance is valid only when both agents share a host. */
 	private handleSpawnRequest(message: TeamMessage): void {
 		const payload = (message.payload ?? {}) as {
 			task?: string; name?: string; requestId?: string;
+			provider?: string; model?: string; thinking?: string;
+			context?: "fresh" | "inherit";
 		};
 		if (!payload.task) return;
+		if (!this.sameHost(message.from)) payload.context = "fresh";
 		try {
 			const ref = this.spawnTask(payload.name || "", payload.task, {
 				parent: message.from,
+				provider: payload.provider,
+				model: payload.model,
+				thinking: payload.thinking,
+				context: payload.context,
 			});
 			void this.send(message.from, "spawn-ack", JSON.stringify({
 				requestId: payload.requestId, id: ref.id,
@@ -480,6 +410,11 @@ export class TeamAgent {
 				requestId: payload.requestId,
 			}));
 		}
+	}
+
+	/** Whether an agent id names an agent on this host. */
+	private sameHost(agentId: string): boolean {
+		return !agentId.includes(":") || agentId.startsWith(`${this.host}:`);
 	}
 
 	/** Re-registers this running session as a teammate of `parent`. The
@@ -540,46 +475,11 @@ export class TeamAgent {
 	): Promise<TeammateRef | null> {
 		await this.requireAttachable(target);
 		if (this.closed) return null;
-		const requestId =
-			`attach-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-		const pending = this.waitForAttach(requestId, 15000);
-		await this.send(target, "attach", JSON.stringify({ requestId, name }));
+		const id = requestId("attach");
+		const pending = this.pending.register(id, 15000);
+		await this.send(target, "attach", JSON.stringify(
+			{ requestId: id, name }));
 		return pending;
-	}
-
-	private waitForAttach(
-		requestId: string,
-		timeoutMs: number,
-	): Promise<TeammateRef | null> {
-		return new Promise((resolve) => {
-			if (this.closed) {
-				resolve(null);
-				return;
-			}
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const settle = (ref: TeammateRef | null): void => {
-				if (timer) clearTimeout(timer);
-				this.pendingAttaches.delete(requestId);
-				resolve(ref);
-			};
-			this.pendingAttaches.set(requestId, settle);
-			timer = setTimeout(() => settle(null), timeoutMs);
-		});
-	}
-
-	private resolveAttach(message: TeamMessage): void {
-		const payload = (message.payload ?? {}) as {
-			requestId?: string; id?: string; session?: string;
-		};
-		if (!payload.requestId) return;
-		const settle = this.pendingAttaches.get(payload.requestId);
-		if (!settle) return;
-		this.pendingAttaches.delete(payload.requestId);
-		if (message.kind === "attach-ack" && payload.id) {
-			settle({ id: payload.id, session: payload.session || payload.id });
-		} else {
-			settle(null);
-		}
 	}
 
 	/** Another agent asked this running session to become its teammate:
@@ -612,11 +512,7 @@ export class TeamAgent {
 	}
 
 	async terminate(agentId: string): Promise<void> {
-		await this.runner.run(
-			this.python,
-			[teamBin, "--root", stateRoot, "terminate", agentId],
-			{ timeout: 3000 },
-		);
+		await this.brokerOps.terminate(agentId);
 	}
 
 	/** The common teammate template: the caller supplies only the task and
@@ -758,146 +654,24 @@ export class TeamAgent {
 		this.teammates.clear();
 	}
 
-	private closeBridges(): void {
-		// A bridge still opening is not yet in `bridges`; close it too so a
-		// deregister during connect cannot orphan its ssh tunnel.
-		for (const bridge of this.openingBridges) bridge.close();
-		this.openingBridges.clear();
-		for (const bridge of this.bridges.values()) bridge.close();
-		this.bridges.clear();
+	/** Links a peer host's broker. The broker owns the ssh tunnel and
+	 *  every transport detail; this asks it to add the peer and returns
+	 *  the linked peer (label, advertised host, online, ssh). */
+	async peerAdd(sshTarget: string, label: string): Promise<PeerInfo> {
+		return this.brokerOps.peerAdd(label || sshTarget, sshTarget);
 	}
 
-	/** Links a peer host's broker. The bridge owns every transport
-	 *  detail (SSH or otherwise); this method only registers the loopback
-	 *  endpoint with the local broker and keeps the bridge for reaping.
-	 *  Returns the peer label. */
-	async peerAdd(sshTarget: string, label: string): Promise<string> {
-		const bridge = this.makeBridge(sshTarget, label);
-		this.openingBridges.add(bridge);
-		let endpoint: PeerEndpoint;
-		try {
-			endpoint = await bridge.connect();
-			if (bridge.peerHost && bridge.peerHost === this.host) {
-				throw new Error(
-					`peer ${sshTarget} reports host label "${bridge.peerHost}", ` +
-					"which collides with this host; set PI_TEAMS_HOST to a " +
-					"unique label on one host");
-			}
-			await this.linkPeer(bridge.name, endpoint);
-		} catch (err) {
-			this.openingBridges.delete(bridge);
-			bridge.close();
-			throw err;
-		}
-		this.openingBridges.delete(bridge);
-		this.bridges.set(bridge.name, bridge);
-		this.rememberPeer(bridge.name, sshTarget);
-		// A tunnel that dies on its own must not leave a peer pointing
-		// at a dead loopback port: drop it and prune the broker's entry.
-		bridge.onExit(() => {
-			if (this.bridges.get(bridge.name) === bridge) {
-				this.bridges.delete(bridge.name);
-			}
-			void this.unlinkPeer(bridge.name);
-		});
-		return bridge.name;
+	/** Removes a peer by its label or its advertised host label. */
+	async peerRemove(name: string): Promise<void> {
+		const peers = await this.brokerOps.peers();
+		const match = peers.find(
+			(p) => p.label === name || p.host === name);
+		await this.brokerOps.peerRemove(match ? match.label : name);
 	}
 
-	async peerRemove(host: string): Promise<void> {
-		const bridge = this.bridges.get(host);
-		this.bridges.delete(host);
-		this.forgetPeer(host);
-		bridge?.close();
-		await this.unlinkPeer(host);
-	}
-
-	/** The durable SSH-peer map, label -> ssh target. The broker's
-	 *  persisted endpoint is a loopback tunnel port that exists only while
-	 *  this process's ssh tunnel lives, so the extension owns the target
-	 *  and rebuilds the tunnel on the next session. */
-	private readPeerTargets(): Record<string, string> {
-		try {
-			const parsed = JSON.parse(readFileSync(this.peersFile, "utf-8"));
-			return parsed && typeof parsed === "object" ? parsed : {};
-		} catch {
-			return {};
-		}
-	}
-
-	private writePeerTargets(targets: Record<string, string>): void {
-		const tmp = `${this.peersFile}.tmp`;
-		try {
-			writeFileSync(tmp, JSON.stringify(targets, null, 2) + "\n");
-			renameSync(tmp, this.peersFile);
-		} catch {
-			try {
-				unlinkSync(tmp);
-			} catch {
-				// the temp file was never written
-			}
-		}
-	}
-
-	/** Labels of host brokers linked via team_peer (durable map). */
-	linkedPeers(): string[] {
-		return Object.keys(this.readPeerTargets()).sort();
-	}
-
-	/** Resolves a peer name to the ssh target that reaches it: a
-	 *  remembered label maps to its stored target, anything else is used
-	 *  as given. This lets team_peer add reuse an already-linked peer by
-	 *  the label its agents are addressed by. */
-	peerTarget(name: string): string {
-		return this.readPeerTargets()[name] ?? name;
-	}
-
-	private rememberPeer(label: string, sshTarget: string): void {
-		const targets = this.readPeerTargets();
-		targets[label] = sshTarget;
-		this.writePeerTargets(targets);
-	}
-
-	private forgetPeer(label: string): void {
-		const targets = this.readPeerTargets();
-		if (label in targets) {
-			delete targets[label];
-			this.writePeerTargets(targets);
-		}
-	}
-
-	/** Rebuilds every remembered peer link. An ssh tunnel is owned by this
-	 *  process, so a reload leaves the broker pointing at a dead loopback
-	 *  port; re-resolving the peer endpoint restores it. A failure stays
-	 *  in the map so the next session retries. */
-	async restorePeers(): Promise<void> {
-		for (const [label, sshTarget] of Object.entries(this.readPeerTargets())) {
-			if (this.bridges.has(label)) continue;
-			try {
-				await this.peerAdd(sshTarget, label);
-			} catch {
-				// unreachable now; keep the target for the next session
-			}
-		}
-	}
-
-	private async linkPeer(
-		host: string,
-		endpoint: PeerEndpoint,
-	): Promise<void> {
-		const result = await this.runner.run(this.python, [
-			teamBin, "--root", stateRoot, "peer", "add", host,
-			`${endpoint.host}:${endpoint.port}:${endpoint.token}`,
-		]);
-		if (result.code !== 0) {
-			throw new Error(
-				`broker rejected peer ${host}: ${result.stderr.trim()}`);
-		}
-	}
-
-	private async unlinkPeer(host: string): Promise<void> {
-		await this.runner.run(this.python, [
-			teamBin, "--root", stateRoot, "peer", "remove", host,
-		]);
+	/** The broker's linked peers (label, host, online, ssh). */
+	async peers(): Promise<PeerInfo[]> {
+		return this.brokerOps.peers();
 	}
 
 	sessionDirLabel(): string {
@@ -985,19 +759,14 @@ export class TeamAgent {
 		// Deregister is terminal: a race that registers a pending request
 		// after this point must resolve at once instead of leaking a timer.
 		this.closed = true;
-		for (const settle of [...this.pendingSpawns.values()]) settle(null);
-		this.pendingSpawns.clear();
-		for (const settle of [...this.pendingAttaches.values()]) settle(null);
-		this.pendingAttaches.clear();
+		this.pending.cancelAll();
 		this.inbox.cancelAll();
-		this.spawnRouter.clear();
 	}
 
 	deregister(): void {
 		this.cancelWaits();
 		this.stopHold();
 		this.stopTeammates();
-		this.closeBridges();
 		this.clearState();
 	}
 
