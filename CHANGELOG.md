@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.0 — 2026-09-21
+
+- Split the monolithic extension and broker into responsibility modules;
+  enforce one top-level class per file and a file-size cap in the OOP lint.
+- Close GC gaps: orphaned ssh tunnels during a peer-add/deregister race,
+  leaked sockets on bind/connect failure, stale broker locks, leaked
+  heartbeat/watcher threads, and peer-map temp files.
+
 ## v0.3.14 — 2026-09-20
 
 - Drop the `/team-reload` command; the broker already self-restarts on

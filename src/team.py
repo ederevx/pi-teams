@@ -1,402 +1,116 @@
 #!/usr/bin/env python3
-"""team - the pi-teams client.
+"""team - the pi-teams client entry point.
 
-Speaks the broker protocol over its loopback TCP endpoint. Identity
-comes from the environment (TEAM_ID, TEAM_NAME, TEAM_ROLE,
-TEAM_PARENT_ID, TEAM_SESSION) or is derived from the process. One
-TeamClient holds one persistent connection: while it stays open the
-agent is reachable and broker relays arrive on it. The CLI offers
-register, ls, send, follow, hold, terminate, and deregister. Teammates
-are spawned only by the extension's structured team_spawn tool, never
-by an arbitrary client command.
-
-Liveness is connection-based on every platform: hold() keeps the
-endpoint open and exits when the broker closes it (deregister), a
-terminate notice arrives (parent gone or explicit kill), or the
-connection drops (broker down). Nothing here kills processes or names
-pids, so the client is portable across POSIX and Windows.
+Composes the client from TeamClient and exposes the CLI: register, ls,
+send, follow, hold, terminate, deregister, and peer add/remove.
+Teammates are spawned only by the extension's structured team_spawn
+tool, never by an arbitrary client command. The CLI takes no routing
+logic of its own; it only parses arguments and drives TeamClient.
 """
 
 import argparse
 import json
-import os
-import random
-import socket
 import sys
-import threading
-import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from team_client import TeamClient
+from team_root import DEFAULT_ROOT
 
-_teamd_dir = os.path.dirname(os.path.abspath(__file__))
-if os.path.exists(os.path.join(_teamd_dir, "teamd.py")):
-    from teamd import DEFAULT_ROOT, TeamRoot  # noqa: E402
-else:
-    # Installed layout names the broker binary `teamd` without a .py
-    # extension, which import machinery cannot load; load it by path.
-    import importlib.machinery
-    import importlib.util
-
-    _loader = importlib.machinery.SourceFileLoader(
-        "teamd", os.path.join(_teamd_dir, "teamd")
-    )
-    _spec = importlib.util.spec_from_loader("teamd", _loader)
-    _teamd = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_teamd)
-    DEFAULT_ROOT = _teamd.DEFAULT_ROOT
-    TeamRoot = _teamd.TeamRoot
-
-HEARTBEAT_DEFAULT = 6.0
+# Existing importers name team for the client class; keep re-exporting it.
 
 
-class TeamClient:
-    """One agent's persistent connection to the team endpoint."""
+class ClientCli:
+    """The team command-line surface, separate from client behavior."""
 
-    def __init__(self, root=None, timeout=2.0, heartbeat=HEARTBEAT_DEFAULT):
-        self.root = TeamRoot(root or DEFAULT_ROOT)
-        self.timeout = timeout
-        self.heartbeat = heartbeat
-        self.id = os.environ.get("TEAM_ID")
-        self.name = os.environ.get("TEAM_NAME")
-        self.role = os.environ.get("TEAM_ROLE")
-        self.parent = os.environ.get("TEAM_PARENT_ID")
-        self.session = os.environ.get("TEAM_SESSION")
-        self.owner_pid = os.environ.get("TEAM_OWNER_PID")
-        self.busy_file = os.environ.get("TEAM_BUSY_FILE")
-        self._conn = None
-        self._readbuf = b""
+    @staticmethod
+    def parse_payload(text):
+        try:
+            return json.loads(text)
+        except ValueError:
+            return text
 
-    # -- identity ----------------------------------------------------
+    @staticmethod
+    def add_identity_args(parser):
+        parser.add_argument("--id")
+        parser.add_argument("--name")
+        parser.add_argument("--role")
+        parser.add_argument("--parent")
+        parser.add_argument("--session")
+        parser.add_argument("--owner-pid")
+        parser.add_argument("--busy-file")
 
-    def ensure_id(self):
-        if not self.id:
-            self.id = "cli-%d-%s" % (
-                os.getpid(),
-                "%08x" % random.getrandbits(32),
-            )
-        if not self.name:
-            self.name = self.id
-        return self.id
+    @staticmethod
+    def apply_identity(client, args):
+        client.set_identity(args.id, args.name, args.role, args.parent,
+                            args.session, args.owner_pid, args.busy_file)
 
-    def meta(self):
-        return {
-            "id": self.ensure_id(),
-            "name": self.name,
-            "role": self.role or "cli",
-            "parent": self.parent,
-            "cwd": os.getcwd(),
-            "session": self.session,
-            "owner_pid": self.owner_pid,
-            "busy_file": self.busy_file,
-        }
-
-    def set_identity(self, agent_id=None, name=None, role=None, parent=None,
-                     session=None, owner_pid=None, busy_file=None):
-        # Explicit identity from CLI arguments (pi.exec cannot pass env
-        # on Windows, so the extension hands identity over as args).
-        if agent_id:
-            self.id = agent_id
-        if name:
-            self.name = name
-        if role:
-            self.role = role
-        if parent:
-            self.parent = parent
-        if session:
-            self.session = session
-        if owner_pid:
-            self.owner_pid = owner_pid
-        if busy_file:
-            self.busy_file = busy_file
-
-    # -- transport ---------------------------------------------------
-
-    def connect(self):
-        if self._conn is not None:
-            return self._conn
-        endpoint = self.root.read_endpoint()
-        if not endpoint:
-            raise OSError("no teamd endpoint under %s" % self.root.base)
-        self._conn = self._open(endpoint)
-        self._handshake(endpoint)
-        return self._conn
-
-    def _open(self, endpoint):
-        conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        conn.settimeout(self.timeout)
-        conn.connect((endpoint["host"], endpoint["port"]))
-        return conn
-
-    def _handshake(self, endpoint):
-        self._send_line({"op": "hello", "token": endpoint.get("token") or ""})
-        reply = self._read_line()
-        if not reply or reply.get("op") != "ack":
-            self.close()
-            raise OSError("teamd handshake failed: %r" % (reply,))
-
-    def close(self):
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except OSError:
-                pass
-            self._conn = None
-
-    def _send_line(self, obj):
-        data = json.dumps(obj, separators=(",", ":")) + "\n"
-        self.connect().sendall(data.encode())
-
-    def _read_line(self):
-        while b"\n" not in self._readbuf:
-            chunk = self.connect().recv(65536)
-            if not chunk:
-                return None
-            self._readbuf += chunk
-        line, rest = self._readbuf.split(b"\n", 1)
-        self._readbuf = rest
-        return json.loads(line.decode("utf-8"))
-
-    def send(self, obj):
-        self._send_line(obj)
-
-    def request(self, op, expected=("ack", "error", "registry"), **fields):
-        self._send_line(dict(fields, op=op))
-        while True:
-            reply = self._read_line()
-            if reply is None:
-                return {"op": "error", "error": "closed"}
-            if reply.get("op") in expected:
-                return reply
-
-    # -- operations --------------------------------------------------
-
-    def register(self):
-        reply = self.request("register", expected=("ack", "error"),
-                             **self.meta())
-        if self.heartbeat and self._conn is not None:
-            threading.Thread(target=self._heartbeat, daemon=True).start()
-        return reply
-
-    def send_msg(self, to, kind, payload):
-        return self.request(
-            "send", expected=("ack", "error"), to=to,
-            **{"from": self.ensure_id()}, kind=kind, payload=payload,
-            ts=time.time(),
+    def main(self, argv=None):
+        parser = argparse.ArgumentParser(
+            prog="team", description="pi-teams client"
         )
+        parser.add_argument("--root", default=DEFAULT_ROOT)
+        sub = parser.add_subparsers(dest="command")
 
-    def ls(self):
-        return self.request("ls", expected=("registry", "error"))
+        p_register = sub.add_parser("register")
+        self.add_identity_args(p_register)
+        sub.add_parser("ls")
+        sub.add_parser("deregister")
+        p_follow = sub.add_parser("follow")
+        self.add_identity_args(p_follow)
+        p_hold = sub.add_parser("hold")
+        self.add_identity_args(p_hold)
+        p_send = sub.add_parser("send")
+        self.add_identity_args(p_send)
+        p_send.add_argument("to")
+        p_send.add_argument("kind", nargs="?", default="text")
+        p_send.add_argument("payload", nargs="?", default="")
+        p_term = sub.add_parser("terminate")
+        p_term.add_argument("to")
+        p_term.add_argument("why", nargs="?", default="requested")
+        p_peer = sub.add_parser("peer")
+        p_peer.add_argument("action", choices=("add", "remove"))
+        p_peer.add_argument("host")
+        p_peer.add_argument("endpoint", nargs="?")
 
-    def terminate(self, agent_id, why="requested"):
-        return self.request("terminate", expected=("ack", "error"),
-                            to=agent_id, why=why)
-
-    def peer_add(self, host, endpoint):
-        return self.request("peer-add", expected=("ack", "error"),
-                            host=host, endpoint=endpoint)
-
-    def peer_remove(self, host):
-        return self.request("peer-remove", expected=("ack", "error"),
-                            host=host)
-
-    def deregister(self):
-        reply = self.request("deregister", expected=("ack", "error"))
-        self.close()
-        return reply
-
-    # -- streaming ----------------------------------------------------
-
-    def _heartbeat(self):
-        while self._conn is not None:
-            time.sleep(self.heartbeat)
-            if self._conn is not None:
-                try:
-                    state = self._state()
-                    self._send_line({
-                        "op": "ping",
-                        "busy": state == "busy",
-                        "waiting": state == "waiting",
-                    })
-                except OSError:
-                    break
-
-    def _state(self):
-        # The spawner publishes 1=busy, 2=waiting, 0/absent=idle. A
-        # waiting agent is not working, but the broker keeps it exempt
-        # from idle GC, so it is reported separately from busy.
-        if not self.busy_file:
-            return "idle"
-        try:
-            with open(self.busy_file) as fh:
-                value = fh.read().strip()
-        except (OSError, IOError):
-            return "idle"
-        return {"1": "busy", "2": "waiting"}.get(value, "idle")
-
-    def follow(self, on_message=None, ready=None):
-        self.register()
-        if ready is not None:
-            ready()
-        try:
-            while True:
-                try:
-                    msg = self._read_line()
-                except socket.timeout:
-                    continue
-                except OSError:
-                    break
-                if msg is None:
-                    break
-                if on_message is not None:
-                    on_message(msg)
-                else:
-                    print(json.dumps(msg, separators=(",", ":")),
-                          flush=True)
-        finally:
-            self.close()
-
-    def _watch_stdin(self):
-        # When the spawner hosts us on a pipe or a PTY, EOF on stdin
-        # means the hosting process is gone: exit so the endpoint dies
-        # with its pi instead of pinging forever as an orphan. Watch
-        # every stdin except a real interactive console, whose input
-        # must never be consumed. A console is recognized with
-        # os.get_terminal_size, not isatty: on Windows isatty reports
-        # true for the NUL device too, so a hold launched with a
-        # detached stdin would never see its EOF and would outlive its
-        # host.
-        dead = threading.Event()
-        try:
-            os.get_terminal_size(sys.stdin.fileno())
-            return dead
-        except (OSError, ValueError):
-            pass
-
-        def watch():
-            try:
-                while True:
-                    if not sys.stdin.read(4096):
-                        dead.set()
-                        return
-            except (OSError, ValueError):
-                dead.set()
-
-        threading.Thread(target=watch, daemon=True).start()
-        return dead
-
-    def _emit(self, msg):
-        # Surface inbound relayed traffic on stdout for the hosting
-        # extension to forward to its agent. Registry churn is internal
-        # bookkeeping, never agent-facing.
-        if msg.get("op") != "message" or msg.get("kind") == "registry-change":
-            return
-        print(json.dumps(msg, separators=(",", ":")), flush=True)
-
-    def hold(self):
-        self.register()
-        stdin_dead = self._watch_stdin()
-        try:
-            while True:
-                try:
-                    msg = self._read_line()
-                except socket.timeout:
-                    if stdin_dead.is_set():
-                        return
-                    continue
-                except OSError:
-                    break
-                if msg is None or msg.get("kind") == "terminate":
-                    return
-                self._emit(msg)
-                if stdin_dead.is_set():
-                    return
-        finally:
-            self.close()
-
-def parse_payload(text):
-    try:
-        return json.loads(text)
-    except ValueError:
-        return text
-
-
-def add_identity_args(parser):
-    parser.add_argument("--id")
-    parser.add_argument("--name")
-    parser.add_argument("--role")
-    parser.add_argument("--parent")
-    parser.add_argument("--session")
-    parser.add_argument("--owner-pid")
-    parser.add_argument("--busy-file")
-
-
-def apply_identity(client, args):
-    client.set_identity(args.id, args.name, args.role, args.parent,
-                        args.session, args.owner_pid, args.busy_file)
+        args = parser.parse_args(argv)
+        if args.command is None:
+            parser.print_help()
+            return 0
+        client = TeamClient(args.root)
+        if args.command in ("register", "follow", "hold", "send"):
+            self.apply_identity(client, args)
+        if args.command == "register":
+            print(json.dumps(client.register()))
+        elif args.command == "ls":
+            print(json.dumps(client.ls(), indent=2))
+        elif args.command == "deregister":
+            print(json.dumps(client.deregister()))
+        elif args.command == "follow":
+            client.follow()
+        elif args.command == "hold":
+            client.hold()
+        elif args.command == "send":
+            print(json.dumps(client.send_msg(
+                args.to, args.kind, self.parse_payload(args.payload)
+            )))
+        elif args.command == "terminate":
+            print(json.dumps(client.terminate(args.to, args.why)))
+        elif args.command == "peer":
+            if args.action == "add":
+                if not args.endpoint:
+                    parser.error("peer add needs host:port:token")
+                host, port, token = args.endpoint.split(":", 2)
+                print(json.dumps(client.peer_add(args.host, {
+                    "host": host, "port": int(port), "token": token,
+                })))
+            else:
+                print(json.dumps(client.peer_remove(args.host)))
+        else:
+            parser.error("unknown command %r" % args.command)
+        return 0
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="team", description="pi-teams client")
-    parser.add_argument("--root", default=DEFAULT_ROOT)
-    sub = parser.add_subparsers(dest="command")
-
-    p_register = sub.add_parser("register")
-    add_identity_args(p_register)
-    sub.add_parser("ls")
-    sub.add_parser("deregister")
-    p_follow = sub.add_parser("follow")
-    add_identity_args(p_follow)
-    p_hold = sub.add_parser("hold")
-    add_identity_args(p_hold)
-    p_send = sub.add_parser("send")
-    add_identity_args(p_send)
-    p_send.add_argument("to")
-    p_send.add_argument("kind", nargs="?", default="text")
-    p_send.add_argument("payload", nargs="?", default="")
-    p_term = sub.add_parser("terminate")
-    p_term.add_argument("to")
-    p_term.add_argument("why", nargs="?", default="requested")
-    p_peer = sub.add_parser("peer")
-    p_peer.add_argument("action", choices=("add", "remove"))
-    p_peer.add_argument("host")
-    p_peer.add_argument("endpoint", nargs="?")
-
-    args = parser.parse_args(argv)
-    if args.command is None:
-        parser.print_help()
-        return 0
-    client = TeamClient(args.root)
-    if args.command in ("register", "follow", "hold", "send"):
-        apply_identity(client, args)
-    if args.command == "register":
-        print(json.dumps(client.register()))
-    elif args.command == "ls":
-        print(json.dumps(client.ls(), indent=2))
-    elif args.command == "deregister":
-        print(json.dumps(client.deregister()))
-    elif args.command == "follow":
-        client.follow()
-    elif args.command == "hold":
-        client.hold()
-    elif args.command == "send":
-        print(json.dumps(
-            client.send_msg(args.to, args.kind, parse_payload(args.payload))
-        ))
-    elif args.command == "terminate":
-        print(json.dumps(client.terminate(args.to, args.why)))
-    elif args.command == "peer":
-        if args.action == "add":
-            if not args.endpoint:
-                parser.error("peer add needs host:port:token")
-            host, port, token = args.endpoint.split(":", 2)
-            print(json.dumps(client.peer_add(args.host, {
-                "host": host, "port": int(port), "token": token,
-            })))
-        else:
-            print(json.dumps(client.peer_remove(args.host)))
-    else:
-        parser.error("unknown command %r" % args.command)
-    return 0
+    return ClientCli().main(argv)
 
 
 if __name__ == "__main__":
