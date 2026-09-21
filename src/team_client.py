@@ -170,14 +170,25 @@ class TeamClient:
     def send(self, obj):
         self._send_line(obj)
 
-    def request(self, op, expected=("ack", "error", "registry"), **fields):
-        self._send_line(dict(fields, op=op))
-        while True:
-            reply = self._read_line()
-            if reply is None:
-                return {"op": "error", "error": "closed"}
-            if reply.get("op") in expected:
-                return reply
+    def request(self, op, expected=("ack", "error", "registry"),
+                timeout=None, **fields):
+        # A peer-add blocks the broker while it reads the peer endpoint
+        # over ssh, so that op needs a longer socket wait than the
+        # default round-trip timeout.
+        conn = self.connect()
+        if timeout is not None:
+            conn.settimeout(timeout)
+        try:
+            self._send_line(dict(fields, op=op))
+            while True:
+                reply = self._read_line()
+                if reply is None:
+                    return {"op": "error", "error": "closed"}
+                if reply.get("op") in expected:
+                    return reply
+        finally:
+            if timeout is not None:
+                conn.settimeout(self.timeout)
 
     # -- operations --------------------------------------------------
 
@@ -204,11 +215,11 @@ class TeamClient:
 
     def peer_add(self, label, ssh):
         return self.request("peer-add", expected=("ack", "error"),
-                            label=label, ssh=ssh)
+                            timeout=35, label=label, ssh=ssh)
 
     def peer_remove(self, label):
         return self.request("peer-remove", expected=("ack", "error"),
-                            label=label)
+                            timeout=15, label=label)
 
     def peer_list(self):
         return self.request("peer-list", expected=("peers", "error"))
