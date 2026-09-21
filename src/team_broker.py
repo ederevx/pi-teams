@@ -703,7 +703,11 @@ class TeamBroker:
             remote = list(self._remote.items())
         for host, entries in remote:
             for entry in entries:
-                agents.append(dict(entry, online=False, remote=True))
+                # The peer's registry is the liveness signal for its agents
+                # (see _parent_gone); forcing online=False would hide live
+                # remote agents from ls and from the user.
+                agents.append(dict(
+                    entry, online=bool(entry.get("online")), remote=True))
         return agents
 
     def _peer_for(self, conn):
