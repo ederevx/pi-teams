@@ -4,6 +4,11 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.3.14 — 2026-09-20
+
+- Drop the `/team-reload` command; the broker already self-restarts on
+  its own source hash and idle clock.
+
 ## v0.3.13 — 2026-09-20
 
 - Make `team_wait` an active poll that returns reports and yields to a
