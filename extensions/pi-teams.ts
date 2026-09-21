@@ -16,7 +16,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { TeamAgent } from "./pi-teams/agent.ts";
+import { ChatTail } from "./pi-teams/chat-tail.ts";
 import { deliverToAgent, logTeamMessage } from "./pi-teams/messages.ts";
+import { sessionsRoot } from "./pi-teams/paths.ts";
 import { ProcessRunner } from "./pi-teams/process-runner.ts";
 import {
 	DEFAULT_WAIT_SECONDS,
@@ -27,6 +29,7 @@ import {
 // Re-exported so tests and embedders can reach the seam classes from the
 // extension entry alone.
 export { TeamAgent } from "./pi-teams/agent.ts";
+export { ChatTail } from "./pi-teams/chat-tail.ts";
 export { ProcessRunner } from "./pi-teams/process-runner.ts";
 export { SshPeerBridge, SshSetupGuide } from "./pi-teams/peer.ts";
 export {
@@ -121,9 +124,15 @@ export default async function (pi: ExtensionAPI) {
 				context: params.context,
 			});
 			if (!ref) {
-				throw new Error(host
-					? `no peer agent on ${host}`
-					: "spawn failed");
+				if (!host) throw new Error("spawn failed");
+				const agents = await app.snapshot();
+				const advertised = agents.filter((a) =>
+					a.remote && (!a.origin || a.origin === host)).length;
+				throw new Error(
+					`no peer agent on ${host}: the broker link is up, but ` +
+					`that host advertises ${advertised} agent(s). Start the ` +
+					`host's pi session with pi-teams so an agent registers on ` +
+					`its broker, then retry.`);
 			}
 			const where = host ? ` on ${host}` : ` as session "${ref.session}"`;
 			return {
@@ -308,14 +317,47 @@ export default async function (pi: ExtensionAPI) {
 			const lines = agents.map((a) =>
 				`${a.id}\t${a.role}\t${a.online ? "online" : "offline"}` +
 				(a.remote ? "\tpeer" : ""));
+			const remote = agents.filter((a) => a.remote);
+			const quietPeers = app.linkedPeers().filter(
+				(label) => !remote.some((a) => a.origin === label));
+			const body = lines.join("\n");
+			const footer = quietPeers.map((label) =>
+				`peer ${label}: linked, 0 agents advertised (start that ` +
+				`host's pi session to federate)`);
+			const parts = [body || "pi-teams: no agents registered"];
+			parts.push(...footer);
 			return {
 				content: [{
 					type: "text",
-					text: lines.length
-						? `pi-teams agents:\n${lines.join("\n")}`
-						: "pi-teams: no agents registered",
+					text: `pi-teams agents:\n${parts.join("\n")}`,
 				}],
 				details: { agents },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "team_tail",
+		label: "tail chat history",
+		description:
+			"Tail the pi chat history: returns the last lines of the most " +
+			"recent session transcript (.jsonl) under the pi agent " +
+			"sessions directory, so the agent can see its own conversation. " +
+			"Useful to reconstruct context after a compacted, resumed, or " +
+			"aborted turn.",
+		parameters: Type.Object({
+			lines: Type.Optional(Type.Number({
+				description: "Trailing lines to return (default 60, max 500)",
+			})),
+		}),
+		async execute(_toolCallId, params) {
+			const tailer = new ChatTail(sessionsRoot);
+			const lines = Math.max(1, Math.min(500, params.lines ?? 60));
+			return {
+				content: [{
+					type: "text",
+					text: tailer.tail(lines),
+				}],
 			};
 		},
 	});

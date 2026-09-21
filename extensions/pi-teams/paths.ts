@@ -18,6 +18,11 @@ export const stateRoot =
 export const binDir =
 	process.env.PI_TEAMS_BIN || join(home, ".local", "bin");
 
+/** Where pi writes session transcripts (.jsonl), one directory per
+ *  working directory. team_tail reads the newest one here. */
+export const sessionsRoot =
+	process.env.PI_SESSIONS_ROOT || join(home, ".pi", "agent", "sessions");
+
 /** The package's bundled broker/client, when this extension is loaded
  *  from a pi package: the sibling src/ holding teamd.py and team.py.
  *  An explicit PI_TEAMS_BIN wins, so a manual install can override it. */
