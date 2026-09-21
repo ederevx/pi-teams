@@ -4,6 +4,21 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.3 — 2026-09-21
+
+- The broker owns the peer SSH transport: `team_peer add` has the
+  broker read the peer's loopback endpoint and own the `ssh -L` tunnel,
+  and the broker rebuilds its peers when it restarts. The extension no
+  longer runs ssh or keeps a peer-target file, and the ssh child is
+  closed on peer-remove and broker shutdown.
+- One entry point per task now serves local and peer targets: relay,
+  terminate, and peer add/remove/list all route inside the broker, so
+  `/team kill` reaches a peer-hosted agent and `ls` reports the peers.
+- The extension is host-agnostic: a single broker-op client and one
+  pending-request registry replace the spawn router, the per-host spawn
+  backends, and the duplicate spawn/attach bookkeeping. A mutual
+  `team_peer add` settles on one link instead of severing the pair.
+
 ## v0.4.2 — 2026-09-21
 
 - `team_peer add` now accepts an already-linked peer label and resolves
