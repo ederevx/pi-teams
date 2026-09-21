@@ -165,6 +165,19 @@ type SpawnFn = (
 ) => SpawnedProcess;
 type DeliverFn = (message: TeamMessage) => void;
 
+/** Default bound for an active team_wait, overridable with PI_TEAMS_WAIT. */
+const DEFAULT_WAIT_SECONDS = 300;
+
+/** How often an active team_wait re-checks its stop conditions. */
+const WAIT_POLL_MS = 250;
+
+/** Resolves the team_wait bound from the call, then the environment. */
+function waitSeconds(requested?: number): number {
+	if (typeof requested === "number" && requested > 0) return requested;
+	const env = Number(process.env.PI_TEAMS_WAIT);
+	return Number.isFinite(env) && env > 0 ? env : DEFAULT_WAIT_SECONDS;
+}
+
 /** The output of a finished child process. */
 export interface ExecResult {
 	stdout: string;
@@ -746,6 +759,65 @@ export class SpawnRouter {
 	}
 }
 
+/** Owns the active team_wait waiters and the results that arrived just
+ *  before a wait began. A result is consumed exactly once: by the waiters
+ *  already registered for its sender, or buffered for the next wait and
+ *  delivered as an ordinary message. It owns all waiter state, so a
+ *  cancelled or timed-out wait can never leak or double-consume. */
+export class ResultInbox {
+	private readonly waiters =
+		new Map<string, Set<(message: TeamMessage | null) => void>>();
+	private readonly buffered = new Map<string, TeamMessage>();
+
+	/** Hands a result for one sender to its waiters, or buffers it when
+	 *  none is registered. Returns true when a waiter consumed it. */
+	deliver(message: TeamMessage): boolean {
+		const waiting = this.waiters.get(message.from);
+		if (!waiting || waiting.size === 0) {
+			this.buffered.set(message.from, message);
+			return false;
+		}
+		this.waiters.delete(message.from);
+		for (const settle of waiting) settle(message);
+		return true;
+	}
+
+	/** Takes a result that arrived before this wait started, so it is
+	 *  returned at once instead of being missed. */
+	take(agentId: string): TeamMessage | undefined {
+		const message = this.buffered.get(agentId);
+		if (message) this.buffered.delete(agentId);
+		return message;
+	}
+
+	/** Registers one waiter for an agent; the returned function removes
+	 *  it without consuming a result. */
+	watch(
+		agentId: string,
+		settle: (message: TeamMessage | null) => void,
+	): () => void {
+		const set = this.waiters.get(agentId) ?? new Set();
+		set.add(settle);
+		this.waiters.set(agentId, set);
+		return () => {
+			const current = this.waiters.get(agentId);
+			if (!current) return;
+			current.delete(settle);
+			if (current.size === 0) this.waiters.delete(agentId);
+		};
+	}
+
+	/** Releases every waiter (as cancelled) and drops buffered results;
+	 *  GC on deregister so no timer or waiter outlives the session. */
+	cancelAll(): void {
+		for (const set of [...this.waiters.values()]) {
+			for (const settle of [...set]) settle(null);
+		}
+		this.waiters.clear();
+		this.buffered.clear();
+	}
+}
+
 export class TeamAgent {
 	private readonly runner: ProcessHost;
 	private readonly deliver: DeliverFn;
@@ -770,6 +842,7 @@ export class TeamAgent {
 		new Map<string, (ref: TeammateRef | null) => void>();
 	private readonly pendingAttaches =
 		new Map<string, (ref: TeammateRef | null) => void>();
+	private readonly inbox = new ResultInbox();
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
@@ -949,9 +1022,12 @@ export class TeamAgent {
 			this.handleAttachRequest(message);
 			return;
 		}
-		// Reports and every other non-control message are delivered as
-		// messages: waiting is passive, so nothing is consumed into a
-		// blocking tool call and the agent keeps receiving.
+		// A result first goes to an active team_wait, which consumes it as
+		// the tool result; when none is waiting it is buffered and still
+		// delivered as an ordinary message, so no report is ever lost.
+		if (message.kind === "result" && message.to === this.id) {
+			if (this.inbox.deliver(message)) return;
+		}
 		this.deliver(message);
 	}
 
@@ -1589,6 +1665,71 @@ export class TeamAgent {
 		}
 	}
 
+	/** Actively waits for one result per listed teammate under the call's
+	 *  stop conditions: a result arrives, the bound elapses, the run aborts
+	 *  (Escape), a user message is queued, or the session deregisters. The
+	 *  poll awaits between checks so the TUI stays responsive and the wait
+	 *  stays steerable. Returns one entry per id, null when that teammate
+	 *  did not report before the wait ended. */
+	async waitForResults(
+		agentIds: string[],
+		timeoutMs: number,
+		signal: AbortSignal | undefined,
+		shouldYield: () => boolean,
+	): Promise<Array<TeamMessage | null>> {
+		const results = new Map<string, TeamMessage>();
+		const pending: string[] = [];
+		for (const id of agentIds) {
+			const buffered = this.inbox.take(id);
+			if (buffered) results.set(id, buffered);
+			else pending.push(id);
+		}
+		const canWait = pending.length > 0 && !this.closed
+			&& !signal?.aborted && !shouldYield();
+		if (canWait) {
+			await new Promise<void>((resolve) => {
+				const unwatchers: Array<() => void> = [];
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				let poll: ReturnType<typeof setInterval> | undefined;
+				let settled = false;
+				const finish = (): void => {
+					if (settled) return;
+					settled = true;
+					if (timer) clearTimeout(timer);
+					if (poll) clearInterval(poll);
+					signal?.removeEventListener("abort", onAbort);
+					for (const unwatch of unwatchers) unwatch();
+					resolve();
+				};
+				const onAbort = (): void => finish();
+				for (const id of pending) {
+					const unwatch = this.inbox.watch(id, (message) => {
+						if (!message) {
+							finish();
+							return;
+						}
+						results.set(id, message);
+						if (results.size === agentIds.length) finish();
+					});
+					unwatchers.push(unwatch);
+				}
+				poll = setInterval(() => {
+					if (this.closed || signal?.aborted || shouldYield()) {
+						finish();
+					}
+				}, WAIT_POLL_MS);
+				if (signal) {
+					if (signal.aborted) finish();
+					else signal.addEventListener("abort", onAbort, { once: true });
+				}
+				const effective = timeoutMs > 0
+					? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
+				timer = setTimeout(finish, effective);
+			});
+		}
+		return agentIds.map((id) => results.get(id) ?? null);
+	}
+
 	private cancelWaits(): void {
 		// Deregister is terminal: a race that registers a pending request
 		// after this point must resolve at once instead of leaking a timer.
@@ -1597,6 +1738,7 @@ export class TeamAgent {
 		this.pendingSpawns.clear();
 		for (const settle of [...this.pendingAttaches.values()]) settle(null);
 		this.pendingAttaches.clear();
+		this.inbox.cancelAll();
 		this.spawnRouter.clear();
 	}
 
@@ -1835,23 +1977,26 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing teammate wait --------------------------------------
-	// Waiting is passive: this tool never blocks. It confirms membership
-	// and returns at once; each report arrives as an ordinary pi-teams
-	// message, so the agent stays idle and keeps receiving while it waits.
+	// An active poll: it waits for result messages while staying
+	// interruptible. The run's AbortSignal (Escape) ends it at once, and
+	// a queued user message makes it yield early so the steer is not
+	// delayed; in both cases the report still arrives as a message.
 	pi.registerTool({
 		name: "team_wait",
 		label: "wait for teammates",
 		description:
-			"Mark that you are waiting for one or more teammates. This " +
-			"never blocks: the agent stays idle and keeps receiving " +
-			"messages, and each report arrives as a pi-teams message that " +
-			"starts a new turn. Requires this session to be a team member. " +
-			"Pass the ids returned by team_spawn or team_attach.",
-		promptSnippet: "Wait idly for teammate reports; never blocks",
+			"Wait for one or more teammates to report, returning each " +
+			"report as the tool result. While waiting the agent stays " +
+			"interruptible and yields early if you queue a message, so " +
+			"you can still steer it; a result not consumed here arrives " +
+			"as a pi-teams message. Requires this session to be a team " +
+			"member. Pass the ids returned by team_spawn or team_attach.",
+		promptSnippet: "Wait for teammate reports; aborts on interrupt",
 		promptGuidelines: [
-			"Call team_wait with the teammate ids, then end your turn: " +
-				"waiting is passive and the report arrives as a message. " +
-				"Do not poll the teammate.",
+			"Call team_wait with the teammate ids to wait for their " +
+				"reports; it returns them as the tool result. If it returns " +
+				"without a report, that teammate is still running and will " +
+				"report as a message.",
 		],
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({
@@ -1860,8 +2005,12 @@ export default async function (pi: ExtensionAPI) {
 			ids: Type.Optional(Type.Array(Type.String(), {
 				description: "Several teammate ids returned by team_spawn",
 			})),
+			timeout: Type.Optional(Type.Number({
+				description: "Seconds to wait (default PI_TEAMS_WAIT or " +
+					`${DEFAULT_WAIT_SECONDS})`,
+			})),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			await app.requireTeammate("team_wait");
 			const targetIds = (params.ids && params.ids.length > 0)
 				? params.ids
@@ -1869,15 +2018,43 @@ export default async function (pi: ExtensionAPI) {
 			if (targetIds.length === 0) {
 				throw new Error("team_wait needs at least one teammate id");
 			}
-			return {
-				content: [{
-					type: "text",
-					text: `pi-teams: waiting idly for ${targetIds.join(", ")}; ` +
-						`each report arrives as a message, so end your turn ` +
-						`and keep receiving.`,
-				}],
-				details: { ids: targetIds },
-			};
+			const bound = waitSeconds(params.timeout);
+			// A waiting agent is not working: publish that for the whole
+			// wait so the broker keeps a fork exempt from idle GC, then
+			// restore the turn's busy state.
+			app.setState("waiting");
+			try {
+				const results = await app.waitForResults(
+					targetIds, bound * 1000, signal,
+					() => ctx.hasPendingMessages());
+				const reports = results.filter(
+					(message): message is TeamMessage => message !== null);
+				for (const report of reports) {
+					logTeamMessage(pi, "received", report);
+				}
+				if (reports.length === 0) {
+					return {
+						content: [{
+							type: "text",
+							text: `pi-teams: no result from ` +
+								`${targetIds.join(", ")} within ${bound}s; ` +
+								`still running, and each will report as a message.`,
+						}],
+						details: { ids: targetIds, reports: [] },
+					};
+				}
+				const text = reports.map((report) =>
+					`pi-teams ${report.kind} from ${report.from}:\n` +
+					(typeof report.payload === "string"
+						? report.payload
+						: JSON.stringify(report.payload))).join("\n\n");
+				return {
+					content: [{ type: "text", text }],
+					details: { ids: targetIds, reports },
+				};
+			} finally {
+				app.setBusy(true);
+			}
 		},
 	});
 
@@ -2104,6 +2281,20 @@ export default async function (pi: ExtensionAPI) {
 					"<text> | attach <parent> [name] | detach | kill <id>",
 				"warning",
 			);
+		},
+	});
+
+	// Reload the team runtime in place through pi's normal reload flow,
+	// named for teams so a team update does not need the pi-daemon's
+	// all-extension reload. The broker keeps its own idle restart clock,
+	// so this never forces it to drop live holds; a new broker source is
+	// adopted by that clock instead.
+	pi.registerCommand("team-reload", {
+		description: "pi-teams: reload the team extension in place",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify("pi-teams: reloading team runtime", "info");
+			await ctx.reload();
+			return;
 		},
 	});
 }
