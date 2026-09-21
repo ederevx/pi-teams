@@ -74,7 +74,7 @@ export class BrokerOps {
 	}
 
 	async terminate(agentId: string): Promise<void> {
-		await this.run(["terminate", agentId]);
+		await this.run(["terminate", agentId], 25000);
 	}
 
 	/** Links a peer host. The broker owns the ssh tunnel; a failure

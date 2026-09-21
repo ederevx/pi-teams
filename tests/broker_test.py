@@ -942,6 +942,65 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root_a, ignore_errors=True)
             shutil.rmtree(root_b, ignore_errors=True)
 
+    def test_mutual_add_keeps_one_healthy_link(self):
+        # The smaller host adds first; the larger host then adds too. The
+        # pair must settle on the smaller host's outbound link instead of
+        # tearing each other's link down.
+        root_a = make_root()
+        root_b = make_root()
+        broker_b, thread_b = self._start_broker(
+            root_b, "bbb", tunnel_factory=RecordingTunnelFactory(root_a))
+        broker_a, thread_a = self._start_broker(
+            root_a, "aaa", tunnel_factory=RecordingTunnelFactory(root_b))
+        try:
+            broker_a.add_peer("p", "u@h")
+            self.assertTrue(wait_until(
+                lambda: broker_b._peers.get("aaa") is not None))
+            broker_b.add_peer("p", "u@h")
+            time.sleep(0.5)
+            self.assertTrue(broker_a.peer_list()[0]["online"],
+                            "aaa lost its link after a mutual add")
+            self.assertTrue(broker_b.peer_list()[0]["online"],
+                            "bbb lost its link after a mutual add")
+            self.assertTrue(broker_a._peers["bbb"].connected)
+            self.assertTrue(broker_b._peers["aaa"].connected)
+            self.assertIn("p", broker_a.root.read_peers())
+            self.assertIn("p", broker_b.root.read_peers())
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_mutual_add_reverse_order_keeps_config(self):
+        # The larger host adds first, then the smaller host takes over the
+        # outbound direction; both keep a durable peer entry.
+        root_a = make_root()
+        root_b = make_root()
+        broker_b, thread_b = self._start_broker(
+            root_b, "bbb", tunnel_factory=RecordingTunnelFactory(root_a))
+        broker_a, thread_a = self._start_broker(
+            root_a, "aaa", tunnel_factory=RecordingTunnelFactory(root_b))
+        try:
+            broker_b.add_peer("p", "u@h")
+            self.assertTrue(wait_until(
+                lambda: broker_a._peers.get("bbb") is not None))
+            broker_a.add_peer("p", "u@h")
+            time.sleep(0.5)
+            self.assertTrue(broker_a.peer_list()[0]["online"])
+            self.assertTrue(broker_b.peer_list()[0]["online"])
+            self.assertIn("p", broker_a.root.read_peers())
+            self.assertIn("p", broker_b.root.read_peers())
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
     def _ids_via(self, root):
         probe = TeamClient(root, heartbeat=None)
         probe.id = "probe"
