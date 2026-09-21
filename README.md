@@ -72,7 +72,7 @@ coordinate natively instead of through the shared tree.
 - **Extension** (`extensions/pi-teams.ts`): registers the running pi,
   keeps its endpoint open through a held connection, injects a compact
   teammates note before the first agent run, and answers
-  `/team ls|status|send|attach|detach|kill` and `/team-reload`. The hold
+  `/team ls|status|send|attach|detach|kill`. The hold
   and forked pi are
   launched with Node's `child_process`, not `pi.exec`: `pi.exec` opens
   a child's stdin to `/dev/null` and drops the `env` option, which
@@ -110,11 +110,6 @@ coordinate natively instead of through the shared tree.
   delivered at once. A report not consumed by the wait still arrives as
   an ordinary pi-teams message. While it waits the agent is published as
   waiting, so the broker keeps a waiting fork exempt from idle GC.
-- **Reload**: `/team-reload` runs pi's normal extension reload named for
-  teams, so a team update does not need the pi-daemon's all-extension
-  reload. It reloads the extension and re-registers the hold; the broker
-  adopts new `teamd` code on its own idle clock, so the reload never
-  forces the broker to drop live holds.
 - **Tools**: the extension exposes `team_ls`, `team_send`,
   `team_spawn`, `team_wait`, `team_attach`, and `team_peer` as agent
   tools. Sending and waiting are member-only, and a teammate may only
@@ -238,7 +233,7 @@ the `pi` key and carries the `pi-package` keyword, so pi can install it
 directly.
 
 ```
-pi install git:github.com/ederevx/pi-teams@v0.3.13
+pi install git:github.com/ederevx/pi-teams@v0.3.14
 pi install npm:pi-teams          # once published to npm
 pi install /absolute/path/to/pi-teams
 ```

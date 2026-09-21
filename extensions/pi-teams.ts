@@ -2283,18 +2283,4 @@ export default async function (pi: ExtensionAPI) {
 			);
 		},
 	});
-
-	// Reload the team runtime in place through pi's normal reload flow,
-	// named for teams so a team update does not need the pi-daemon's
-	// all-extension reload. The broker keeps its own idle restart clock,
-	// so this never forces it to drop live holds; a new broker source is
-	// adopted by that clock instead.
-	pi.registerCommand("team-reload", {
-		description: "pi-teams: reload the team extension in place",
-		handler: async (_args, ctx) => {
-			ctx.ui.notify("pi-teams: reloading team runtime", "info");
-			await ctx.reload();
-			return;
-		},
-	});
 }
