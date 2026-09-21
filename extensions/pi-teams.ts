@@ -390,7 +390,8 @@ export default async function (pi: ExtensionAPI) {
 				Type.Literal("remove"),
 			]),
 			host: Type.String({
-				description: "SSH host to reach (also the default peer label)",
+				description: "SSH host to reach, or an already-linked " +
+					"peer label (also the default peer label)",
 			}),
 			label: Type.Optional(Type.String({
 				description: "Peer label override",
@@ -398,12 +399,13 @@ export default async function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params) {
 			if (params.action === "add") {
+				const sshTarget = app.peerTarget(params.host);
 				const peer = await app.peerAdd(
-					params.host, params.label || "");
+					sshTarget, params.label || "");
 				return {
 					content: [{
 						type: "text",
-						text: `linked peer ${peer} over ssh ${params.host}; ` +
+						text: `linked peer ${peer} over ssh ${sshTarget}; ` +
 							`use team_spawn host=${peer} to spawn there.`,
 					}],
 					details: { peer },

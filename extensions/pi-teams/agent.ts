@@ -843,6 +843,14 @@ export class TeamAgent {
 		return Object.keys(this.readPeerTargets()).sort();
 	}
 
+	/** Resolves a peer name to the ssh target that reaches it: a
+	 *  remembered label maps to its stored target, anything else is used
+	 *  as given. This lets team_peer add reuse an already-linked peer by
+	 *  the label its agents are addressed by. */
+	peerTarget(name: string): string {
+		return this.readPeerTargets()[name] ?? name;
+	}
+
 	private rememberPeer(label: string, sshTarget: string): void {
 		const targets = this.readPeerTargets();
 		targets[label] = sshTarget;

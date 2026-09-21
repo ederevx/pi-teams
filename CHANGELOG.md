@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.2 — 2026-09-21
+
+- `team_peer add` now accepts an already-linked peer label and resolves
+  it to the remembered ssh target, so re-linking by the label its agents
+  are addressed by no longer fails on an unresolvable alias.
+- Federated agents keep the online state their own broker reports instead
+  of being forced offline, so `team_ls` no longer hides live peer agents.
+
 ## v0.4.1 — 2026-09-21
 
 - Add the `team_tail` tool (`ChatTail` module): returns the last N lines
