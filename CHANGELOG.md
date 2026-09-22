@@ -4,6 +4,18 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.5 - 2026-09-22
+
+- `team_wait` returns as soon as the first teammate reports instead of
+  waiting for every listed id; the result names the still-running ids
+  in `details.remaining`, whose later reports keep arriving as
+  messages, and duplicate teammate ids are deduped before waiting.
+- The running `team_wait` call shows a live status partial (pending
+  ids and elapsed seconds), refreshed from the wait's own poll tick.
+- A wait on an already-aborted signal no longer leaks its timeout
+  timer, and report formatting is centralized as `formatReport` in
+  `messages.ts` for both message delivery and the tool result.
+
 ## v0.4.4 - 2026-09-21
 
 - An unexpected hold-client death (broker restart, idle exit after a
