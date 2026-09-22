@@ -4,6 +4,21 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.9 - 2026-09-22
+
+- Cross-host `team_attach` closes its four verified gaps: the attached
+  session now gets the fork identity env (TEAM_ID/TEAM_NAME/TEAM_ROLE/
+  TEAM_PARENT_ID/TEAM_ROOT) applied on attach and restored on detach, so
+  the advertised report-back command expands correctly in its shell
+  tools; attach marks its hold with TEAM_ATTACHED, which exempts the
+  attached session from fork-idle GC only (parent-gone and seen-idle
+  lifetimes unchanged, GC ownership stays local to the target broker);
+  the one-parent model is enforced on both sides - a requester that
+  already has a parent refuses to attach, and the target refuses an
+  attach request whose sender is a registered fork; and a new
+  tests/attach_test.py covers the fork-idle exemption and parent-gone
+  reaping with the transcript preserved for /resume.
+
 ## v0.4.8 - 2026-09-22
 
 - Teammates launch with a general teammate role, appended to their
