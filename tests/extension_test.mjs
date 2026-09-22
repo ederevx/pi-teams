@@ -376,6 +376,78 @@ test("an active wait reports progress ticks", async () => {
 	assert.ok(ticks >= 1);
 });
 
+test("a stalled wait nudges each silent teammate once", async () => {
+	const runCalls = [];
+	const { calls, runner } = makeRunner(async (file, args) => {
+		runCalls.push(args);
+		return { stdout: "{}", stderr: "", code: 0 };
+	});
+	const windowless = (python) => new WindowlessPython(python, () => false);
+	const agent = new TeamAgent(runner, () => {}, windowless);
+	const results = await agent.waitForResults(
+		["kid", "other"], 700, undefined, () => false, undefined, 150);
+	// Silence past the stall bound sends one nudge per teammate; the
+	// 250ms poll fires several times but the nudge must not repeat.
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	// The nudge goes through `team send --id <parent> <to> text <text>`.
+	const nudges = runCalls.filter((args) => args.includes("send"));
+	assert.equal(nudges.length, 2,
+		`expected one nudge per teammate, got ${nudges.length}`);
+	const nudgeTargets = nudges.map(
+		(args) => args[args.indexOf("send") + 3]);
+	assert.deepEqual([...nudgeTargets].sort(), ["kid", "other"]);
+	for (const args of nudges) {
+		assert.ok(String(args[args.length - 1]).includes("continue"));
+	}
+	assert.deepEqual(results, [null, null]);
+});
+
+test("an active teammate message resets the stall clock", async () => {
+	const runCalls = [];
+	const received = [];
+	const { calls, runner } = makeRunner(async (file, args) => {
+		runCalls.push(args);
+		return { stdout: "{}", stderr: "", code: 0 };
+	});
+	const windowless = (python) => new WindowlessPython(python, () => false);
+	const agent = new TeamAgent(
+		runner, (message) => received.push(message), windowless);
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const waiting = agent.waitForResults(
+		["kid"], 600, undefined, () => false, undefined, 200);
+	// Progress chatter every 150ms is a continuous sign of life: the
+	// 200ms stall bound never elapses, so no nudge is ever sent, and
+	// the non-result chatter still arrives as ordinary messages.
+	for (const at of [100, 250, 400, 550]) {
+		setTimeout(() => onData(JSON.stringify({
+			from: "kid", to: agent.id, kind: "text", payload: "progress",
+		}) + "\n"), at);
+	}
+	const results = await waiting;
+	assert.deepEqual(results, [null]);
+	assert.deepEqual(received.map((m) => m.payload),
+		["progress", "progress", "progress", "progress"]);
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(runCalls.filter((args) => args.includes("send")).length, 0,
+		"a messaging teammate was nudged anyway");
+	agent.stopHold();
+});
+
+test("stall 0 disables the nudge", async () => {
+	const runCalls = [];
+	const { runner } = makeRunner(async (file, args) => {
+		runCalls.push(args);
+		return { stdout: "{}", stderr: "", code: 0 };
+	});
+	const windowless = (python) => new WindowlessPython(python, () => false);
+	const agent = new TeamAgent(runner, () => {}, windowless);
+	await agent.waitForResults(
+		["kid"], 500, undefined, () => false, undefined, 0);
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(runCalls.filter((args) => args.includes("send")).length, 0);
+});
+
 test("ResultInbox hands a result to its waiter exactly once", () => {
 	const inbox = new ResultInbox();
 	const seen = [];

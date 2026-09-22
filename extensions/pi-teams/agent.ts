@@ -32,7 +32,9 @@ import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
 import { TeammateRole } from "./roles.ts";
 import {
+	DEFAULT_STALL_SECONDS,
 	DEFAULT_WAIT_SECONDS,
+	STEER_NUDGE_TEXT,
 	WAIT_POLL_MS,
 	requestId,
 	type DeliverFn,
@@ -67,6 +69,11 @@ export class TeamAgent {
 	private readonly spawns: SpawnService;
 	private readonly inbox = new ResultInbox();
 	private readonly teammateRole = new TeammateRole();
+	// Notified on every contact from a teammate the active wait is
+	// blocked on, so its stall watchdog counts any traffic, not only
+	// results, as a sign of life. Owned by the agent; the wait
+	// registers and always removes its hook.
+	private activityHook: ((from: string) => void) | null = null;
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
@@ -92,11 +99,16 @@ export class TeamAgent {
 			(name, task, options) => this.spawnTask(name, task, options));
 	}
 
-	/** A fresh main-agent id. The host label makes the id globally
-	 *  unique so peers can route by its prefix. */
-	private makeMainId(): string {
-		return `${this.host}:pi-${process.pid}-` +
+	/** A fresh agent id of one kind. The host label makes the id
+	 *  globally unique so peers can route by its prefix; the kind is
+	 *  the id's role in the registry (`pi` main, `fork` teammate). */
+	private makeId(kind: string): string {
+		return `${this.host}:${kind}-${process.pid}-` +
 			Math.random().toString(16).slice(2, 10);
+	}
+
+	private makeMainId(): string {
+		return this.makeId("pi");
 	}
 
 	private launch(
@@ -267,6 +279,19 @@ export class TeamAgent {
 			this.pending.settle(message, "attach-ack");
 			return;
 		}
+		if (message.kind === "finish?") {
+			// The broker asks whether this agent is done before reaping
+			// it as idle. The state was published idle, so answer done
+			// through the CLI; a still-working agent would have
+			// answered busy from its heartbeat instead of surfacing
+			// here.
+			void this.runner.run(
+				this.python,
+				[teamBin, "--root", stateRoot, "finish", "--done"],
+				{ timeout: 5000 },
+			);
+			return;
+		}
 		if (message.kind === "attach") {
 			// The handler reports every failure back as attach-error; the
 			// catch only keeps an unexpected rejection from surfacing as
@@ -274,6 +299,9 @@ export class TeamAgent {
 			this.handleAttachRequest(message).catch(() => {});
 			return;
 		}
+		// Any inbound contact counts as the sender being alive for the
+		// active wait's stall watchdog; results are handled below.
+		if (this.activityHook && message.from) this.activityHook(message.from);
 		// A result first goes to an active team_wait, which consumes it as
 		// the tool result; when none is waiting it is buffered and still
 		// delivered as an ordinary message, so no report is ever lost.
@@ -656,8 +684,7 @@ export class TeamAgent {
 	}
 
 	private makeForkId(): string {
-		return `${this.host}:fork-${process.pid}-` +
-			Math.random().toString(16).slice(2, 10);
+		return this.makeId("fork");
 	}
 
 	private taskPrompt(session: string, task: string): string {
@@ -802,6 +829,30 @@ export class TeamAgent {
 		}
 	}
 
+	/** One inactivity watchdog for an active wait: a teammate that has
+	 *  produced no work contact (report or control traffic) for the
+	 *  stall bound looks hung, so it is nudged once with a steering
+	 *  message telling it to continue or report. Nudges are recorded
+	 *  per id so a silent teammate is never nagged in a loop. */
+	private nudgeStalled(
+		pending: string[],
+		stallMs: number,
+		lastActivity: number,
+		nudged: Set<string>,
+	): void {
+		if (stallMs <= 0) return;
+		if (Date.now() - lastActivity < stallMs) return;
+		for (const id of pending) {
+			if (nudged.has(id)) continue;
+			nudged.add(id);
+			void this.send(id, "text", STEER_NUDGE_TEXT)
+				.catch(() => {
+					// An undeliverable nudge is not a wait failure: the
+					// bound or GC still ends the stale teammate.
+				});
+		}
+	}
+
 	/** Actively waits for teammates' results under the call's stop
 	 *  conditions: the first result arrives, the bound elapses, the run
 	 *  aborts (Escape), a user message is queued, or the session
@@ -809,7 +860,10 @@ export class TeamAgent {
 	 *  ids keep running and their later reports stay in the inbox. The
 	 *  poll awaits between checks so the TUI stays responsive and the
 	 *  wait stays steerable, and onTick fires each poll for progress
-	 *  display. Returns one entry per id, null when that teammate did
+	 *  display. While the wait runs, an inactivity watchdog watches
+	 *  every inbox contact and auto-sends a steering nudge to a
+	 *  teammate that looks hung; each teammate is nudged at most once
+	 *  per wait. Returns one entry per id, null when that teammate did
 	 *  not report before the wait ended. */
 	async waitForResults(
 		agentIds: string[],
@@ -817,6 +871,7 @@ export class TeamAgent {
 		signal: AbortSignal | undefined,
 		shouldYield: () => boolean,
 		onTick?: () => void,
+		stallMs = DEFAULT_STALL_SECONDS * 1000,
 	): Promise<Array<TeamMessage | null>> {
 		const results = new Map<string, TeamMessage>();
 		const pending: string[] = [];
@@ -835,9 +890,20 @@ export class TeamAgent {
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				let poll: ReturnType<typeof setInterval> | undefined;
 				let settled = false;
+				// The watchdog clock starts when the wait does and every
+				// teammate contact pushes it forward, so only true silence
+				// reaches the stall bound.
+				let lastActivity = Date.now();
+				const nudged = new Set<string>();
+				const watching = new Set(pending);
+				const onActivity = (from: string): void => {
+					if (watching.has(from)) lastActivity = Date.now();
+				};
+				this.activityHook = onActivity;
 				const finish = (): void => {
 					if (settled) return;
 					settled = true;
+					this.activityHook = null;
 					if (timer) clearTimeout(timer);
 					if (poll) clearInterval(poll);
 					signal?.removeEventListener("abort", onAbort);
@@ -847,6 +913,7 @@ export class TeamAgent {
 				const onAbort = (): void => finish();
 				for (const id of pending) {
 					const unwatch = this.inbox.watch(id, (message) => {
+						lastActivity = Date.now();
 						if (!message) {
 							finish();
 							return;
@@ -865,6 +932,8 @@ export class TeamAgent {
 					? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
 				timer = setTimeout(finish, effective);
 				poll = setInterval(() => {
+					this.nudgeStalled(
+						pending, stallMs, lastActivity, nudged);
 					onTick?.();
 					if (this.closed || signal?.aborted || shouldYield()) {
 						finish();

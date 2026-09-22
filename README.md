@@ -33,10 +33,18 @@ coordinate natively instead of through the shared tree.
   in the `parent` field and reports the pid of the pi it serves as its
   owner. Liveness is connection-based everywhere: when a parent's
   connection closes, or a fork goes idle (no work contact for
-  PI_TEAMS_FORK_IDLE, default 300s; zero disables), the broker closes
-  the fork's endpoint, drops the entry, and signals the owner pid, so
-  the forked pi dies for real instead of outliving its parent as a
-  hold-shim ghost. A spawned teammate's session is reaped with it,
+  PI_TEAMS_FORK_IDLE, default 300s; zero disables), the broker first
+  asks the fork whether it is done: a `finish?` query goes to the
+  fork's client, which answers at once through its heartbeat when the
+  teammate is busy or surfaces the question to its agent, and the fork
+  is spared while PI_TEAMS_GC_PING_GRACE (default 60s; zero disables
+  the query and reaps immediately) is open. An agent answers `team
+  finish --done` when it really is finished, which reaps it at once;
+  silence past the grace, or a parent-gone fork (whose team no longer
+  exists), proceeds to the reap: the broker closes the fork's
+  endpoint, drops the entry, and signals the owner pid, so the forked
+  pi dies for real instead of outliving its parent as a hold-shim
+  ghost. A spawned teammate's session is reaped with it,
   so its transcript does not outlive the process; only attached
   teammates keep their session in `/resume`. A working teammate stays
   alive:
@@ -116,7 +124,13 @@ coordinate natively instead of through the shared tree.
   signal, and a queued user message makes it yield early so the steer is
   delivered at once. A report not consumed by the wait still arrives as
   an ordinary pi-teams message. While it waits the agent is published as
-  waiting, so the broker keeps a waiting fork exempt from idle GC.
+  waiting, so the broker keeps a waiting fork exempt from idle GC. A
+  teammate that goes silent for the stall bound (the `stall` parameter,
+  PI_TEAMS_STALL, default 90s; 0 disables) looks hung: the wait itself
+  sends it a continue-or-report steering message once, so a hung
+  teammate is prodded without the caller babysitting the wait, and any
+  traffic from the teammate - not only a final report - resets the
+  stall clock.
 - **Tools**: the extension exposes `team_ls`, `team_send`,
   `team_spawn`, `team_wait`, `team_attach`, and `team_peer` as agent
   tools. Sending and waiting are member-only, and a teammate may only

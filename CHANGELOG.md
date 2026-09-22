@@ -4,6 +4,31 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## Unreleased
+
+- The broker asks an idle fork whether it is done before reaping it: a
+  `finish?` query goes to the fork's client, which answers at once
+  through its heartbeat when the teammate is busy or waiting and
+  otherwise surfaces the question to its agent (whose next turn answers
+  `team finish --done`); the fork is spared while
+  PI_TEAMS_GC_PING_GRACE (default 60s, zero disables) is open, and
+  silence past the grace - or a `finish-no` answer - proceeds to the
+  reap. Parent-gone forks are still reaped at once. New
+  `src/finish_query.py` owns the outstanding-query state.
+- `team_wait` watches for hung teammates: a teammate silent for the
+  stall bound (`stall` parameter, PI_TEAMS_STALL, default 90s; 0
+  disables) is sent a continue-or-report steering message once per
+  wait, and any traffic from a waited-on teammate - not only a final
+  report - resets the stall clock.
+- Structure split past the 1200-line cap: the ssh-tunnel side of peer
+  federation moved to `src/peer_transport.py`, composed by the broker,
+  so no file mixes transport ownership with registry and relay logic.
+- Centralized single-owner cleanups from the OOP audit: one wire
+  envelope builder in the broker, one agent-id minter in the extension,
+  owned `PeerLink.drop_in_place()` instead of direct endpoint mutation,
+  a glob-based pycache cleanup in `scripts/uninstall.sh`, and the `/team
+  send` command reusing the shared member gate.
+
 ## v0.4.9 - 2026-09-22
 
 - Cross-host `team_attach` closes its four verified gaps: the attached

@@ -25,7 +25,9 @@ import {
 import { sessionsRoot } from "./pi-teams/paths.ts";
 import { ProcessRunner } from "./pi-teams/process-runner.ts";
 import {
+	DEFAULT_STALL_SECONDS,
 	DEFAULT_WAIT_SECONDS,
+	stallSeconds,
 	waitSeconds,
 	type TeamMessage,
 } from "./pi-teams/protocol.ts";
@@ -204,9 +206,12 @@ export default async function (pi: ExtensionAPI) {
 			"pi-teams messages, or re-call team_wait with the remaining " +
 			"ids to block again. While waiting the agent stays " +
 			"interruptible, yields early if you queue a message, and the " +
-			"tool call shows a live elapsed/pending status. Requires this " +
-			"session to be a team member. Pass the ids returned by " +
-			"team_spawn or team_attach.",
+			"tool call shows a live elapsed/pending status. A teammate " +
+			"silent for the stall bound looks hung: the wait auto-sends " +
+			"it a continue-or-report steering message once (stall " +
+			`parameter, PI_TEAMS_STALL, or ${DEFAULT_STALL_SECONDS}s; 0 ` +
+			"disables). Requires this session to be a team member. Pass " +
+			"the ids returned by team_spawn or team_attach.",
 		promptSnippet: "Wait for teammate reports; aborts on interrupt",
 		promptGuidelines: [
 			"Call team_wait with the teammate ids to wait for their " +
@@ -214,7 +219,9 @@ export default async function (pi: ExtensionAPI) {
 				"listing the still-running ids in details.remaining. If it " +
 				"returns without a report, that teammate is still running " +
 				"and will report as a message; re-call team_wait with the " +
-				"remaining ids to keep blocking.",
+				"remaining ids to keep blocking. A hung-looking teammate " +
+					"is nudged automatically once per wait - do not send your " +
+					"own steering message for that.",
 		],
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({
@@ -226,6 +233,12 @@ export default async function (pi: ExtensionAPI) {
 			timeout: Type.Optional(Type.Number({
 				description: "Seconds to wait (default PI_TEAMS_WAIT or " +
 					`${DEFAULT_WAIT_SECONDS})`,
+			})),
+			stall: Type.Optional(Type.Number({
+				description: "Seconds of teammate silence before the wait " +
+					"auto-sends each still-running teammate a " +
+					"continue-or-report nudge (default PI_TEAMS_STALL or " +
+					`${DEFAULT_STALL_SECONDS}; 0 disables)`,
 			})),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -265,9 +278,13 @@ export default async function (pi: ExtensionAPI) {
 			app.setState("waiting");
 			try {
 				updateStatus();
+				// Watch the wait for a hung teammate: past the stall bound
+				// the wait itself sends the continue-or-report steer, once
+				// per teammate, instead of blocking silently forever.
+				const stallMs = stallSeconds(params.stall) * 1000;
 				const results = await app.waitForResults(
 					targetIds, bound * 1000, signal,
-					() => ctx.hasPendingMessages(), updateStatus);
+					() => ctx.hasPendingMessages(), updateStatus, stallMs);
 				const reports = results.filter(
 					(message): message is TeamMessage => message !== null);
 				for (const report of reports) {
@@ -509,10 +526,13 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify("usage: /team send <id> [kind] <text>", "warning");
 					return;
 				}
-				if (!(await app.isTeammate())) {
+				try {
+					// One gate owner: the same member check the tools use.
+					await app.requireTeammate("/team send");
+				} catch (error) {
 					ctx.ui.notify(
-						"pi-teams: /team send requires being a team member; " +
-						"attach first with /team attach <parent>", "warning");
+						`pi-teams: ${error instanceof Error ? error.message : error}`,
+						"warning");
 					return;
 				}
 				const kind = m[2] || "text";

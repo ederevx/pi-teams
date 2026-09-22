@@ -23,7 +23,9 @@ import socket
 import threading
 import time
 
+from finish_query import FinishQueries
 from peer_link import PeerLink
+from peer_transport import PeerTransport
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from team_root import (
     DEFAULT_ROOT,
@@ -41,7 +43,7 @@ class TeamBroker:
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
                  fork_idle=None, busy_grace=None, sessions_root=None,
                  session_grace=None, restart_grace=None, peer_grace=None,
-                 host=None, tunnel_factory=None):
+                 gc_ping_grace=None, host=None, tunnel_factory=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
@@ -65,6 +67,18 @@ class TeamBroker:
             busy_grace if busy_grace is not None
             else os.environ.get("PI_TEAMS_BUSY_GRACE", "120")
         )
+        # Before an idle fork is reaped it is asked whether it is done:
+        # a query goes to its client, which answers at once when the
+        # teammate is busy or surfaces the question to its agent, and
+        # the fork is spared while this grace is open. Zero disables the
+        # query and reaps immediately, as earlier versions did. State
+        # (which queries are outstanding, when they expire) lives in the
+        # FinishQueries owner.
+        self.gc_ping_grace = float(
+            gc_ping_grace if gc_ping_grace is not None
+            else os.environ.get("PI_TEAMS_GC_PING_GRACE", "60")
+        )
+        self._finish_queries = FinishQueries(self.gc_ping_grace)
         # A teammate's pi session file is removed when the fork is reaped,
         # and any teammate-marked session file whose agent is not live and
         # whose mtime is older than this grace is swept. This keeps old
@@ -111,13 +125,13 @@ class TeamBroker:
         self._remote = {}
         self._peer_pending = {}
         self._peer_down_at = {}
-        # SSH transport owned by the broker: a live tunnel per label, the
-        # durable label -> ssh config, and which tunnel opened each host's
-        # outbound link. The injected factory keeps ssh out of unit tests.
-        self._tunnels = {}
-        self._peer_config = {}
-        self._peer_owner = {}
-        self._tunnel_factory = tunnel_factory or PeerTunnel
+        # SSH transport owned through the PeerTransport collaborator: a
+        # live tunnel per label, the durable label -> ssh config, and
+        # which tunnel opened each host's outbound link. The injected
+        # factory keeps ssh out of unit tests.
+        self.transport = PeerTransport(
+            self.host, tunnel_factory=tunnel_factory)
+        self.transport.persist = self._persist_peers
         self._lock = threading.RLock()
         self._running = False
         self._server = None
@@ -214,8 +228,7 @@ class TeamBroker:
         with self._lock:
             peers = list(self._peers.values())
         for peer in peers:
-            peer.endpoint = {}
-            peer.drop()
+            peer.drop_in_place()
         self._close_tunnels()
         self._close_server()
 
@@ -306,6 +319,10 @@ class TeamBroker:
         if op == "register":
             agent_id = self._register(conn, msg)
         elif op == "send":
+            kind = str(msg.get("kind") or "text")
+            if kind in ("finish-yes", "finish-no"):
+                self._handle_finish_answer(agent_id, kind, conn)
+                return agent_id
             self.dispatch(msg, agent_id, conn)
             self._touch(agent_id, work=True)
         elif op == "broadcast":
@@ -421,6 +438,7 @@ class TeamBroker:
         with self._lock:
             entry = self._registry.pop(agent_id, None)
             self._clients.pop(agent_id, None)
+        self._finish_queries.close(agent_id)
         self.root.remove_busy_file(entry)
         self._remove_session_file(entry)
         self._persist_and_notify()
@@ -440,19 +458,27 @@ class TeamBroker:
 
     # -- messaging ---------------------------------------------------
 
+    def _envelope(self, from_id, kind, payload, to=None, ts=None):
+        # One owner for the wire envelope every delivered message wears.
+        return {
+            "op": "message",
+            "from": from_id,
+            "to": to,
+            "kind": str(kind or "text"),
+            "payload": payload,
+            "ts": ts or time.time(),
+        }
+
     def dispatch(self, msg, sender_id, sender_conn):
         target = msg.get("to")
         with self._lock:
             conn = self._clients.get(target)
         if conn is not None:
-            self._write(conn, {
-                "op": "message",
-                "from": msg.get("from") or sender_id,
-                "to": target,
-                "kind": str(msg.get("kind") or "text"),
-                "payload": msg.get("payload"),
-                "ts": msg.get("ts") or time.time(),
-            })
+            self._write(conn, self._envelope(
+                msg.get("from") or sender_id,
+                msg.get("kind"), msg.get("payload"),
+                to=target, ts=msg.get("ts"),
+            ))
             self._reply(sender_conn, op="ack")
             return
         peer = self._peers.get(self._parent_host(target))
@@ -482,11 +508,10 @@ class TeamBroker:
             entry = self._registry.get(agent_id)
             conn = self._clients.pop(agent_id, None)
             self._registry.pop(agent_id, None)
+        self._finish_queries.close(agent_id)
         if conn is not None:
-            self._write(conn, {
-                "op": "message", "from": "*", "kind": "terminate",
-                "payload": {"id": agent_id, "why": why},
-            })
+            self._write(conn, self._envelope(
+                "*", "terminate", {"id": agent_id, "why": why}))
             try:
                 conn.close()
             except OSError:
@@ -541,8 +566,7 @@ class TeamBroker:
             pass
 
     def _broadcast(self, kind, payload, exclude=None):
-        envelope = {"op": "message", "from": "*", "kind": kind,
-                    "payload": payload}
+        envelope = self._envelope("*", kind, payload)
         with self._lock:
             conns = [
                 c for i, c in self._clients.items()
@@ -552,6 +576,23 @@ class TeamBroker:
             self._write(conn, envelope)
 
     # -- liveness ----------------------------------------------------
+
+    def _handle_finish_answer(self, agent_id, kind, conn):
+        # A finish query's answer arrives as a relayed message whose kind
+        # carries the answer. "yes" says still working: drop the query
+        # and give the idle clock a fresh window before asking again.
+        # "no" says done: reap now instead of waiting out the grace on
+        # mere silence. Only these two kinds reach here.
+        if kind == "finish-yes":
+            if agent_id:
+                self._finish_queries.close(agent_id)
+                self._touch(agent_id, work=True)
+        elif kind == "finish-no":
+            if agent_id and \
+                    self._registry.get(agent_id, {}).get("role") == "fork":
+                self._reap_fork(agent_id, "finished")
+                self._persist_and_notify()
+        self._reply(conn, op="ack")
 
     def _sweep_loop(self):
         while self._running:
@@ -569,12 +610,48 @@ class TeamBroker:
         self._maybe_restart(now)
         doomed_fork, doomed_idle = self._classify(now)
         if not doomed_fork and not doomed_idle:
+            self._finish_queries.expired(now)
             return
+        # An idle fork is asked whether it is done before it is reaped;
+        # only silence (or a done answer) past the grace proceeds. A
+        # parent-gone fork loses its owner at once, so a query cannot
+        # save it and none is sent.
+        asked = self._ask_idle_forks(doomed_fork, now)
         for agent_id, why in doomed_fork:
+            if agent_id in asked:
+                continue
             self._reap_fork(agent_id, why)
         for agent_id in doomed_idle:
             self._forget(agent_id)
+        self._finish_queries.expired(now)
         self._persist_and_notify()
+
+    def _ask_idle_forks(self, doomed_fork, now):
+        # Sends a finish query to each work-idle fork whose grace is not
+        # open yet and marks the query outstanding; returns the set of
+        # agent ids that must not be reaped this sweep because their
+        # answer window is open. A parent-gone fork is never asked: its
+        # team is gone, so a continue answer has no one to return to.
+        asked = set()
+        if not self._finish_queries.enabled:
+            return asked
+        for agent_id, why in doomed_fork:
+            if why != "idle-gc" or \
+                    agent_id in self._finish_queries.ids():
+                continue
+            entry = self._registry.get(agent_id)
+            if entry is None:
+                continue
+            conn = self._clients.get(agent_id)
+            if conn is None:
+                continue
+            self._write(conn, self._envelope(
+                "*", "finish?", {"id": agent_id, "why": "idle-gc"}))
+            self._finish_queries.open(agent_id, now)
+        for agent_id in self._finish_queries.ids():
+            if self._finish_queries.is_open(agent_id, now):
+                asked.add(agent_id)
+        return asked
 
     def _classify(self, now):
         # Pure policy: which agents have outlived their liveness window.
@@ -615,6 +692,7 @@ class TeamBroker:
         with self._lock:
             conn = self._clients.pop(agent_id, None)
             entry = self._registry.pop(agent_id, None)
+        self._finish_queries.close(agent_id)
         if conn is not None:
             try:
                 conn.close()
@@ -778,7 +856,7 @@ class TeamBroker:
             self._peers[host] = peer
             self._peers_by_conn[conn] = peer
             self._peer_down_at.pop(host, None)
-            self._peer_owner.pop(host, None)
+        self.transport.clear_owner(host, None)
         if old is not None and old is not peer and old.connected:
             old.drop()
         # Our own outbound tunnel to this host is now redundant. Close it
@@ -788,8 +866,7 @@ class TeamBroker:
         if redundant is not None and self.host > host:
             # Keep the durable config: the label stays a known peer even
             # though the inbound link now serves the host.
-            with self._lock:
-                self._tunnels.pop(redundant.label, None)
+            self.transport.forget_tunnel(redundant)
             redundant.close()
         peer.send({"op": "peer-registry", "agents": self._snapshot()})
 
@@ -826,8 +903,7 @@ class TeamBroker:
         if peer is not None:
             # Drop in place so _peer_down still sees it as current and
             # reaps that host's forks and pending relays.
-            peer.endpoint = {}
-            peer.drop()
+            peer.drop_in_place()
         else:
             with self._lock:
                 self._remote.pop(host, None)
@@ -840,80 +916,32 @@ class TeamBroker:
     # -- broker-owned ssh transport ----------------------------------
 
     def _tunnel_for(self, host):
-        with self._lock:
-            for tunnel in self._tunnels.values():
-                if tunnel.host == host:
-                    return tunnel
-        return None
+        return self.transport.tunnel_for(host)
 
     def add_peer(self, label, ssh):
         """Own the ssh tunnel to a peer and link it. Replaces any tunnel
         or link already serving the same label or host."""
-        label = label or ssh
-        if not label or not ssh:
-            raise PeerUnreachable(
-                ssh, "label and ssh target are required", "")
-        old = self._tunnels.pop(label, None)
-        if old is not None:
+
+        def link_state(link_host):
             with self._lock:
-                if self._peer_owner.get(old.host) is old:
-                    self._peer_owner.pop(old.host, None)
-            old.close()
-        with self._lock:
-            self._peer_config.pop(label, None)
-        tunnel = self._tunnel_factory(label, ssh, on_exit=self._tunnel_down)
-        endpoint = tunnel.start()
-        host = tunnel.host or label
-        with self._lock:
-            existing = self._peers.get(host)
-            owns_link = self._peer_owner.get(host) is not None
-        if (existing is not None and existing.connected and not owns_link
-                and self.host > host):
-            # A connected inbound link already serves this host, and this
-            # host is the larger label, so the smaller host owns the
-            # outbound direction. Keep the working link and spend the new
-            # tunnel instead of tearing down the pair.
-            tunnel.close()
-            with self._lock:
-                self._peer_config[label] = {"ssh": ssh, "host": host}
-            self._persist_peers()
-            return {"label": label, "host": host,
-                    "endpoint": existing.endpoint}
-        # One host has one live link; a tunnel under another label for
-        # the same host is released before the new one takes ownership.
-        other = self._tunnel_for(host)
-        if other is not None and other is not tunnel:
-            with self._lock:
-                self._tunnels.pop(other.label, None)
-                self._peer_config.pop(other.label, None)
-                self._peer_owner.pop(host, None)
-            other.close()
-        if not self.link_peer(host, endpoint, persist=False, replace=True):
-            tunnel.close()
-            raise PeerUnreachable(
-                ssh, "the peer endpoint did not accept the link",
-                tunnel.setup_command())
-        with self._lock:
-            self._tunnels[label] = tunnel
-            self._peer_owner[host] = tunnel
-            self._peer_config[label] = {"ssh": ssh, "host": host}
-        self._persist_peers()
-        return {"label": label, "host": host, "endpoint": endpoint}
+                existing = self._peers.get(link_host)
+                owns_link = self.transport.link_owned(link_host)
+            return existing, owns_link
+
+        def try_link(link_host, endpoint):
+            return self.link_peer(
+                link_host, endpoint, persist=False, replace=True)
+
+        host, endpoint = self.transport.add(
+            label, ssh, on_exit=self._tunnel_down,
+            link_state=link_state, try_link=try_link)
+        return {"label": label or ssh, "host": host, "endpoint": endpoint}
 
     def remove_peer(self, label, reap=True):
         """Close a peer's tunnel and drop its link. An explicit removal
         reaps its remote-parented forks at once instead of waiting out the
         reconnect grace."""
-        with self._lock:
-            tunnel = self._tunnels.pop(label, None)
-            self._peer_config.pop(label, None)
-        host = None
-        if tunnel is not None:
-            host = tunnel.host
-            with self._lock:
-                if self._peer_owner.get(host) is tunnel:
-                    self._peer_owner.pop(host, None)
-            tunnel.close()
+        host = self.transport.remove(label)
         if host:
             self._remove_peer(host, reap=reap)
         else:
@@ -923,41 +951,17 @@ class TeamBroker:
         # ssh exited on its own. Forget the tunnel but keep the durable
         # config so the next broker start can restore it; drop the link
         # only when this tunnel still owned it.
-        with self._lock:
-            if self._tunnels.get(tunnel.label) is tunnel:
-                self._tunnels.pop(tunnel.label, None)
-            owns = bool(tunnel.host) \
-                and self._peer_owner.get(tunnel.host) is tunnel
-            if owns:
-                self._peer_owner.pop(tunnel.host, None)
-        if owns:
-            self._remove_peer(tunnel.host)
+        host = self.transport.forget_tunnel(tunnel)
+        if host:
+            self._remove_peer(host)
 
     def peer_list(self):
-        with self._lock:
-            config = {label: dict(meta)
-                      for label, meta in self._peer_config.items()}
-        peers = []
-        for label in sorted(config):
-            meta = config[label]
-            host = meta.get("host") or label
+        def connected(link_host):
             with self._lock:
-                peer = self._peers.get(host)
-            peers.append({
-                "label": label,
-                "host": host,
-                "online": bool(peer and peer.connected),
-                "ssh": meta.get("ssh") or "",
-            })
-        return peers
+                peer = self._peers.get(link_host)
+            return bool(peer and peer.connected)
+        return self.transport.list(connected)
 
-    def _close_tunnels(self):
-        with self._lock:
-            tunnels = list(self._tunnels.values())
-            self._tunnels.clear()
-            self._peer_owner.clear()
-        for tunnel in tunnels:
-            tunnel.close()
 
     def _peer_message(self, peer, msg):
         op = msg.get("op")
@@ -987,14 +991,11 @@ class TeamBroker:
         with self._lock:
             conn = self._clients.get(target)
         if conn is not None:
-            self._write(conn, {
-                "op": "message",
-                "from": msg.get("from") or peer.host,
-                "to": target,
-                "kind": str(msg.get("kind") or "text"),
-                "payload": msg.get("payload"),
-                "ts": msg.get("ts") or time.time(),
-            })
+            self._write(conn, self._envelope(
+                msg.get("from") or peer.host,
+                msg.get("kind"), msg.get("payload"),
+                to=target, ts=msg.get("ts"),
+            ))
         peer.send({"op": "peer-ack", "id": msg.get("id"),
                    "ok": conn is not None})
 
@@ -1082,28 +1083,13 @@ class TeamBroker:
             self._persist_and_notify()
 
     def _load_peers(self):
-        for label, meta in self.root.read_peers().items():
-            if not isinstance(meta, dict):
-                continue
-            ssh = meta.get("ssh")
-            if not ssh:
-                continue
-            try:
-                self.add_peer(label, ssh)
-            except PeerUnreachable:
-                # Keep the durable config: the host may be down, and an
-                # explicit re-add or the next broker start retries.
-                with self._lock:
-                    self._peer_config[label] = {
-                        "ssh": ssh, "host": meta.get("host") or label,
-                    }
-        self._persist_peers()
+        def try_restore(label, ssh):
+            self.add_peer(label, ssh)
+
+        self.transport.load(self.root.read_peers, try_restore)
 
     def _persist_peers(self):
-        with self._lock:
-            config = {label: dict(meta)
-                      for label, meta in self._peer_config.items()}
-        self.root.write_peers(config)
+        self.root.write_peers(self.transport.snapshot_config())
 
     # -- low-level writes -------------------------------------------
 
@@ -1129,11 +1115,13 @@ class TeamBroker:
             peers = list(self._peers.values())
             self._clients.clear()
             self._registry.clear()
+            self._finish_queries.clear()
             self._peer_pending.clear()
             self._remote.clear()
             self._peer_down_at.clear()
             self._peers.clear()
             self._peers_by_conn.clear()
+        self._close_tunnels()
         for entry in pending:
             self._reply(entry[0], op="error", error="undeliverable")
         self._close_tunnels()
@@ -1144,3 +1132,6 @@ class TeamBroker:
                 pass
         for peer in peers:
             peer.drop()
+
+    def _close_tunnels(self):
+        self.transport.close_all()

@@ -63,9 +63,11 @@ class AttachCrossHostTests(unittest.TestCase):
     def _start_broker(self, root, host, fork_idle=IDLE_ROOMY):
         sessions = os.path.join(root, "sessions")
         os.makedirs(sessions, exist_ok=True)
+        # gc_ping_grace=0: these tests assert reap timing, not the
+        # finish-query courtesy, so the query is disabled.
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             sweep_interval=0.1, host=host,
-                            fork_idle=fork_idle,
+                            fork_idle=fork_idle, gc_ping_grace=0,
                             sessions_root=sessions, session_grace=0.3)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
