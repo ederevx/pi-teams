@@ -96,19 +96,15 @@ coordinate natively instead of through the shared tree.
   launch, holds its stdin pipe open so the teammate stays alive for
   messages, and closes the pipe when this pi goes away. There is no
   override for the pi command, so the structured spawner is the only
-  launch path. The tool takes a task plus an optional name and context:
-  the extension supplies the session, inherits the current model and
-  thinking level, and prepends the report-back instruction. Teammates
-  are chosen by an auto policy: a spawn forks the parent session
-  ("inherit") while the parent's last turn is recent enough that the
-  provider's warm prefix cache plausibly still covers it (checked
-  against per-provider cache TTLs and a session-size cap, so a long or
-  stale parent stays fresh), and starts with a clean context otherwise.
-  `context=inherit` and `context=fresh` override the policy in either
-  direction. The fork can reuse the parent's warm prefix cache only
-  while the provider still retains it (same model, within its TTL). GC
-  reaps only the process, leaving the session file for later resumption.
-  When a fork starts, the pi child registers through the same extension.
+  launch path. The tool takes a task plus an optional name: the
+  extension supplies the session, inherits the current model and
+  thinking level, and prepends the report-back instruction. Context
+  follows pi's own subagent semantics: like a `subagent` delegation,
+  the teammate starts with a clean context and receives only the task
+  text - the parent's transcript is never forked in, so no cache-warmth
+  heuristic decides what the teammate sees. GC reaps only the process,
+  leaving the session file for later resumption. When a fork starts,
+  the pi child registers through the same extension.
   `team_wait` actively waits: it blocks until each named teammate
   reports, returning the reports as the tool result. The wait stays
   steerable and interruptible: Escape aborts it through the run's abort

@@ -4,6 +4,17 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.7 - 2026-09-22
+
+- Teammate spawns mirror pi's subagent semantics strictly: a teammate
+  starts with a clean context and receives only the task text, like a
+  `subagent` delegation. The context auto-policy is removed together
+  with the `context=fresh`/`context=inherit` tool parameter, the
+  `--fork` launch path, and the provider cache-TTL profiles - the
+  parent's transcript is never inherited, so no spawn depends on a
+  provider cache heuristic. The teammate remains a persistent, named,
+  resumable RPC session reported through the broker.
+
 ## v0.4.6 - 2026-09-22
 
 - Teammate spawns choose their context automatically: an auto policy

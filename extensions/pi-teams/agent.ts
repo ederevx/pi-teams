@@ -30,7 +30,6 @@ import {
 } from "./spawn.ts";
 import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
-import { ContextPolicy } from "./context-policy.ts";
 import {
 	DEFAULT_WAIT_SECONDS,
 	WAIT_POLL_MS,
@@ -61,7 +60,6 @@ export class TeamAgent {
 	private readonly pending = new PendingRequests();
 	private readonly spawns: SpawnService;
 	private readonly inbox = new ResultInbox();
-	private readonly contextPolicy = new ContextPolicy();
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
@@ -419,23 +417,19 @@ export class TeamAgent {
 	}
 
 	/** A peer host asked this agent to spawn a teammate: this host owns
-	 *  the process and session and reports the new id back. Context
-	 *  inheritance is valid only when both agents share a host. */
+	 *  the process and session and reports the new id back. */
 	private handleSpawnRequest(message: TeamMessage): void {
 		const payload = (message.payload ?? {}) as {
 			task?: string; name?: string; requestId?: string;
 			provider?: string; model?: string; thinking?: string;
-			context?: "fresh" | "inherit";
 		};
 		if (!payload.task) return;
-		if (!this.sameHost(message.from)) payload.context = "fresh";
 		try {
 			const ref = this.spawnTask(payload.name || "", payload.task, {
 				parent: message.from,
 				provider: payload.provider,
 				model: payload.model,
 				thinking: payload.thinking,
-				context: payload.context,
 			});
 			void this.send(message.from, "spawn-ack", JSON.stringify({
 				requestId: payload.requestId, id: ref.id,
@@ -446,11 +440,6 @@ export class TeamAgent {
 				requestId: payload.requestId,
 			}));
 		}
-	}
-
-	/** Whether an agent id names an agent on this host. */
-	private sameHost(agentId: string): boolean {
-		return !agentId.includes(":") || agentId.startsWith(`${this.host}:`);
 	}
 
 	/** Re-registers this running session as a teammate of `parent`. The
@@ -553,21 +542,13 @@ export class TeamAgent {
 
 	/** The common teammate template: the caller supplies only the task and
 	 *  an optional name; session, model, and the report-back instruction
-	 *  are supplied here. */
+	 *  are supplied here. Like a subagent delegation, the teammate gets
+	 *  the task alone and a clean context; unlike a subagent it stays a
+	 *  persistent, resumable RPC session. */
 	spawnTask(name: string, task: string, options: SpawnOptions = {}): TeammateRef {
 		const forkId = this.makeForkId();
 		const session = name || forkId;
-		const inherit = options.context
-			? options.context === "inherit"
-				: this.contextPolicy.autoContext(
-						this.sessionFile,
-						options.provider,
-					) === "inherit";
-		if (inherit && !this.sessionFile) {
-			throw new Error(
-				"cannot inherit context: this session has no file to fork");
-		}
-		const args = this.teammateArgs(session, options, inherit);
+		const args = this.teammateArgs(session, options);
 		this.launchTeammate(forkId, session, args,
 			this.taskPrompt(session, task), options.parent);
 		return { id: forkId, session };
@@ -575,15 +556,14 @@ export class TeamAgent {
 
 	/** The spawn argv for a teammate: a headless RPC session, not a
 	 *  one-shot `pi -p`, that inherits the parent's session directory,
-	 *  provider, model, and thinking level. */
+	 *  provider, model, and thinking level. The context itself is never
+	 *  inherited: like a subagent, a teammate starts clean. */
 	private teammateArgs(
 		session: string,
 		options: SpawnOptions,
-		inherit: boolean,
 	): string[] {
 		return [
 			"--mode", "rpc",
-			...(inherit ? ["--fork", this.sessionFile] : []),
 			...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
 			"--name", session,
 			...(options.provider ? ["--provider", options.provider] : []),
