@@ -17,7 +17,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { TeamAgent } from "./pi-teams/agent.ts";
 import { ChatTail } from "./pi-teams/chat-tail.ts";
-import { deliverToAgent, logTeamMessage } from "./pi-teams/messages.ts";
+import {
+	deliverToAgent,
+	formatReport,
+	logTeamMessage,
+} from "./pi-teams/messages.ts";
 import { sessionsRoot } from "./pi-teams/paths.ts";
 import { ProcessRunner } from "./pi-teams/process-runner.ts";
 import {
@@ -198,18 +202,24 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_wait",
 		label: "wait for teammates",
 		description:
-			"Wait for one or more teammates to report, returning each " +
-			"report as the tool result. While waiting the agent stays " +
-			"interruptible and yields early if you queue a message, so " +
-			"you can still steer it; a result not consumed here arrives " +
-			"as a pi-teams message. Requires this session to be a team " +
-			"member. Pass the ids returned by team_spawn or team_attach.",
+			"Wait for teammates to report and return as soon as the first " +
+			"report lands: the tool result carries every report available " +
+			"at that moment, and details lists the remaining ids. " +
+			"Remaining teammates keep running; their reports arrive as " +
+			"pi-teams messages, or re-call team_wait with the remaining " +
+			"ids to block again. While waiting the agent stays " +
+			"interruptible, yields early if you queue a message, and the " +
+			"tool call shows a live elapsed/pending status. Requires this " +
+			"session to be a team member. Pass the ids returned by " +
+			"team_spawn or team_attach.",
 		promptSnippet: "Wait for teammate reports; aborts on interrupt",
 		promptGuidelines: [
 			"Call team_wait with the teammate ids to wait for their " +
-				"reports; it returns them as the tool result. If it returns " +
-				"without a report, that teammate is still running and will " +
-				"report as a message.",
+				"reports; it returns as soon as the first report lands, " +
+				"listing the still-running ids in details.remaining. If it " +
+				"returns without a report, that teammate is still running " +
+				"and will report as a message; re-call team_wait with the " +
+				"remaining ids to keep blocking.",
 		],
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({
@@ -223,28 +233,55 @@ export default async function (pi: ExtensionAPI) {
 					`${DEFAULT_WAIT_SECONDS})`,
 			})),
 		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			await app.requireTeammate("team_wait");
-			const targetIds = (params.ids && params.ids.length > 0)
+			// A duplicated id would wait on one teammate twice; dedupe so
+			// the wait's result mapping stays one entry per teammate.
+			const requested = (params.ids && params.ids.length > 0)
 				? params.ids
 				: params.id ? [params.id] : [];
+			const targetIds = [...new Set(requested)];
 			if (targetIds.length === 0) {
 				throw new Error("team_wait needs at least one teammate id");
 			}
 			const bound = waitSeconds(params.timeout);
+			// Live wait status: a partial tool result the TUI re-renders
+			// while the call runs, refreshed from the wait's own poll at
+			// most once a second so the row is not rebuilt on every tick.
+			const startedAt = Date.now();
+			let lastStatus = 0;
+			const updateStatus = (): void => {
+				const now = Date.now();
+				if (now - lastStatus < 1000) return;
+				lastStatus = now;
+				onUpdate?.({
+					content: [{
+						type: "text",
+						text: `waiting for ${targetIds.length} teammate(s): ` +
+							`${targetIds.join(", ")} ` +
+							`(${Math.round((now - startedAt) / 1000)}s elapsed)`,
+					}],
+					details: undefined,
+				});
+			};
 			// A waiting agent is not working: publish that for the whole
 			// wait so the broker keeps a fork exempt from idle GC, then
 			// restore the turn's busy state.
 			app.setState("waiting");
 			try {
+				updateStatus();
 				const results = await app.waitForResults(
 					targetIds, bound * 1000, signal,
-					() => ctx.hasPendingMessages());
+					() => ctx.hasPendingMessages(), updateStatus);
 				const reports = results.filter(
 					(message): message is TeamMessage => message !== null);
 				for (const report of reports) {
 					logTeamMessage(pi, "received", report);
 				}
+				// The first result ends the wait; the unreported ids keep
+				// running and stay available for another team_wait call.
+				const remaining = targetIds.filter((_id, index) =>
+					results[index] === null);
 				if (reports.length === 0) {
 					return {
 						content: [{
@@ -253,17 +290,17 @@ export default async function (pi: ExtensionAPI) {
 								`${targetIds.join(", ")} within ${bound}s; ` +
 								`still running, and each will report as a message.`,
 						}],
-						details: { ids: targetIds, reports: [] },
+						details: { ids: targetIds, reports: [], remaining },
 					};
 				}
-				const text = reports.map((report) =>
-					`pi-teams ${report.kind} from ${report.from}:\n` +
-					(typeof report.payload === "string"
-						? report.payload
-						: JSON.stringify(report.payload))).join("\n\n");
+				const text = reports.map(formatReport).join("\n\n") +
+					(remaining.length > 0
+						? `\n\nStill waiting on ${remaining.join(", ")}; ` +
+							`re-call team_wait with those ids to block again.`
+						: "");
 				return {
 					content: [{ type: "text", text }],
-					details: { ids: targetIds, reports },
+					details: { ids: targetIds, reports, remaining },
 				};
 			} finally {
 				app.setBusy(true);

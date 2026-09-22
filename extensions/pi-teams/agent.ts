@@ -728,17 +728,21 @@ export class TeamAgent {
 		}
 	}
 
-	/** Actively waits for one result per listed teammate under the call's
-	 *  stop conditions: a result arrives, the bound elapses, the run aborts
-	 *  (Escape), a user message is queued, or the session deregisters. The
-	 *  poll awaits between checks so the TUI stays responsive and the wait
-	 *  stays steerable. Returns one entry per id, null when that teammate
-	 *  did not report before the wait ended. */
+	/** Actively waits for teammates' results under the call's stop
+	 *  conditions: the first result arrives, the bound elapses, the run
+	 *  aborts (Escape), a user message is queued, or the session
+	 *  deregisters. The first result ends the wait at once; the other
+	 *  ids keep running and their later reports stay in the inbox. The
+	 *  poll awaits between checks so the TUI stays responsive and the
+	 *  wait stays steerable, and onTick fires each poll for progress
+	 *  display. Returns one entry per id, null when that teammate did
+	 *  not report before the wait ended. */
 	async waitForResults(
 		agentIds: string[],
 		timeoutMs: number,
 		signal: AbortSignal | undefined,
 		shouldYield: () => boolean,
+		onTick?: () => void,
 	): Promise<Array<TeamMessage | null>> {
 		const results = new Map<string, TeamMessage>();
 		const pending: string[] = [];
@@ -747,8 +751,10 @@ export class TeamAgent {
 			if (buffered) results.set(id, buffered);
 			else pending.push(id);
 		}
-		const canWait = pending.length > 0 && !this.closed
-			&& !signal?.aborted && !shouldYield();
+		// A buffered report already satisfies the first-result trigger,
+		// so return it now instead of holding the wait open.
+		const canWait = results.size === 0 && pending.length > 0
+			&& !this.closed && !signal?.aborted && !shouldYield();
 		if (canWait) {
 			await new Promise<void>((resolve) => {
 				const unwatchers: Array<() => void> = [];
@@ -772,22 +778,28 @@ export class TeamAgent {
 							return;
 						}
 						results.set(id, message);
-						if (results.size === agentIds.length) finish();
+						// The first result ends the wait; the unwatchers
+						// below free the other ids' watchers, and their
+						// later reports stay buffered in the inbox.
+						finish();
 					});
 					unwatchers.push(unwatch);
 				}
+				// Every resource is created before the first stop check,
+				// so a wait that ends at once still releases all of them.
+				const effective = timeoutMs > 0
+					? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
+				timer = setTimeout(finish, effective);
 				poll = setInterval(() => {
+					onTick?.();
 					if (this.closed || signal?.aborted || shouldYield()) {
 						finish();
 					}
 				}, WAIT_POLL_MS);
 				if (signal) {
+					signal.addEventListener("abort", onAbort, { once: true });
 					if (signal.aborted) finish();
-					else signal.addEventListener("abort", onAbort, { once: true });
 				}
-				const effective = timeoutMs > 0
-					? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
-				timer = setTimeout(finish, effective);
 			});
 		}
 		return agentIds.map((id) => results.get(id) ?? null);

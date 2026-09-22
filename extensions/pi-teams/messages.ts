@@ -7,6 +7,22 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TeamMessage } from "./protocol.ts";
 
+/** Renders the message payload as display text: a string as-is, any
+ *  other shape as JSON. */
+function payloadText(message: TeamMessage): string {
+	return typeof message.payload === "string"
+		? message.payload
+		: JSON.stringify(message.payload);
+}
+
+/** Formats a team message as the report text the agent reads. One
+ *  owner for the report wording, shared by message delivery and the
+ *  team_wait tool result. */
+export function formatReport(message: TeamMessage): string {
+	return `pi-teams ${message.kind} from ${message.from}:\n` +
+		payloadText(message);
+}
+
 /** Records a one-line, truncated log entry for a team message. The
  *  renderer shows the preview, or the full payload when expanded. */
 export function logTeamMessage(
@@ -14,10 +30,7 @@ export function logTeamMessage(
 	direction: "sent" | "received",
 	message: TeamMessage,
 ): void {
-	const payload =
-		typeof message.payload === "string"
-			? message.payload
-			: JSON.stringify(message.payload);
+	const payload = payloadText(message);
 	const preview = payload.length > 96
 		? `${payload.slice(0, 93)}...`
 		: payload;
@@ -38,14 +51,10 @@ export function deliverToAgent(pi: ExtensionAPI, message: TeamMessage): void {
 	// A notice is bookkeeping (for example a teammate announcing its
 	// session); record it without forcing a model turn.
 	if (message.kind === "notice") return;
-	const payload =
-		typeof message.payload === "string"
-			? message.payload
-			: JSON.stringify(message.payload);
 	void pi.sendMessage(
 		{
 			customType: "pi-teams",
-			content: `pi-teams ${message.kind} from ${message.from}:\n${payload}`,
+			content: formatReport(message),
 			display: true,
 		},
 		{ triggerTurn: true, deliverAs: "steer" },
