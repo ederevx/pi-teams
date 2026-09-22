@@ -44,12 +44,7 @@ done
 # Remove the bytecode caches the installed modules leave behind.
 if [[ -n "$bin_dir" ]]; then
 	shopt -s nullglob
-	for cache in "$bin_dir"/__pycache__/teamd.*.pyc \
-		"$bin_dir"/__pycache__/team.*.pyc \
-		"$bin_dir"/__pycache__/team_root.*.pyc \
-		"$bin_dir"/__pycache__/team_broker.*.pyc \
-		"$bin_dir"/__pycache__/team_client.*.pyc \
-		"$bin_dir"/__pycache__/peer_link.*.pyc; do
+	for cache in "$bin_dir"/__pycache__/*.pyc; do
 		rm -f "$cache"
 	done
 	rmdir "$bin_dir/__pycache__" 2>/dev/null || true

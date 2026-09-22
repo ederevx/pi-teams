@@ -399,10 +399,150 @@ class BrokerProtocolTests(unittest.TestCase):
         thread.join(timeout=3)
         shutil.rmtree(root, ignore_errors=True)
 
+    def test_idle_fork_is_asked_before_reap_and_spared(self):
+        # The courtesy query: an idle fork is asked whether it is done
+        # and survives while its answer window is open.
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
+                            sweep_interval=0.1, gc_ping_grace=1.5)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"]
+        )
+        try:
+            wait_endpoint(root)
+            parent = TeamClient(root, heartbeat=None)
+            parent.id = "parent-q"
+            parent.role = "main"
+            parent.register()
+            fork = TeamClient(root, heartbeat=None)
+            fork.id = "fork-query"
+            fork.name = "fork-query"
+            fork.role = "fork"
+            fork.parent = "parent-q"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            # Past the fork-idle window the query is sent and the fork
+            # stays registered well past the fork-idle grace.
+            self.assertTrue(
+                wait_until(
+                    lambda: "fork-query" in broker._finish_queries.ids(),
+                    timeout=3),
+                "idle fork was never asked whether it is done",
+            )
+            time.sleep(1.0)
+            self.assertIn("fork-query", self._ids_via(root),
+                          "queried fork was reaped inside its grace")
+            self.assertIsNone(dummy.poll(),
+                              "queried fork's owner was signalled early")
+            # Silence past the grace proceeds to the reap.
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=8),
+                "idle fork's owner was never garbage-collected",
+            )
+            self.assertTrue(
+                wait_until(lambda: "fork-query" not in self._ids_via(root)),
+                "garbage-collected fork stays in the registry",
+            )
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_finish_yes_resets_the_idle_clock(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
+                            sweep_interval=0.1, gc_ping_grace=1.0)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"]
+        )
+        try:
+            wait_endpoint(root)
+            parent = TeamClient(root, heartbeat=None)
+            parent.id = "parent-y2"
+            parent.role = "main"
+            parent.register()
+            fork = TeamClient(root, heartbeat=None)
+            fork.id = "fork-yes"
+            fork.role = "fork"
+            fork.parent = "parent-y2"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            self.assertTrue(
+                wait_until(lambda: "fork-yes" in self._ids_via(root)),
+            )
+            time.sleep(0.6)
+            # The agent answers that it is still working: the query
+            # closes and the fork gets a fresh idle window.
+            fork.send_msg("*", "finish-yes", {"id": "fork-yes"})
+            time.sleep(0.3)
+            self.assertIn("fork-yes", self._ids_via(root),
+                          "finish-yes did not spare the fork")
+            self.assertIsNone(dummy.poll(),
+                              "finish-yes still led to a signal")
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_finish_no_reaps_at_once(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
+                            sweep_interval=0.1, gc_ping_grace=5.0)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"]
+        )
+        try:
+            wait_endpoint(root)
+            parent = TeamClient(root, heartbeat=None)
+            parent.id = "parent-n"
+            parent.role = "main"
+            parent.register()
+            fork = TeamClient(root, heartbeat=None)
+            fork.id = "fork-no"
+            fork.role = "fork"
+            fork.parent = "parent-n"
+            fork.owner_pid = str(dummy.pid)
+            fork.register()
+            time.sleep(0.5)
+            # The agent answers that it is done: no grace is awaited.
+            fork.send_msg("*", "finish-no", {"id": "fork-no"})
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=5),
+                "finish-no did not reap the finished fork",
+            )
+            self.assertTrue(
+                wait_until(lambda: "fork-no" not in self._ids_via(root)),
+            )
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_fork_idle_gc_kills_owner(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1)
+                            sweep_interval=0.1, gc_ping_grace=0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -442,7 +582,7 @@ class BrokerProtocolTests(unittest.TestCase):
     def test_busy_ping_keeps_fork_alive(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.5,
-                            sweep_interval=0.1)
+                            sweep_interval=0.1, gc_ping_grace=0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -491,7 +631,7 @@ class BrokerProtocolTests(unittest.TestCase):
     def test_waiting_fork_survives_idle_gc(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=2.0, fork_idle=0.5,
-                            sweep_interval=0.1)
+                            sweep_interval=0.1, gc_ping_grace=0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(

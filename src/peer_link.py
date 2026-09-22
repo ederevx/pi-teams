@@ -24,6 +24,13 @@ class PeerLink:
         self._send_lock = threading.Lock()
         self._drop_lock = threading.Lock()
 
+    def drop_in_place(self):
+        # Drops the link and clears the endpoint in one owned step, so a
+        # drop-in-place (an explicit removal or shutdown) cannot leave a
+        # reconnectable endpoint behind on a dead link.
+        self.endpoint = {}
+        self.drop()
+
     def open(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:

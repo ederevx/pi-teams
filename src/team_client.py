@@ -353,6 +353,15 @@ class TeamClient:
             return
         print(json.dumps(msg, separators=(",", ":")), flush=True)
 
+    def answer_finish(self, done):
+        # The agent-facing answer to a finish query: run from the agent's
+        # shell tool after it sees the surfaced "finish?" question. The
+        # idle agent cannot answer through its heartbeat, so this CLI
+        # command speaks for it.
+        return self.send_msg("*", "finish-yes" if not done else "finish-no",
+                             {"id": self.ensure_id(),
+                              "state": self._state()})
+
     def hold(self):
         self.register()
         stdin_dead = self._watch_stdin()
@@ -368,6 +377,20 @@ class TeamClient:
                     break
                 if msg is None or msg.get("kind") == "terminate":
                     return
+                if msg.get("kind") == "finish?":
+                    # The broker asks whether this agent is done before
+                    # reaping it. A busy or waiting agent is still
+                    # working and answers at once; an idle agent is
+                    # blocked in pi and cannot answer by itself, so the
+                    # question is surfaced for its next turn to decide.
+                    state = self._state()
+                    if state in ("busy", "waiting"):
+                        self.send_msg("*", "finish-yes", {
+                            "id": self.ensure_id(), "state": state,
+                        })
+                    else:
+                        self._emit(msg)
+                    continue
                 self._emit(msg)
                 if stdin_dead.is_set():
                     return
