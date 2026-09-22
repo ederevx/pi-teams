@@ -30,6 +30,7 @@ import {
 } from "./spawn.ts";
 import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
+import { TeammateRole } from "./roles.ts";
 import {
 	DEFAULT_WAIT_SECONDS,
 	WAIT_POLL_MS,
@@ -60,6 +61,7 @@ export class TeamAgent {
 	private readonly pending = new PendingRequests();
 	private readonly spawns: SpawnService;
 	private readonly inbox = new ResultInbox();
+	private readonly teammateRole = new TeammateRole();
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
@@ -557,7 +559,9 @@ export class TeamAgent {
 	/** The spawn argv for a teammate: a headless RPC session, not a
 	 *  one-shot `pi -p`, that inherits the parent's session directory,
 	 *  provider, model, and thinking level. The context itself is never
-	 *  inherited: like a subagent, a teammate starts clean. */
+	 *  inherited: like a subagent, a teammate starts clean. Every
+	 *  teammate carries the general teammate role as its appended
+	 *  system prompt, independent of its task. */
 	private teammateArgs(
 		session: string,
 		options: SpawnOptions,
@@ -566,6 +570,7 @@ export class TeamAgent {
 			"--mode", "rpc",
 			...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
 			"--name", session,
+			"--append-system-prompt", this.teammateRole.systemPrompt,
 			...(options.provider ? ["--provider", options.provider] : []),
 			...(options.model ? ["--model", options.model] : []),
 			...(options.thinking ? ["--thinking", options.thinking] : []),
@@ -579,17 +584,19 @@ export class TeamAgent {
 
 	private taskPrompt(session: string, task: string): string {
 		// The marker phrase here is the broker's teammate-session stamp; keep
-		// it in sync with TEAMMATE_MARKER in src/teamd.py.
-		// Call the interpreter on the absolute client path instead of a
+		// it in sync with TEAMMATE_MARKER in src/teamd.py. The role itself
+		// rides in the appended system prompt; this prompt carries only the
+		// session identity, the report mechanics, and the task. Call the
+		// interpreter on the absolute client path instead of a
 		// `team` name on PATH: a shebang script is not executable on
 		// Windows, and binDir may not be on PATH. The teammate runs this
 		// through its shell tool, where the $TEAM_* variables expand.
 		const send = this.reportCommand();
 		return (
 			`You are "${session}", a teammate spawned by a parent pi session ` +
-			`to do one task. Do the task, then report the outcome to your ` +
-			`parent by running this command:\n  ${send}\n` +
-			`Do not write memory. Task:\n${task}`
+			`to do one task. Report the outcome to your parent by running ` +
+			`this command:\n  ${send}\n` +
+			`Task:\n${task}`
 		);
 	}
 

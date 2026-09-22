@@ -102,9 +102,12 @@ coordinate natively instead of through the shared tree.
   follows pi's own subagent semantics: like a `subagent` delegation,
   the teammate starts with a clean context and receives only the task
   text - the parent's transcript is never forked in, so no cache-warmth
-  heuristic decides what the teammate sees. GC reaps only the process,
-  leaving the session file for later resumption. When a fork starts,
-  the pi child registers through the same extension.
+  heuristic decides what the teammate sees. Every teammate also runs
+  with the general teammate role, appended as its system prompt: it
+  reports to its parent, messages the team, waits on reports, can lead
+  its own sub-team, links peer hosts, and writes no memory. GC reaps
+  only the process, leaving the session file for later resumption.
+  When a fork starts, the pi child registers through the same extension.
   `team_wait` actively waits: it blocks until each named teammate
   reports, returning the reports as the tool result. The wait stays
   steerable and interruptible: Escape aborts it through the run's abort

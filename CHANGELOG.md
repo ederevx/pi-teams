@@ -4,6 +4,18 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.8 - 2026-09-22
+
+- Teammates launch with a general teammate role, appended to their
+  system prompt independently of the task: the role states what a
+  teammate is (a persistent, resumable pi session that starts clean)
+  and its capabilities as a teammate - reporting to the parent,
+  messaging the team, waiting on reports, leading its own sub-team
+  through team_spawn, linking peer hosts, attaching existing agents,
+  and writing no memory. The spawn prompt now carries only session
+  identity, the report command, and the task; the broker's teammate
+  session marker is unchanged.
+
 ## v0.4.7 - 2026-09-22
 
 - Teammate spawns mirror pi's subagent semantics strictly: a teammate
