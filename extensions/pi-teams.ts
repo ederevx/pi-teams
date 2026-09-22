@@ -86,7 +86,9 @@ export default async function (pi: ExtensionAPI) {
 			"team_wait when you want to block; otherwise keep working and " +
 			"the report arrives as a pi-teams message. The teammate starts " +
 			"with a clean context and receives only the task, like a " +
-			"subagent delegation.",
+			"subagent delegation, and runs with the general teammate role: " +
+			"it reports to you, messages the team, waits, can lead its own " +
+			"sub-team, and writes no memory.",
 		promptSnippet:
 			"Spawn a pi-teams teammate to do a task in its own session",
 		promptGuidelines: [
@@ -94,10 +96,11 @@ export default async function (pi: ExtensionAPI) {
 				"runs as a separate pi session with its own /resume entry and " +
 				"sends its result back as a pi-teams message. Pass a " +
 				"self-contained task - the teammate starts with a clean " +
-				"context and receives only the task text, like a subagent. " +
-				"Call team_wait to block for the report when you want to, or " +
-				"continue with other work and let it arrive as a pi-teams " +
-				"message.",
+				"context and receives only the task text, like a subagent, " +
+				"under the general teammate role (reporting, messaging, " +
+				"waiting, leading its own sub-team). Call team_wait to block " +
+				"for the report when you want to, or continue with other " +
+				"work and let it arrive as a pi-teams message.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "The task the teammate must do" }),

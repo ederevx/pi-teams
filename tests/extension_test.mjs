@@ -503,6 +503,13 @@ test("spawnTask builds the teammate template from a task alone", () => {
 		assert.ok(call.args.includes("--thinking"));
 		// The task is delivered as an RPC prompt, never as a -p task.
 		assert.ok(!call.args.includes("-p"));
+		// The general teammate role rides in the appended system prompt,
+		// one constant for every teammate launch.
+		const roleIndex = call.args.indexOf("--append-system-prompt");
+		assert.notEqual(roleIndex, -1, "teammate launches with its role");
+		assert.match(call.args[roleIndex + 1], /capabilities as a teammate/);
+		assert.match(call.args[roleIndex + 1], /team leader yourself/);
+		assert.match(call.args[roleIndex + 1], /Do not write memory/);
 		assert.deepEqual(call.options.stdio, ["pipe", "ignore", "ignore"]);
 		assert.equal(call.stdinWrites.length, 1);
 		const sent = JSON.parse(call.stdinWrites[0].trim());
@@ -510,6 +517,12 @@ test("spawnTask builds the teammate template from a task alone", () => {
 		assert.match(sent.message, /summarize the diff/);
 		assert.match(sent.message, /TEAM_PARENT_ID/);
 		assert.match(sent.message, /TEAM_ROOT/);
+		// The spawn prompt keeps the broker's teammate marker and carries
+		// only identity and report mechanics; the role is in the system
+		// prompt, not duplicated here.
+		assert.match(sent.message, /a teammate spawned by a parent pi session/);
+		assert.ok(!sent.message.includes("capabilities as a teammate"),
+			"role stays out of the task prompt");
 		// Report-back names the interpreter and the absolute client path,
 		// never a bare `team` that needs a shebang or PATH.
 		assert.ok(sent.message.includes(process.env.PYTHON));
