@@ -339,6 +339,43 @@ test("deregister cancels an active wait", async () => {
 	assert.deepEqual(await waiting, [null]);
 });
 
+test("a multi-id wait ends on the first result", async () => {
+	const { agent, calls } = makeAgent(() => {});
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const waiting = agent.waitForResults(
+		["kid", "other"], 5000, undefined, () => false);
+	onData(JSON.stringify({
+		from: "other", to: agent.id, kind: "result", payload: "fast",
+	}) + "\n");
+	const results = await waiting;
+	assert.equal(results[0], null);
+	assert.equal(results[1].payload, "fast");
+	agent.stopHold();
+});
+
+test("a buffered result ends a multi-id wait at once", async () => {
+	const { agent, calls } = makeAgent(() => {});
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "result", payload: "early",
+	}) + "\n");
+	const results = await agent.waitForResults(
+		["kid", "other"], 5000, undefined, () => false);
+	assert.equal(results[0].payload, "early");
+	assert.equal(results[1], null);
+	agent.stopHold();
+});
+
+test("an active wait reports progress ticks", async () => {
+	const { agent } = makeAgent();
+	let ticks = 0;
+	await agent.waitForResults(
+		["nobody"], 600, undefined, () => false, () => { ticks += 1; });
+	assert.ok(ticks >= 1);
+});
+
 test("ResultInbox hands a result to its waiter exactly once", () => {
 	const inbox = new ResultInbox();
 	const seen = [];
