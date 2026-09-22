@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.4 - 2026-09-21
+
+- An unexpected hold-client death (broker restart, idle exit after a
+  source change) relaunches the hold client with a bounded exponential
+  backoff instead of leaving the session deaf to team messages until
+  the next session event; an intentional stop is never treated as a
+  death.
+- `deliverMessage` drops non-object JSON payloads instead of throwing
+  inside the hold's stdout data handler.
+
 ## v0.4.3 — 2026-09-21
 
 - The broker owns the peer SSH transport: `team_peer add` has the
