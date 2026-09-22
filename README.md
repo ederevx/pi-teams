@@ -195,10 +195,11 @@ That chains, in order:
   never detaches on Windows, and the persistent broker launches through
   a windowless Python interpreter there; `spawnTask` builds
   the teammate template from a task alone, resolves pi from the running
-  runtime, refuses an inherit request without a parent session, and no
-  custom spawn path exists; one spawn service addresses a local process
-  or a peer host's main agent; `peerAdd` asks the broker to own the
-  ssh tunnel and relays its setup guidance on failure; the broker-op
+  runtime, starts the teammate clean without ever forking the parent
+  session, and no custom spawn path exists; one spawn service addresses
+  a local process or a peer host's main agent; `peerAdd` asks the
+  broker to own the ssh tunnel and relays its setup guidance on
+  failure; the broker-op
   client carries every request/response call; a pending request resolves
   from its reply, fails on a non-ack, and times out or cancels without
   leaking; every outbound `send` carries this agent's id so a peer's
