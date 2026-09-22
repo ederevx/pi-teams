@@ -44,5 +44,8 @@
     "typebox": {
       "optional": true
     }
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
   }
 }
