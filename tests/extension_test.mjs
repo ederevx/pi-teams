@@ -26,7 +26,6 @@ import {
 	readFileSync,
 	rmSync,
 	unlinkSync,
-	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -546,63 +545,21 @@ test("spawnTask resolves pi from the running runtime", () => {
 	assert.ok(!call.args.includes("--no-session"));
 });
 
-test("spawnTask explicit context=inherit forks; fresh does not", () => {
+test("a teammate starts clean: never a parent-session fork", () => {
+	// Mirrors subagent delegation: the teammate gets the task alone, not
+	// the parent's transcript, however recent or small that transcript is.
 	publishEndpoint(true);
 	mkdirSync(sessionDir, { recursive: true });
 	const { agent, calls } = makeAgent();
-	agent.rememberSession(join(sessionDir, "sess.jsonl"));
-	// An explicit inherit without a remembered parent session is refused.
-	assert.throws(
-		() => new TeamAgent(makeRunner().runner, () => {})
-			.spawnTask("bare", "task", { context: "inherit" }),
-		/no file to fork/);
-	writeFileSync(join(sessionDir, "sess.jsonl"), "{}\n");
-	agent.spawnTask("b", "task b", { context: "inherit" });
-	assert.deepEqual(calls[0].args.slice(1, 4), ["--mode", "rpc", "--fork"]);
-	assert.equal(calls[0].args[4], join(sessionDir, "sess.jsonl"));
-	agent.spawnTask("c", "task c", { context: "fresh" });
-	assert.ok(!calls[1].args.includes("--fork"), "explicit fresh wins");
-});
-
-test("auto context forks only while the parent cache is plausibly alive", () => {
-	publishEndpoint(true);
-	const { agent, calls } = makeAgent();
-	const session = join(sessionDir, "auto.jsonl");
-	mkdirSync(sessionDir, { recursive: true });
+	const session = join(sessionDir, "warm.jsonl");
 	writeFileSync(session, "{}\n");
 	agent.rememberSession(session);
-
-	// A just-written session file is within every provider TTL: fork.
-	agent.spawnTask("recent", "task", { provider: "anthropic" });
-	assert.deepEqual(calls[0].args.slice(1, 4), ["--mode", "rpc", "--fork"]);
-	assert.equal(calls[0].args[4], session);
-
-	// 100 s old is inside the 240 s default threshold (0.8 x 300 s) but
-	// outside GLM's 96 s threshold (0.8 x its measured 120 s TTL).
-	const then = new Date(Date.now() - 100_000);
-	utimesSync(session, then, then);
-	agent.spawnTask("default-ttl", "task", { provider: "anthropic" });
-	assert.ok(calls[1].args.includes("--fork"), "default profile still warm");
-	agent.spawnTask("glm-ttl", "task", { provider: "z-ai/glm-5.3-flash" });
-	assert.ok(!calls[2].args.includes("--fork"), "glm profile expired");
-
-	// Past every profile's threshold: fresh.
-	const older = new Date(Date.now() - 400_000);
-	utimesSync(session, older, older);
-	agent.spawnTask("stale", "task", { provider: "anthropic" });
-	assert.ok(!calls[3].args.includes("--fork"), "stale cache, no fork");
-
-	// Explicit requests override the auto decision in both directions.
-	agent.spawnTask("forced", "task",
-		{ provider: "anthropic", context: "inherit" });
-	assert.ok(calls[4].args.includes("--fork"));
-	agent.spawnTask("kept", "task", { context: "fresh" });
-	assert.ok(!calls[5].args.includes("--fork"));
-
-	// A session past the size cap inherits dead weight: fresh, warm or not.
-	writeFileSync(session, "x".repeat(513 * 1024));
-	agent.spawnTask("big", "task", { provider: "anthropic" });
-	assert.ok(!calls[6].args.includes("--fork"), "oversized, no fork");
+	// Warm, small, and fresh: still no fork, no context option handled.
+	agent.spawnTask("warm", "task", { provider: "anthropic" });
+	assert.ok(!calls[0].args.includes("--fork"), "never forks");
+	assert.deepEqual(calls[0].args.slice(1, 3), ["--mode", "rpc"]);
+	assert.ok(calls[0].args.includes("--session-dir"),
+		"still lands in the parent's session directory");
 });
 
 test("AgentDirectory resolves local and peer main agents", async () => {

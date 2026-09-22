@@ -22,12 +22,6 @@ export interface SpawnOptions {
 	/** Override the parent id, for a teammate spawned on behalf of a
 	 *  remote agent. Defaults to this agent. */
 	parent?: string;
-	/** "inherit" forks the parent session so the teammate reuses its
-	 *  warm prompt-cache prefix; "fresh" starts a clean context. When
-	 *  unset, an auto policy decides: inherit while the parent's provider
-	 *  cache entry is plausibly still alive (recent last turn vs the
-	 *  provider TTL, modest session size), fresh otherwise. */
-	context?: "fresh" | "inherit";
 }
 
 /** The single spawn path: local launch here, or a request to a peer
@@ -90,7 +84,6 @@ export class SpawnService {
 			provider: options.provider,
 			model: options.model,
 			thinking: options.thinking,
-			context: options.context,
 		}));
 		return wait;
 	}

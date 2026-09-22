@@ -84,23 +84,20 @@ export default async function (pi: ExtensionAPI) {
 			"resumable pi session and reports its result back as a team " +
 			"message. Give it exactly one task. Wait for the report with " +
 			"team_wait when you want to block; otherwise keep working and " +
-			"the report arrives as a pi-teams message. By default an auto " +
-			"policy decides the context: inherit (fork this conversation, " +
-			"reusing its warm prompt cache) while the parent's last turn is " +
-			"recent enough that the provider cache entry is alive, and " +
-			"fresh otherwise; set context explicitly to override.",
+			"the report arrives as a pi-teams message. The teammate starts " +
+			"with a clean context and receives only the task, like a " +
+			"subagent delegation.",
 		promptSnippet:
 			"Spawn a pi-teams teammate to do a task in its own session",
 		promptGuidelines: [
 			"Use team_spawn to delegate a bounded task to a teammate: it " +
 				"runs as a separate pi session with its own /resume entry and " +
 				"sends its result back as a pi-teams message. Pass a " +
-				"self-contained task; the context is chosen automatically " +
-				"(inherit forks this conversation while its prompt cache is " +
-				"still warm, fresh otherwise) and only set context explicitly " +
-				"to override. Call team_wait to block for the report when you " +
-				"want to, or continue with other work and let it arrive as a " +
-				"pi-teams message.",
+				"self-contained task - the teammate starts with a clean " +
+				"context and receives only the task text, like a subagent. " +
+				"Call team_wait to block for the report when you want to, or " +
+				"continue with other work and let it arrive as a pi-teams " +
+				"message.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "The task the teammate must do" }),
@@ -110,17 +107,6 @@ export default async function (pi: ExtensionAPI) {
 			host: Type.Optional(Type.String({
 				description:
 					"Peer host label to spawn on; defaults to this host",
-			})),
-			context: Type.Optional(Type.Union([
-				Type.Literal("fresh"),
-				Type.Literal("inherit"),
-			], {
-				description:
-					"auto (default) inherits this conversation while its warm " +
-					"prompt-cache prefix is plausibly alive (recent parent turn " +
-					"vs provider TTL, modest session size) and starts fresh " +
-					"otherwise; explicit fresh or inherit overrides the auto " +
-					"decision",
 			})),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -132,7 +118,6 @@ export default async function (pi: ExtensionAPI) {
 				provider: model?.provider,
 				model: model?.id,
 				thinking: ctx?.thinkingLevel,
-				context: params.context,
 			});
 			if (!ref) {
 				if (!host) throw new Error("spawn failed");
