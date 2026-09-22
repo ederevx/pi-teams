@@ -52,6 +52,8 @@ export class TeamAgent {
 	private cwd = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
+	private holdStartedAt = 0;
+	private holdRestarts = 0;
 	private readonly teammates = new Set<SpawnedProcess>();
 	private readonly directory: AgentDirectory;
 	private readonly brokerOps: BrokerOps;
@@ -162,7 +164,36 @@ export class TeamAgent {
 			{ env, stdio: ["pipe", "pipe", "ignore"] },
 		);
 		this.holdProc = proc;
+		this.holdStartedAt = Date.now();
+		if (proc) {
+			proc.on("exit", () => this.holdDied(proc));
+		}
 		if (proc?.stdout) this.forwardMessages(proc.stdout);
+	}
+
+	/** A hold client that dies on its own (a broker restart or the
+	 *  idle exit after a source change) leaves the session deaf until
+	 *  the next session event: relaunch it with a bounded backoff. An
+	 *  intentional stop clears holdProc before killing, so only an
+	 *  unexpected death reaches here. */
+	private holdDied(proc: SpawnedProcess): void {
+		if (this.holdProc !== proc) return;
+		this.holdProc = null;
+		if (this.closed) return;
+		// A hold that ran a while resets the backoff: this death is a
+		// new failure, not a repeat of the previous one.
+		if (Date.now() - this.holdStartedAt > 60000) this.holdRestarts = 0;
+		this.holdRestarts += 1;
+		if (this.holdRestarts > 5) return;
+		const delay = Math.min(30000, 1000 * 2 ** this.holdRestarts);
+		const timer = setTimeout(() => {
+			if (this.closed || this.holdProc) return;
+			this.ensureBroker();
+			this.hold(this.cwd);
+		}, delay);
+		if (typeof timer === "object" && timer && "unref" in timer) {
+			timer.unref();
+		}
 	}
 
 	/** The hold's environment: this agent's identity plus the busy file
@@ -210,6 +241,9 @@ export class TeamAgent {
 			// is dropped rather than crashing the session.
 			return;
 		}
+		// JSON.parse also yields scalars ("null", "123"); touching kind
+		// on those would throw inside the stdout data handler.
+		if (!message || typeof message !== "object") return;
 		if (message.kind === "spawn-ack" || message.kind === "spawn-error") {
 			this.pending.settle(message, "spawn-ack");
 			return;
@@ -572,12 +606,16 @@ export class TeamAgent {
 		);
 	}
 
-	/** The teammate report-back command, run through the interpreter on
-	 *  the absolute client path (a shebang script is not executable on
+	/** The report-back command, run through the interpreter on the
+	 *  absolute client path (a shebang script is not executable on
 	 *  Windows, and binDir may not be on PATH). Shared by the spawn
-	 *  prompt and an attached teammate. */
+	 *  prompt and an attached teammate. Paths are single-quoted with
+	 *  embedded quotes escaped, so no character in them can break out
+	 *  of the teammate's shell command. */
 	private reportCommand(): string {
-		return `"${this.python}" "${teamBin}" --root "$TEAM_ROOT" ` +
+		const quote = (value: string): string =>
+			`'${value.replace(/'/g, "'\\''")}'`;
+		return `${quote(this.python)} ${quote(teamBin)} --root "$TEAM_ROOT" ` +
 			`send "$TEAM_PARENT_ID" result "<report>"`;
 	}
 
