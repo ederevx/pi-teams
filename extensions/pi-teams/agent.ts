@@ -584,7 +584,7 @@ export class TeamAgent {
 
 	private taskPrompt(session: string, task: string): string {
 		// The marker phrase here is the broker's teammate-session stamp; keep
-		// it in sync with TEAMMATE_MARKER in src/teamd.py. The role itself
+		// it in sync with TEAMMATE_MARKER in src/team_root.py. The role itself
 		// rides in the appended system prompt; this prompt carries only the
 		// session identity, the report mechanics, and the task. Call the
 		// interpreter on the absolute client path instead of a

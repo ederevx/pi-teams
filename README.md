@@ -36,8 +36,10 @@ coordinate natively instead of through the shared tree.
   PI_TEAMS_FORK_IDLE, default 300s; zero disables), the broker closes
   the fork's endpoint, drops the entry, and signals the owner pid, so
   the forked pi dies for real instead of outliving its parent as a
-  hold-shim ghost. Only the process is reaped: a fork's session file
-  remains, so it can still be resumed. A working teammate stays alive:
+  hold-shim ghost. A spawned teammate's session is reaped with it,
+  so its transcript does not outlive the process; only attached
+  teammates keep their session in `/resume`. A working teammate stays
+  alive:
   the extension publishes busy state from pi's own lifecycle events
   (agent_start/agent_settled) and the hold streams it in its heartbeat,
   which resets the idle clock. Only forks are ever signalled; main
