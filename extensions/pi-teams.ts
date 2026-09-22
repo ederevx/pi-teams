@@ -156,9 +156,11 @@ export default async function (pi: ExtensionAPI) {
 			"Attach an existing live pi agent (by id) as this agent's " +
 			"teammate. The target re-registers as a fork of this agent, so " +
 			"team_wait can block for its reports and the broker reaps it " +
-			"when this agent goes away. An agent belongs to one team, so a " +
-			"target that already has a parent is refused; a parent with no " +
-			"parent of its own may be attached and become a teammate too. " +
+			"(its process is signalled) when this agent goes away; it is " +
+			"exempt from fork-idle GC while the parent stays connected. " +
+			"An agent belongs to one team, so a target that already has a " +
+			"parent is refused, and a teammate cannot attach: a root runs " +
+			"the attach. " +
 			"Use team_spawn to create a new teammate instead.",
 		parameters: Type.Object({
 			target: Type.String({

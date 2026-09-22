@@ -433,6 +433,7 @@ test("requireSameTeam is team-scoped for a teammate", async () => {
 	await assert.doesNotReject(() => agent.requireSameTeam("sibling"));
 	await assert.rejects(() => agent.requireSameTeam("outsider"),
 		/outside your team/);
+	agent.detach();
 	agent.stopHold();
 });
 
@@ -457,6 +458,7 @@ test("attachTo refuses a second parent", async () => {
 	agent.hold("/work");
 	await agent.attachTo("root", "me");
 	await assert.rejects(() => agent.attachTo("other"), /one team/);
+	agent.detach();
 	agent.stopHold();
 });
 
@@ -841,6 +843,11 @@ test("attachTo re-registers as a fork and notifies the parent", async () => {
 	assert.notEqual(agent.id, before);
 	assert.ok(agent.id.includes(":fork-"), "id is not a fork id");
 	assert.equal(ref.session, "helper");
+	// The attach applies the fork identity to this process env, so the
+	// attached session's shell tools can run the report command.
+	assert.equal(process.env.TEAM_PARENT_ID, "parent-9");
+	assert.equal(process.env.TEAM_ROLE, "fork");
+	assert.ok(process.env.TEAM_ROOT, "TEAM_ROOT was not applied");
 	const hold = calls[calls.length - 1];
 	assert.equal(hold.options.env.TEAM_ID, agent.id);
 	assert.equal(hold.options.env.TEAM_ROLE, "fork");
@@ -849,6 +856,7 @@ test("attachTo re-registers as a fork and notifies the parent", async () => {
 	const notice = sends.find((a) => a.includes("notice"));
 	assert.ok(notice && notice.includes("parent-9"),
 		"no attach notice was sent to the parent");
+	agent.detach();
 	agent.stopHold();
 });
 
@@ -864,6 +872,25 @@ test("detach returns an attached agent to a main identity", async () => {
 	assert.equal(hold.options.env.TEAM_ROLE, "main");
 	assert.equal(hold.options.env.TEAM_PARENT_ID, "");
 	agent.stopHold();
+});
+
+test("detach restores the process env attach overwrote", async () => {
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const savedName = process.env.TEAM_NAME;
+	process.env.TEAM_NAME = "mine";
+	const agent = new TeamAgent(runner, () => {});
+	try {
+		agent.hold("/work");
+		await agent.attachTo("parent-9", "helper");
+		agent.detach();
+		assert.equal(process.env.TEAM_NAME, "mine");
+		assert.equal(process.env.TEAM_PARENT_ID, undefined);
+	} finally {
+		if (savedName !== undefined) process.env.TEAM_NAME = savedName;
+		else delete process.env.TEAM_NAME;
+		agent.stopHold();
+	}
 });
 
 test("an inbound attach request converts this session and acks", async () => {
@@ -891,6 +918,50 @@ test("an inbound attach request converts this session and acks", async () => {
 	const hold = calls[calls.length - 1];
 	assert.equal(hold.options.env.TEAM_ROLE, "fork");
 	assert.equal(hold.options.env.TEAM_PARENT_ID, "alpha:main");
+	agent.detach();
+	agent.stopHold();
+});
+
+test("attach refuses when this session is already a teammate", async () => {
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const savedParent = process.env.TEAM_PARENT_ID;
+	process.env.TEAM_PARENT_ID = "root-1";
+	try {
+		const agent = new TeamAgent(runner, () => {});
+		await assert.rejects(() => agent.attach("beta:main"), /one team/);
+	} finally {
+		if (savedParent === undefined) delete process.env.TEAM_PARENT_ID;
+		else process.env.TEAM_PARENT_ID = savedParent;
+	}
+});
+
+test("an inbound attach request from a teammate is refused", async () => {
+	const sends = [];
+	const { calls, runner } = makeRunner((file, args) => {
+		if (args.includes("ls")) {
+			return Promise.resolve({ stdout: JSON.stringify({ agents: [
+				{ id: "alpha:fork-1", name: "f", role: "fork", pid: 1,
+				  parent: "alpha:root", session: null, online: true },
+			] }), stderr: "", code: 0 });
+		}
+		sends.push(args);
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	onData(JSON.stringify({
+		from: "alpha:fork-1", to: agent.id, kind: "attach",
+		payload: { requestId: "r1", name: "kid" },
+	}) + "\n");
+	await new Promise((r) => setTimeout(r, 20));
+	const error = sends.find((a) => a.includes("attach-error"));
+	assert.ok(error, "no attach-error was sent");
+	assert.ok(error.join(" ").includes("requester-is-teammate"),
+		"refusal did not say the requester is a teammate");
+	assert.ok(!sends.some((a) => a.includes("attach-ack")),
+		"a teammate's attach request was accepted");
 	agent.stopHold();
 });
 

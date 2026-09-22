@@ -40,6 +40,7 @@ class TeamClient:
         self.session = os.environ.get("TEAM_SESSION")
         self.owner_pid = os.environ.get("TEAM_OWNER_PID")
         self.busy_file = os.environ.get("TEAM_BUSY_FILE")
+        self.attached = os.environ.get("TEAM_ATTACHED") == "1"
         self._conn = None
         self._readbuf = b""
         # Guards _conn replacement and the watcher handles so close() and
@@ -71,10 +72,12 @@ class TeamClient:
             "session": self.session,
             "owner_pid": self.owner_pid,
             "busy_file": self.busy_file,
+            "attached": bool(self.attached),
         }
 
     def set_identity(self, agent_id=None, name=None, role=None, parent=None,
-                     session=None, owner_pid=None, busy_file=None):
+                     session=None, owner_pid=None, busy_file=None,
+                     attached=None):
         # Explicit identity from CLI arguments (pi.exec cannot pass env
         # on Windows, so the extension hands identity over as args).
         if agent_id:
@@ -91,6 +94,8 @@ class TeamClient:
             self.owner_pid = owner_pid
         if busy_file:
             self.busy_file = busy_file
+        if attached is not None:
+            self.attached = bool(attached)
 
     # -- transport ---------------------------------------------------
 
