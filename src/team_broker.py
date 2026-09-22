@@ -373,6 +373,7 @@ class TeamBroker:
             "session": msg.get("session") or None,
             "owner_pid": msg.get("owner_pid") or None,
             "busy_file": msg.get("busy_file") or None,
+            "attached": bool(msg.get("attached")),
             "origin": self.host,
             "since_ts": time.time(),
             "last_seen": time.time(),
@@ -584,8 +585,12 @@ class TeamBroker:
                 parent = entry.get("parent")
                 parent_gone = self._parent_gone(parent)
                 is_fork = entry.get("role") == "fork"
+                # An attached session keeps the parent-gone lifetime but
+                # not the fork-idle one: it was a live session the user
+                # chose to attach, not a process spawned for one task.
                 work_idle = (
                     is_fork and self.fork_idle > 0
+                    and not entry.get("attached")
                     and not entry.get("waiting")
                     and entry.get("last_work", 0) < now - self.fork_idle
                 )
