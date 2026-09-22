@@ -30,6 +30,7 @@ import {
 } from "./spawn.ts";
 import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
+import { ContextPolicy } from "./context-policy.ts";
 import {
 	DEFAULT_WAIT_SECONDS,
 	WAIT_POLL_MS,
@@ -60,6 +61,7 @@ export class TeamAgent {
 	private readonly pending = new PendingRequests();
 	private readonly spawns: SpawnService;
 	private readonly inbox = new ResultInbox();
+	private readonly contextPolicy = new ContextPolicy();
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
@@ -555,7 +557,12 @@ export class TeamAgent {
 	spawnTask(name: string, task: string, options: SpawnOptions = {}): TeammateRef {
 		const forkId = this.makeForkId();
 		const session = name || forkId;
-		const inherit = options.context === "inherit";
+		const inherit = options.context
+			? options.context === "inherit"
+				: this.contextPolicy.autoContext(
+						this.sessionFile,
+						options.provider,
+					) === "inherit";
 		if (inherit && !this.sessionFile) {
 			throw new Error(
 				"cannot inherit context: this session has no file to fork");
