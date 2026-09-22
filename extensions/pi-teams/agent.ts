@@ -64,6 +64,8 @@ export class TeamAgent {
 	private cwd = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
+	private holdStartedAt = 0;
+	private holdRestarts = 0;
 	private readonly teammates = new Set<SpawnedProcess>();
 	private readonly bridges = new Map<string, PeerBridge>();
 	private readonly openingBridges = new Set<PeerBridge>();
@@ -190,7 +192,36 @@ export class TeamAgent {
 			{ env, stdio: ["pipe", "pipe", "ignore"] },
 		);
 		this.holdProc = proc;
+		this.holdStartedAt = Date.now();
+		if (proc) {
+			proc.on("exit", () => this.holdDied(proc));
+		}
 		if (proc?.stdout) this.forwardMessages(proc.stdout);
+	}
+
+	/** A hold client that dies on its own (a broker restart or the
+	 *  idle exit after a source change) leaves the session deaf until
+	 *  the next session event: relaunch it with a bounded backoff. An
+	 *  intentional stop clears holdProc before killing, so only an
+	 *  unexpected death reaches here. */
+	private holdDied(proc: SpawnedProcess): void {
+		if (this.holdProc !== proc) return;
+		this.holdProc = null;
+		if (this.closed) return;
+		// A hold that ran a while resets the backoff: this death is a
+		// new failure, not a repeat of the previous one.
+		if (Date.now() - this.holdStartedAt > 60000) this.holdRestarts = 0;
+		this.holdRestarts += 1;
+		if (this.holdRestarts > 5) return;
+		const delay = Math.min(30000, 1000 * 2 ** this.holdRestarts);
+		const timer = setTimeout(() => {
+			if (this.closed || this.holdProc) return;
+			this.ensureBroker();
+			this.hold(this.cwd);
+		}, delay);
+		if (typeof timer === "object" && timer && "unref" in timer) {
+			timer.unref();
+		}
 	}
 
 	/** The hold's environment: this agent's identity plus the busy file
@@ -238,6 +269,9 @@ export class TeamAgent {
 			// is dropped rather than crashing the session.
 			return;
 		}
+		// JSON.parse also yields scalars ("null", "123"); touching kind
+		// on those would throw inside the stdout data handler.
+		if (!message || typeof message !== "object") return;
 		if (message.kind === "spawn-ack" || message.kind === "spawn-error") {
 			this.resolveSpawn(message);
 			return;
@@ -676,12 +710,16 @@ export class TeamAgent {
 		);
 	}
 
-	/** The teammate report-back command, run through the interpreter on
-	 *  the absolute client path (a shebang script is not executable on
+	/** The report-back command, run through the interpreter on the
+	 *  absolute client path (a shebang script is not executable on
 	 *  Windows, and binDir may not be on PATH). Shared by the spawn
-	 *  prompt and an attached teammate. */
+	 *  prompt and an attached teammate. Paths are single-quoted with
+	 *  embedded quotes escaped, so no character in them can break out
+	 *  of the teammate's shell command. */
 	private reportCommand(): string {
-		return `"${this.python}" "${teamBin}" --root "$TEAM_ROOT" ` +
+		const quote = (value: string): string =>
+			`'${value.replace(/'/g, "'\\''")}'`;
+		return `${quote(this.python)} ${quote(teamBin)} --root "$TEAM_ROOT" ` +
 			`send "$TEAM_PARENT_ID" result "<report>"`;
 	}
 
@@ -775,6 +813,7 @@ export class TeamAgent {
 		const bridge = this.makeBridge(sshTarget, label);
 		this.openingBridges.add(bridge);
 		let endpoint: PeerEndpoint;
+		let died = false;
 		try {
 			endpoint = await bridge.connect();
 			if (bridge.peerHost && bridge.peerHost === this.host) {
@@ -783,6 +822,17 @@ export class TeamAgent {
 					"which collides with this host; set PI_TEAMS_HOST to a " +
 					"unique label on one host");
 			}
+			// Register the death handler before linking: a tunnel that
+			// dies while the broker registration is in flight must fail
+			// this call instead of reporting a peer that points at a dead
+			// loopback port. onExit fires at once when it already died.
+			bridge.onExit(() => {
+				died = true;
+				if (this.bridges.get(bridge.name) === bridge) {
+					this.bridges.delete(bridge.name);
+				}
+				void this.unlinkPeer(bridge.name);
+			});
 			await this.linkPeer(bridge.name, endpoint);
 		} catch (err) {
 			this.openingBridges.delete(bridge);
@@ -790,16 +840,14 @@ export class TeamAgent {
 			throw err;
 		}
 		this.openingBridges.delete(bridge);
+		if (died) {
+			void this.unlinkPeer(bridge.name);
+			throw new Error(
+				`ssh tunnel to ${sshTarget} dropped before the peer link ` +
+				"completed");
+		}
 		this.bridges.set(bridge.name, bridge);
 		this.rememberPeer(bridge.name, sshTarget);
-		// A tunnel that dies on its own must not leave a peer pointing
-		// at a dead loopback port: drop it and prune the broker's entry.
-		bridge.onExit(() => {
-			if (this.bridges.get(bridge.name) === bridge) {
-				this.bridges.delete(bridge.name);
-			}
-			void this.unlinkPeer(bridge.name);
-		});
 		return bridge.name;
 	}
 
@@ -887,7 +935,7 @@ export class TeamAgent {
 		const result = await this.runner.run(this.python, [
 			teamBin, "--root", stateRoot, "peer", "add", host,
 			`${endpoint.host}:${endpoint.port}:${endpoint.token}`,
-		]);
+		], { timeout: 3000 });
 		if (result.code !== 0) {
 			throw new Error(
 				`broker rejected peer ${host}: ${result.stderr.trim()}`);
@@ -897,7 +945,7 @@ export class TeamAgent {
 	private async unlinkPeer(host: string): Promise<void> {
 		await this.runner.run(this.python, [
 			teamBin, "--root", stateRoot, "peer", "remove", host,
-		]);
+		], { timeout: 3000 });
 	}
 
 	sessionDirLabel(): string {

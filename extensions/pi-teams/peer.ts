@@ -129,6 +129,17 @@ export class SshPeerBridge implements PeerBridge {
 			this.closed = true;
 			this.exitCallback?.();
 		});
+		tunnel.on("error", () => {
+			// A tunnel that never started (no ssh binary, spawn failure)
+			// reports through "error", not a thrown exception; left
+			// unhandled it would crash the host session. Treat it as an
+			// exit so onExit subscribers still reap the peer.
+			if (this.tunnel === tunnel) this.tunnel = null;
+			if (!this.closed) {
+				this.closed = true;
+				this.exitCallback?.();
+			}
+		});
 		tunnel.unref();
 		return {
 			host: "127.0.0.1", port, token: endpoint.token,
@@ -171,7 +182,7 @@ export class SshPeerBridge implements PeerBridge {
 			"-o", "ConnectTimeout=10",
 			"-o", "ConnectionAttempts=1",
 			this.sshTarget, "cat", `${this.remoteState}/endpoint`,
-		]);
+		], { timeout: 15000 });
 		if (result.code !== 0) {
 			throw this.guide.needed(
 				this.sshTarget, this.classify(result.stderr));
