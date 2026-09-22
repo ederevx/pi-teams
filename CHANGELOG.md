@@ -4,6 +4,20 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.6 - 2026-09-22
+
+- Teammate spawns choose their context automatically: an auto policy
+  forks the parent session (warm-history reuse at cache-read cost)
+  while the parent's last turn is recent against the provider's cache
+  TTL and the session stays under a size cap, and starts fresh when the
+  entry is plausibly expired or the inherited history would cost more
+  per turn than the head write it saves. Explicit `context=fresh` /
+  `context=inherit` overrides the policy; peer-host spawns stay fresh
+  because only the owning host can fork the parent session.
+- The policy lives in its own `ContextPolicy` class with static
+  provider TTL profiles mirroring pi-cache's `provider-ttl.ts`
+  (GLM 120 s, OpenAI 1800 s, DeepSeek 4 h, 300 s default).
+
 ## v0.4.5 - 2026-09-22
 
 - `team_wait` returns as soon as the first teammate reports instead of
