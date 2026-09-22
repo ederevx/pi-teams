@@ -48,6 +48,11 @@ export class TeamAgent {
 	private role: string;
 	private parent = "";
 	private attachedName = "";
+	// The process env the attach path overwrote, restored on detach.
+	private savedEnv: Record<string, string | undefined> | undefined;
+	// Whether the current hold was started by an attach, so a relaunch
+	// keeps the attached identity (and its GC exemption) after a death.
+	private attachedHold = false;
 	private teamOwner = false;
 	private closed = false;
 	private cwd = "";
@@ -149,13 +154,15 @@ export class TeamAgent {
 		child?.unref();
 	}
 
-	hold(cwd?: string): void {
+	hold(cwd?: string, attached = false): void {
 		if (cwd) this.cwd = cwd;
+		this.attachedHold = attached;
 		this.stopHold();
 		const name = this.attachedName || process.env.TEAM_NAME
 			|| `pi@${this.cwd || process.cwd()}`;
 		const busyFile = this.busyFile();
-		const env = this.holdEnv(name, this.role, this.parent, busyFile);
+		const env = this.holdEnv(name, this.role, this.parent, busyFile,
+			attached);
 		// The client exits on stdin EOF, so the pipe must be owned by
 		// this process: closing it (when pi goes away) drops the
 		// endpoint instead of leaving an orphan pinging forever. Its
@@ -191,7 +198,7 @@ export class TeamAgent {
 		const timer = setTimeout(() => {
 			if (this.closed || this.holdProc) return;
 			this.ensureBroker();
-			this.hold(this.cwd);
+			this.hold(this.cwd, this.attachedHold);
 		}, delay);
 		if (typeof timer === "object" && timer && "unref" in timer) {
 			timer.unref();
@@ -205,6 +212,7 @@ export class TeamAgent {
 		role: string,
 		parent: string,
 		busyFile: string,
+		attached: boolean,
 	): Record<string, string | undefined> {
 		return {
 			...process.env,
@@ -215,6 +223,7 @@ export class TeamAgent {
 			TEAM_SESSION: this.sessionFile,
 			TEAM_OWNER_PID: `${process.pid}`,
 			TEAM_BUSY_FILE: busyFile,
+			TEAM_ATTACHED: attached ? "1" : "",
 		};
 	}
 
@@ -259,7 +268,10 @@ export class TeamAgent {
 			return;
 		}
 		if (message.kind === "attach") {
-			this.handleAttachRequest(message);
+			// The handler reports every failure back as attach-error; the
+			// catch only keeps an unexpected rejection from surfacing as
+			// an unhandled one.
+			this.handleAttachRequest(message).catch(() => {});
 			return;
 		}
 		// A result first goes to an active team_wait, which consumes it as
@@ -354,6 +366,40 @@ export class TeamAgent {
 		return this.parent !== "";
 	}
 
+	/** The attach env for an attached session: the same identity keys a
+	 *  spawned fork receives at launch, applied to this process so shell
+	 *  tools inherit them. The previous values are kept for detach. */
+	private applyAttachEnv(
+		forkId: string,
+		session: string,
+	): void {
+		this.savedEnv = {
+			TEAM_ID: process.env.TEAM_ID,
+			TEAM_NAME: process.env.TEAM_NAME,
+			TEAM_ROLE: process.env.TEAM_ROLE,
+			TEAM_PARENT_ID: process.env.TEAM_PARENT_ID,
+			TEAM_ROOT: process.env.TEAM_ROOT,
+		};
+		Object.assign(process.env, {
+			TEAM_ID: forkId,
+			TEAM_NAME: session,
+			TEAM_ROLE: "fork",
+			TEAM_PARENT_ID: this.parent,
+			TEAM_ROOT: stateRoot,
+		});
+	}
+
+	/** Restores the env that applyAttachEnv overwrote; absent keys are
+	 *  removed again so a detached session matches its launch state. */
+	private restoreMainEnv(): void {
+		if (!this.savedEnv) return;
+		for (const [key, value] of Object.entries(this.savedEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		this.savedEnv = undefined;
+	}
+
 	/** The id of the team root that owns `agentId`, walking the parent
 	 *  chain in the registry. A missing or cyclic chain resolves to the
 	 *  last known id rather than throwing. */
@@ -446,8 +492,9 @@ export class TeamAgent {
 
 	/** Re-registers this running session as a teammate of `parent`. The
 	 *  broker then treats it as a fork, so it can be waited on and is
-	 *  GC'd with the parent. The session file is left intact (no spawn
-	 *  marker), so it stays in `/resume` after the fork is reaped. */
+	 *  GC'd with the parent; it is exempt from fork-idle GC. The session
+	 *  file is left intact (no spawn marker), so it stays in `/resume`
+	 *  after the fork is reaped. */
 	async attachTo(parent: string, name?: string): Promise<TeammateRef> {
 		if (!parent) throw new Error("attach needs a parent agent id");
 		if (this.hasParent()) {
@@ -462,15 +509,28 @@ export class TeamAgent {
 		this.role = "fork";
 		this.parent = parent;
 		this.attachedName = session;
+		// A spawned fork gets its shell identity from teammateEnv at
+		// launch; an attached session is already running, so its shell
+		// tools would otherwise expand an empty $TEAM_PARENT_ID in the
+		// report command. Apply the fork identity to this process's env.
+		this.applyAttachEnv(forkId, session);
 		try {
 			unlinkSync(previousBusy);
 		} catch {
 			// absent, or the broker's orphan sweep reaps it
 		}
-		this.hold(this.cwd);
+		this.hold(this.cwd, true);
 		this.announced = false;
-		await this.send(parent, "notice",
-			`attached ${forkId} (${session})`);
+		try {
+			await this.send(parent, "notice",
+				`attached ${forkId} (${session})`);
+		} catch (error) {
+			// The target never learned about the attach, so roll the
+			// identity, env, and hold back instead of leaving a
+			// half-attached session behind.
+			this.detach();
+			throw error;
+		}
 		return { id: forkId, session };
 	}
 
@@ -482,6 +542,7 @@ export class TeamAgent {
 		this.role = "main";
 		this.parent = "";
 		this.attachedName = "";
+		this.restoreMainEnv();
 		try {
 			unlinkSync(previousBusy);
 		} catch {
@@ -500,6 +561,11 @@ export class TeamAgent {
 		target: string,
 		name?: string,
 	): Promise<TeammateRef | null> {
+		if (this.hasParent()) {
+			throw new Error(
+				"an agent belongs to one team; a teammate cannot attach " +
+				"- ask your parent to attach it (team_attach)");
+		}
 		await this.requireAttachable(target);
 		if (this.closed) return null;
 		const id = requestId("attach");
@@ -511,13 +577,25 @@ export class TeamAgent {
 
 	/** Another agent asked this running session to become its teammate:
 	 *  this session owns the identity change. */
-	private handleAttachRequest(message: TeamMessage): void {
+	private async handleAttachRequest(message: TeamMessage): Promise<void> {
 		const payload = (message.payload ?? {}) as {
 			name?: string; requestId?: string;
 		};
 		if (this.hasParent()) {
 			void this.send(message.from, "attach-error", JSON.stringify({
 				requestId: payload.requestId, why: "already-a-teammate",
+			}));
+			return;
+		}
+		// One-parent model, requester side: a fork (already a teammate)
+		// must not attach a parent of its own, so only a root's attach
+		// request converts this session. The requester's registry entry is
+		// the evidence; an unknown sender is treated as a root.
+		const agents = await this.snapshot();
+		const requester = agents.find((a) => a.id === message.from);
+		if (requester && requester.parent) {
+			void this.send(message.from, "attach-error", JSON.stringify({
+				requestId: payload.requestId, why: "requester-is-teammate",
 			}));
 			return;
 		}
@@ -658,7 +736,9 @@ export class TeamAgent {
 	): Record<string, string | undefined> {
 		const env: Record<string, string | undefined> = { ...process.env };
 		for (const key of Object.keys(env)) {
-			if (/^(PI|TEAM)_(SESSION|HOST)/.test(key)) delete env[key];
+			if (/^(PI_(SESSION|HOST)|TEAM_(ATTACHED|SESSION|HOST))/.test(key)) {
+				delete env[key];
+			}
 		}
 		Object.assign(env, {
 			TEAM_ID: forkId,
