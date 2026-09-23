@@ -139,7 +139,11 @@ Two machines with SSH between them federate their brokers.
   peer owns the process, session, and reaping. `team_wait` waits by id.
 - **Messaging** — ids carry a host label (`<host>:fork-...`), so
   `team_send`, reports, and `team_kill` reach peer-hosted ids through
-  the same link; an undeliverable target reports back.
+  the same link; an undeliverable target reports back. A local target
+  whose connection dropped recently parks the message in a durable
+  mailbox instead: the broker delivers it when the target registers
+  again, redeliveries carry the original envelope id, and parked
+  messages expire after a ttl.
 - **Lifetime** — a remote-parented fork lives until its parent's link
   drops, then its host reaps it. Pid signalling never crosses hosts.
 - **Password-only hosts** — a non-interactive SSH failure fails closed

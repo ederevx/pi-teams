@@ -23,6 +23,10 @@ import socket
 import threading
 import time
 
+from delivery import MailboxDelivery
+from mailbox import Mailbox
+from registry import RegistryMirror
+
 from finish_query import FinishQueries
 from peer_link import PeerLink
 from send_gate import SendGate
@@ -136,6 +140,13 @@ class TeamBroker:
         self.transport = PeerTransport(
             self.host, tunnel_factory=tunnel_factory)
         self.transport.persist = self._persist_peers
+        # Store-and-forward owner: messages for a target whose hold is
+        # restarting are parked on disk and replayed on re-register.
+        self.delivery = MailboxDelivery(Mailbox(self.root))
+        # The registry's derived views: computed online snapshot plus
+        # the cadence-written registry.json mirror.
+        self.mirror = RegistryMirror(
+            self.root, self._registry, self.idle_timeout)
         self._lock = threading.RLock()
         self._running = False
         self._server = None
@@ -422,20 +433,18 @@ class TeamBroker:
             self._send_gate.issue(agent_id, msg.get("send_token"))
         self._persist_and_notify()
         self._reply(conn, op="ack", id=agent_id)
+        self.delivery.replay(
+            agent_id, lambda envelope: self._write(conn, envelope))
         return agent_id
 
     def _snapshot(self):
+        now = time.time()
         with self._lock:
-            return [
-                dict(entry, online=True)
-                for entry in self._registry.values()
-            ]
+            return self.mirror.snapshot(now)
 
     def _persist_and_notify(self):
         with self._lock:
-            data = json.dumps(
-                {"ts": time.time(), "agents": self._registry}, indent=2
-            )
+            data = self.mirror.render(time.time())
             peers = list(self._peers.values())
         self.root.write_atomic(REGISTRY_NAME, data + "\n")
         agents = self._snapshot()
@@ -447,12 +456,17 @@ class TeamBroker:
         now = time.time()
         with self._lock:
             entry = self._registry.get(agent_id) if agent_id else None
+            due = False
             if entry is not None:
                 entry["last_seen"] = now
                 if work:
                     entry["last_work"] = now
                 if waiting is not None:
                     entry["waiting"] = waiting
+                due = self.mirror.due(now)
+                data = self.mirror.render(now) if due else None
+        if due:
+            self.root.write_atomic(REGISTRY_NAME, data + "\n")
 
     def _drop_entry(self, agent_id):
         with self._lock:
@@ -474,6 +488,11 @@ class TeamBroker:
             entry = self._registry.pop(agent_id, None)
             had_entry = entry is not None
             self._send_gate.drop(agent_id)
+            if had_entry:
+                # A connection loss is not an eviction: mark the drop
+                # so sends during the hold-restart gap park in the
+                # mailbox instead of failing outright.
+                self.delivery.mark_dropped(agent_id)
         if had_entry:
             self.root.remove_busy_file(entry)
             self._persist_and_notify()
@@ -482,8 +501,11 @@ class TeamBroker:
 
     def _envelope(self, from_id, kind, payload, to=None, ts=None):
         # One owner for the wire envelope every delivered message wears.
+        # The id lets a client filter redeliveries (mailbox drain after
+        # a crash between delivery and unlink) from fresh traffic.
         return {
             "op": "message",
+            "id": secrets.token_hex(8),
             "from": from_id,
             "to": to,
             "kind": str(kind or "text"),
@@ -493,15 +515,26 @@ class TeamBroker:
 
     def dispatch(self, msg, sender_id, sender_conn):
         target = msg.get("to")
+        envelope = self._envelope(
+            msg.get("from") or sender_id,
+            msg.get("kind"), msg.get("payload"),
+            to=target, ts=msg.get("ts"),
+        )
         with self._lock:
             conn = self._clients.get(target)
         if conn is not None:
-            self._write(conn, self._envelope(
-                msg.get("from") or sender_id,
-                msg.get("kind"), msg.get("payload"),
-                to=target, ts=msg.get("ts"),
-            ))
+            self._write(conn, envelope)
             self._reply(sender_conn, op="ack")
+            return
+        # A local target whose connection dropped recently still
+        # belongs to the team: park the message and ack, so the
+        # hold-restart window loses nothing. The sweep drops what
+        # outlives the mailbox ttl.
+        if self._parent_host(target) == self.host \
+                and self.delivery.accepts(
+                    target, target in self._registry):
+            self.delivery.park(target, envelope)
+            self._reply(sender_conn, op="ack", queued=True)
             return
         peer = self._peers.get(self._parent_host(target))
         if peer is not None and peer.connected:
@@ -630,6 +663,7 @@ class TeamBroker:
         if now - self._last_session_sweep >= self._session_sweep_interval:
             self._last_session_sweep = now
             self._gc_orphan_session_files(now)
+        self.delivery.prune(now)
         self._maybe_restart(now)
         doomed_fork, doomed_idle = self._classify(now)
         if not doomed_fork and not doomed_idle:
@@ -716,6 +750,8 @@ class TeamBroker:
             conn = self._clients.pop(agent_id, None)
             entry = self._registry.pop(agent_id, None)
             self._send_gate.drop(agent_id)
+            if entry is not None:
+                self.delivery.mark_dropped(agent_id)
         self._finish_queries.close(agent_id)
         if conn is not None:
             try:
@@ -1125,8 +1161,9 @@ class TeamBroker:
             conn.sendall(
                 (json.dumps(obj, separators=(",", ":")) + "\n").encode()
             )
+            return True
         except OSError:
-            pass
+            return False
 
     def _close_all(self):
         # Shutdown must leave nothing reachable behind: clear the relay

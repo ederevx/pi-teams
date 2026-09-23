@@ -5,8 +5,9 @@
  * cleanup. Identity is read from the environment once, then owned here.
  */
 
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { connect as netConnect } from "node:net";
 import { basename, dirname, join } from "node:path";
 
 import {
@@ -82,6 +83,10 @@ export class TeamAgent {
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
+	/** Seen envelope ids, oldest first; a mailbox redelivery after a
+	 *  crash between write and drop arrives twice, and the second copy
+	 *  must not surface. */
+	private seenMessageIds = new Set<string>();
 
 	constructor(
 		runner: ProcessHost,
@@ -158,8 +163,51 @@ export class TeamAgent {
 		// changes it exits after an idle window, and the next start adopts
 		// the new code. The extension only starts one when none is
 		// published, so a reload never kills live work.
-		if (existsSync(join(stateRoot, "endpoint"))) return;
-		this.startBroker();
+		const endpointPath = join(stateRoot, "endpoint");
+		if (!existsSync(endpointPath)) {
+			this.startBroker();
+			return;
+		}
+		// The endpoint file's existence alone never proved a broker
+		// lives behind it: a dead broker left a stale endpoint that
+		// blocked every hold. Probe the published port once; only a
+		// refused connection proves the endpoint stale, a timeout
+		// stays conservative.
+		void this.verifyEndpoint(endpointPath);
+	}
+
+	/** Probes the published broker endpoint; unlinks it and starts a
+	 *  replacement only when nothing is listening. */
+	private async verifyEndpoint(endpointPath: string): Promise<void> {
+		let endpoint: { host?: string; port?: number };
+		try {
+			endpoint = JSON.parse(readFileSync(endpointPath, "utf8"));
+		} catch {
+			return;
+		}
+		const port = endpoint?.port;
+		if (!port) return;
+		await new Promise<void>((resolve) => {
+			const socket = netConnect(port, endpoint.host || "127.0.0.1");
+			const settle = (stale: boolean) => {
+				socket.removeAllListeners();
+				socket.destroy();
+				if (stale) {
+					try {
+						unlinkSync(endpointPath);
+					} catch {
+						// Another session already swept it.
+					}
+					this.startBroker();
+				}
+				resolve();
+			};
+			socket.setTimeout(1000);
+			socket.once("error", (err: NodeJS.ErrnoException) =>
+				settle(err?.code === "ECONNREFUSED"));
+			socket.once("timeout", () => settle(false));
+			socket.once("connect", () => settle(false));
+		});
 	}
 
 	/** Launch the detached broker; the broker lock admits only one. */
@@ -278,6 +326,14 @@ export class TeamAgent {
 		// JSON.parse also yields scalars ("null", "123"); touching kind
 		// on those would throw inside the stdout data handler.
 		if (!message || typeof message !== "object") return;
+		if (typeof message.id === "string" && message.id) {
+			if (this.seenMessageIds.has(message.id)) return;
+			this.seenMessageIds.add(message.id);
+			if (this.seenMessageIds.size > 128) {
+				const oldest = this.seenMessageIds.values().next().value;
+				if (oldest !== undefined) this.seenMessageIds.delete(oldest);
+			}
+		}
 		if (message.kind === "spawn-ack" || message.kind === "spawn-error") {
 			this.pending.settle(message, "spawn-ack");
 			return;
