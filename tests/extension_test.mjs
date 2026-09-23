@@ -696,6 +696,57 @@ test("spawn routes a peer host over the broker and returns the id", async () => 
 	agent.stopHold();
 });
 
+test("spawn falls back to the next main when one times out", async () => {
+	process.env.PI_TEAMS_SPAWN_WINDOW = "50";
+	try {
+		const sends = [];
+		const { calls, runner } = makeRunner((file, args) => {
+			if (args.includes("ls")) {
+				return Promise.resolve({ stdout: JSON.stringify({ agents: [
+					{ id: "beta:pi-1", name: "stale", role: "main", pid: 1,
+						parent: null, session: null, online: false,
+						origin: "beta", remote: true },
+					{ id: "beta:pi-2", name: "live", role: "main", pid: 2,
+						parent: null, session: null, online: false,
+						origin: "beta", remote: true },
+				] }), stderr: "", code: 0 });
+			}
+			sends.push(args);
+			return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+		});
+		const agent = new TeamAgent(runner, () => {});
+		agent.hold("/work");
+		const onData = calls[0]["stdout:data"];
+		const pending = agent.spawn("beta", "worker", "do it");
+		await new Promise((r) => setTimeout(r, 20));
+		// The first main in registry order is asked first.
+		let sent = sends.find((a) => a.includes("spawn"));
+		assert.ok(sent, "no spawn request was sent");
+		assert.ok(sent.includes("beta:pi-1"), "first main was not tried first");
+		// No reply comes back: the window expires and the next main is
+		// tried.
+		let second = null;
+		for (let i = 0; i < 40 && !second; i++) {
+			await new Promise((r) => setTimeout(r, 10));
+			second = sends.find((a) =>
+				a.includes("spawn") && a.includes("beta:pi-2")) ?? null;
+		}
+		assert.ok(second, "spawn did not fall back to the next main after a " +
+			"timeout");
+		const request = JSON.parse(second[second.length - 1]);
+		onData(JSON.stringify({
+			from: "beta:pi-2", to: agent.id, kind: "spawn-ack",
+			payload: { requestId: request.requestId, id: "beta:fork-2",
+				session: "worker" },
+		}) + "\n");
+		const ref = await pending;
+		assert.equal(ref.id, "beta:fork-2");
+		agent.stopHold();
+	} finally {
+		delete process.env.PI_TEAMS_SPAWN_WINDOW;
+	}
+});
+
 test("spawn routes a host-less target to the local backend", async () => {
 	const { calls, runner } = makeRunner(() =>
 		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
