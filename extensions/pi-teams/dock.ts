@@ -45,8 +45,7 @@ export async function openTeammatesDock(
 				return [
 					theme.fg("accent", theme.bold("pi-teams teammates")),
 					theme.fg("muted",
-						`${agents.length} agent(s); act with team_send, ` +
-						`team_attach, team_kill`),
+						`${agents.length} agent(s)`),
 					"",
 				];
 			}
@@ -96,9 +95,15 @@ function describeAgent(agent: AgentInfo): string {
  *  snapshot, so the comparison is clock-consistent. */
 function presenceText(agent: AgentInfo, now: number): string {
 	const state = agent.online ? "online" : "offline";
+	return `${state}, active ${lastActiveText(agent, now)}`;
+}
+
+/** How long since the agent was last active, or "never" when the
+ *  broker never published a contact for it. Callers pass the same
+ *  snapshot clock the stamps come from. */
+function lastActiveText(agent: AgentInfo, now: number): string {
 	const stamp = agent.last_work ?? agent.last_seen;
-	if (!stamp) return state;
-	return `${state}, active ${relative(stamp, now)} ago`;
+	return stamp === undefined ? "never" : `${relative(now - stamp)} ago`;
 }
 
 /** Human text for a duration in seconds: 42s, 7m, 3h, 2d. */
