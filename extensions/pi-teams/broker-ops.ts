@@ -32,6 +32,9 @@ interface BrokerReply {
 export class BrokerOps {
 	private readonly runner: ProcessHost;
 	private readonly python: string;
+	/** The composing agent's send credential; a gated op (send) must
+	 *  present it, so identity args alone cannot speak for an agent. */
+	sendToken = "";
 
 	constructor(runner: ProcessHost, python: string) {
 		this.runner = runner;
@@ -67,9 +70,14 @@ export class BrokerOps {
 		kind: string,
 		text: string,
 		id: string,
+		sendToken?: string,
 	): Promise<string> {
+		const args = ["send", "--id", id];
+		if (sendToken) {
+			args.push("--send-token", sendToken);
+		}
 		const result = await this.run(
-			["send", "--id", id, to, kind, text]);
+			[...args, to, kind, text]);
 		return String(result.stdout).trim();
 	}
 

@@ -38,12 +38,14 @@ class ClientCli:
         parser.add_argument("--owner-pid")
         parser.add_argument("--busy-file")
         parser.add_argument("--attached", action="store_true")
+        parser.add_argument("--send-token")
 
     @staticmethod
     def apply_identity(client, args):
         client.set_identity(args.id, args.name, args.role, args.parent,
                             args.session, args.owner_pid, args.busy_file,
-                            getattr(args, "attached", None))
+                            getattr(args, "attached", None),
+                            getattr(args, "send_token", None))
 
     def main(self, argv=None):
         parser = argparse.ArgumentParser(

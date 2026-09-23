@@ -40,9 +40,14 @@ natively, without a shared filesystem as the channel.
   | `team_ls` / `team_peer` / `team_tail` | List, link peers, tail chat |
 
   Sending and waiting are member-only; a teammate may only message its
-  own team and asks its parent to attach outsiders. The one command is
-  `/team-ls`: a settings-style dock of live agents with last-active
-  times. It is read-only — acting on a teammate is a tool call.
+  own team and asks its parent to attach outsiders. The broker enforces
+  this itself: message ops carry a per-session send token
+  (`TEAM_SEND_TOKEN`, minted by the extension for its hold and each
+  teammate), so a raw `team.py send` from a shell cannot speak for an
+  agent — it is refused with `send-token`. Read-only diagnostics stay
+  open (`team ls`, `team peer list`). The one command is `/team-ls`: a
+  settings-style dock of live agents with last-active times. It is
+  read-only — acting on a teammate is a tool call.
 
 ### Spawn model
 

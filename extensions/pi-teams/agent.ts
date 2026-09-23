@@ -36,6 +36,7 @@ import {
 	DEFAULT_WAIT_SECONDS,
 	STEER_NUDGE_TEXT,
 	WAIT_POLL_MS,
+	mintSendToken,
 	requestId,
 	type DeliverFn,
 	type TeamMessage,
@@ -48,6 +49,10 @@ export class TeamAgent {
 	private readonly windowless: InterpreterResolver;
 	id: string = "";
 	private role: string;
+	/** This session's send credential for gated broker ops (see
+	 *  send_gate.py). The hold registers with it; transient sends and
+	 *  spawned teammates' environments carry it. */
+	private sendToken: string;
 	private parent = "";
 	private attachedName = "";
 	// The process env the attach path overwrote, restored on detach.
@@ -92,8 +97,13 @@ export class TeamAgent {
 		this.id = process.env.TEAM_ID || this.makeMainId();
 		this.role = process.env.TEAM_ID ? "fork" : "main";
 		this.parent = process.env.TEAM_PARENT_ID || "";
+		// One send token per session: the hold registers with it, the
+		// transient sends present it, and spawned teammates inherit a
+		// fresh one through their environment (see teammateEnv).
+		this.sendToken = process.env.TEAM_SEND_TOKEN || mintSendToken();
 		this.directory = new AgentDirectory(() => this.snapshot(), this.host);
 		this.brokerOps = new BrokerOps(runner, this.python);
+		this.brokerOps.sendToken = this.sendToken;
 		this.spawns = new SpawnService(
 			this.host, this.directory, this.brokerOps, this.pending,
 			(name, task, options) => this.spawnTask(name, task, options));
@@ -236,6 +246,7 @@ export class TeamAgent {
 			TEAM_OWNER_PID: `${process.pid}`,
 			TEAM_BUSY_FILE: busyFile,
 			TEAM_ATTACHED: attached ? "1" : "",
+			TEAM_SEND_TOKEN: this.sendToken,
 		};
 	}
 
@@ -358,7 +369,7 @@ export class TeamAgent {
 		// The peer's spawn handler replies to the message's `from`, and a
 		// spawned fork is parented to it, so an unregistered sender would
 		// strand both. Hand this agent's id to the transient client.
-		return this.brokerOps.send(to, kind, text, this.id);
+		return this.brokerOps.send(to, kind, text, this.id, this.sendToken);
 	}
 
 	/** Whether this session is a team member: spawned as a teammate (role
@@ -414,6 +425,10 @@ export class TeamAgent {
 			TEAM_ROLE: "fork",
 			TEAM_PARENT_ID: this.parent,
 			TEAM_ROOT: stateRoot,
+			// An attached fork keeps its own token: the hold re-registers
+			// under the fork id with it, and the report-back command's
+			// $TEAM_SEND_TOKEN expands to it.
+			TEAM_SEND_TOKEN: this.sendToken,
 		});
 	}
 
@@ -773,6 +788,9 @@ export class TeamAgent {
 			TEAM_ROLE: "fork",
 			TEAM_PARENT_ID: parent || this.id,
 			TEAM_ROOT: stateRoot,
+			// The teammate's own send credential: its hold registers with
+			// it and its report-back shell command presents it.
+			TEAM_SEND_TOKEN: mintSendToken(),
 		});
 		return env;
 	}

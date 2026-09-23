@@ -24,6 +24,15 @@ export function requestId(prefix: string): string {
 	return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+/** Mints a send token: the session's credential for gated broker ops.
+ *  One owner for both the session token and a spawned teammate's
+ *  fresh one, so token generation stays in the protocol module. */
+export function mintSendToken(): string {
+	return `stk-${Date.now().toString(16)}-` +
+		Math.random().toString(16).slice(2, 10) +
+		Math.random().toString(16).slice(2, 10);
+}
+
 /** Default bound for an active team_wait, overridable with PI_TEAMS_WAIT. */
 export const DEFAULT_WAIT_SECONDS = 300;
 
