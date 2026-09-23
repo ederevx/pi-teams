@@ -48,7 +48,7 @@ def main():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for module in ("broker_test", "fork_test", "attach_test",
-                   "setup_script_test"):
+                   "setup_script_test", "install_test"):
         suite.addTests(loader.loadTestsFromName(module))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 1

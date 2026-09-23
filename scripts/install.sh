@@ -17,6 +17,48 @@ bin_dir="${PI_TEAMS_BIN_DIR:-$HOME/.local/bin}"
 state_dir="${PI_TEAMS_STATE_DIR:-$HOME/.local/state/pi-teams}"
 manifest="$state_dir/manifest.json"
 
+# The one-loader guard: a pinned pi package already loads this repo's
+# extension from its own clone (and falls back to the sibling src/
+# broker/client), and a manual extension copy beside it aborts every new
+# pi session with tool-conflict errors. The manual installer therefore
+# refuses outright whenever a packages entry installs pi-teams — a git
+# pin or a local path whose final component is this package. Uninstall
+# the manual copy or drop the pin first; nothing on disk has been
+# touched by the refusal.
+settings="$agent_dir/settings.json"
+if [[ -f "$settings" ]]; then
+  python_bin=""
+  for candidate in python3 python py; do
+	if command -v "$candidate" >/dev/null 2>&1; then python_bin="$candidate"; break; fi
+  done
+  if [[ -n "$python_bin" ]]; then
+	pinned="$($python_bin - "$settings" <<'PYGUARD'
+import json, sys
+try:
+    packages = json.load(open(sys.argv[1], encoding="utf-8")).get("packages", [])
+except Exception:
+    packages = []
+for entry in packages:
+    if not isinstance(entry, str):
+        continue
+    normalized = entry.replace("\\", "/").rstrip("/")
+    if (normalized.startswith("git:") and "pi-teams" in normalized) \
+            or normalized.rsplit("/", 1)[-1] == "pi-teams":
+        print(entry)
+        break
+PYGUARD
+)"
+	if [[ -n "$pinned" ]]; then
+	  echo "install: pi-teams is installed as a pi package ($pinned)." >&2
+	  echo "  A manual install would load its extension twice and abort every new" >&2
+	  echo "  session with tool-conflict errors. Update the package instead:" >&2
+	  echo "  pi update git:github.com/ederevx/pi-teams  (or drop the pin before" >&2
+	  echo "  a manual install; scripts/uninstall.sh removes a manual copy)." >&2
+	  exit 1
+	fi
+  fi
+fi
+
 mkdir -p "$bin_dir" "$agent_dir/extensions" "$(dirname "$manifest")"
 
 files=()
