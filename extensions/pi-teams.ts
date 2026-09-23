@@ -130,11 +130,18 @@ export default async function (pi: ExtensionAPI) {
 				const agents = await app.snapshot();
 				const advertised = agents.filter((a) =>
 					a.remote && (!a.origin || a.origin === host)).length;
+				if (advertised === 0) {
+					throw new Error(
+						`no peer agent on ${host}: the broker link is up, ` +
+						`but that host advertises no agents. Start the ` +
+						`host's pi session with pi-teams so an agent registers ` +
+						`on its broker, then retry.`);
+				}
 				throw new Error(
-					`no peer agent on ${host}: the broker link is up, but ` +
-					`that host advertises ${advertised} agent(s). Start the ` +
-					`host's pi session with pi-teams so an agent registers on ` +
-					`its broker, then retry.`);
+					`spawn on ${host} timed out or was refused by all ` +
+					`${advertised} advertised agent(s): each target either did ` +
+					`not answer within 15s or replied spawn-error. Check that ` +
+					`the host's main pi session is responsive, then retry.`);
 			}
 			const where = host ? ` on ${host}` : ` as session "${ref.session}"`;
 			return {
