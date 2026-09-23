@@ -4,6 +4,26 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.18 - 2026-09-23
+
+- Park-and-forward delivery: a send to a local target whose connection
+  dropped recently parks in a durable mailbox under the team root and
+  replays on the target's next register, closing the hold-restart loss
+  window where every such message was dropped outright. New
+  `src/mailbox.py` owns the on-disk store (enqueue, replay order, ttl
+  sweep) and `src/delivery.py` owns the park-or-fail decision; a crash
+  between write and drop costs a duplicate, never a loss. Envelopes
+  carry an id and the extension filters redeliveries by it.
+- Broker liveness: `ensureBroker` now probes the published endpoint
+  port once and unlinks it only on a refused connection, so a dead
+  broker is replaced instead of silently blocking every hold behind a
+  stale endpoint file. The endpoint stays trusted while the port
+  answers.
+- Registry freshness: `online` is computed from heartbeat freshness
+  instead of stamped true on register, and registry.json is rewritten
+  on a cadence instead of freezing at the last registry event; new
+  `src/registry.py` owns the computed snapshot and the mirror writes.
+
 ## v0.4.17 - 2026-09-23
 
 - Broker-side member gating: message ops now require a send token, so
