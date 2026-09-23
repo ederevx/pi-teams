@@ -4,6 +4,24 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.20 - 2026-09-23
+
+- Recycled-pid lock safety: broker-lock liveness records validate the
+  holder's pid plus process start mark (`/proc` starttime on Linux,
+  handle creation time on Windows), so a reused pid can no longer keep
+  a crashed broker's lock forever; plain-pid records stay readable.
+- One drop path: terminate, evict, forget, and connection-drop route
+  through a single `_release()`; the registry mirror scratch gets a
+  random suffix so concurrent writers cannot clobber each other; a
+  recursive tmp sweep catches mailbox-level scratch leftovers.
+- Wire framing dedupe: `src/wire.py` owns JSON-lines framing (was
+  three duplicated socket buffers); the TS `launch()` folds three
+  per-format spawn wrappers into one and `BrokerOps.finish()` replaces
+  duplicated argv.
+- Entry-file slimming: wait/watchdog machinery moved to
+  `extensions/pi-teams/wait.ts`, announce and log-render to
+  `messages.ts` (agent.ts 1139 -> 996); net lines 5864 -> 5863.
+
 ## v0.4.19 - 2026-09-23
 
 - Session-stable main identity: a main mints its id once from the pi
