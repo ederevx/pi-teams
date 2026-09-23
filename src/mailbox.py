@@ -1,18 +1,19 @@
 """Durable per-target inbox for messages the broker cannot hand off.
 
 One owner for store-and-forward: when a target's connection is gone
-(a hold restart, a client EOF) but the target is still part of the
-team, the broker parks the message here and delivers it when the
-target registers again. Files live under the team root so a broker
-restart loses nothing. A message parked past ``ttl`` is dropped by the
-broker's sweep instead of delivering stale traffic to a long-gone
-agent.
+(a hold restart, a client EOF) but it is still part of the team, the
+broker parks the message here and delivers it when the target
+registers again. Files live under the team root, so a broker restart
+loses nothing; a message parked past ``ttl`` is dropped instead of
+delivering stale traffic to a long-gone agent.
 """
 
 import json
 import os
 import secrets
 import time
+
+from wire import dump_line
 
 MAILBOX_DIR = "mailbox"
 
@@ -44,20 +45,18 @@ class Mailbox:
             return ""
         msg_id = secrets.token_hex(8)
         record = dict(envelope, id=msg_id, queued_ts=time.time())
-        name = "%s-%s.json" % (int(record["queued_ts"] * 1000), msg_id)
-        relative = os.path.join(
-            MAILBOX_DIR, _safe_name(agent_id), name)
         self.root.write_atomic(
-            relative, json.dumps(record, separators=(",", ":")) + "\n")
+            os.path.join(MAILBOX_DIR, _safe_name(agent_id),
+                         "%s-%s.json" % (int(record["queued_ts"] * 1000),
+                                         msg_id)),
+            dump_line(record).decode("utf-8"))
         return msg_id
 
     def parked(self, agent_id):
-        """Return parked envelopes in order, keeping them on disk.
-
-        The caller writes each envelope to the target first and drops
-        it after; a crash then costs a duplicate, which the client's
-        seen-id filter absorbs, never a loss.
-        """
+        """Parked envelopes in order, kept on disk: the caller writes
+        each to the target first and drops it after, so a crash in
+        between costs a duplicate (absorbed by seen-id filtering),
+        never a loss."""
         return self._load(agent_id)
 
     def drop(self, agent_id, msg_id):
@@ -75,17 +74,21 @@ class Mailbox:
             return []
 
     def _load(self, agent_id):
-        records = []
-        for path in self._json_files(self._dir(agent_id)):
-            try:
-                record = json.loads(
-                    path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                self._unlink(path)
-                continue
-            if isinstance(record, dict):
-                records.append(record)
-        return records
+        # A malformed record is deleted, not kept: it can never be
+        # delivered, and re-parsing it every poll wastes the sweep.
+        return [
+            record
+            for record in map(self._read_record,
+                              self._json_files(self._dir(agent_id)))
+            if record is not None
+        ]
+
+    def _read_record(self, path):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
 
     def _unlink(self, path):
         try:
@@ -104,13 +107,9 @@ class Mailbox:
         for directory in targets:
             if not directory.is_dir():
                 continue
-            for path in directory.glob("*.json"):
-                try:
-                    record = json.loads(
-                        path.read_text(encoding="utf-8"))
-                    queued = float(record.get("queued_ts", 0))
-                except (OSError, ValueError):
-                    queued = 0
+            for path in self._json_files(directory):
+                record = self._read_record(path)
+                queued = float((record or {}).get("queued_ts", 0))
                 if now - queued > self.ttl:
                     self._unlink(path)
             try:

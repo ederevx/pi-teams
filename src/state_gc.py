@@ -1,10 +1,10 @@
 """Broker-side garbage collection of state files.
 
-One owner for sweeping abandoned state around a team root: orphan busy
-files, teammate session transcripts with no live agent, and aged
-write_atomic scratch. It reads the registry (never mutates it) and
-removes only files whose owners are gone; the broker composes this
-owner from its sweep loop and its drop paths.
+One owner for sweeping abandoned state around a team root: orphan
+busy files, teammate transcripts with no live agent, aged write_atomic
+scratch. Reads the registry (never mutates it); removes only files
+whose owners are gone. The broker composes this from its sweep loop
+and drop paths.
 """
 
 import pathlib
@@ -26,11 +26,9 @@ class StateGc:
         self.busy_grace = busy_grace
 
     def gc_orphan_busy_files(self, now):
-        # A busy file is published by the extension, not the broker. One
-        # whose agent is no longer registered and has not been touched for
-        # the grace window belongs to an old session; remove it. A
-        # registered agent (even a busy fork with an old mtime) keeps its
-        # file.
+        # A busy file is published by the extension, not the broker;
+        # one neither registered nor touched within the grace belongs
+        # to an old session. A registered agent keeps its file.
         files = self.root.busy_files()
         with self.lock:
             live = {
@@ -38,24 +36,14 @@ class StateGc:
                 for entry in self.registry.values()
                 if entry.get("busy_file")
             }
-        for path in files:
-            try:
-                if str(path.resolve()) in live:
-                    continue
-                if path.stat().st_mtime > now - self.busy_grace:
-                    continue
-            except OSError:
-                continue
-            self.root.unlink_under(str(path), self.root.base)
+        self._sweep(files, live, now, self.busy_grace, self.root.base)
 
     def gc_orphan_session_files(self, now):
-        # Every teammate is a pi session that shows up in /resume. Remove
-        # teammate-marked session files whose agent is not live and whose
-        # mtime is older than the grace. A user's own session is never
-        # marked, and a live fork's file is skipped regardless of mtime.
-        # NOTE: this globs the whole sessions tree every interval; if that
-        # tree ever grows past a bounded size the glob itself should become
-        # incremental, but changing it risks the mtime-grace semantics.
+        # Every teammate is a pi session in /resume; remove
+        # teammate-marked files neither live nor touched within the
+        # grace (a user's own session is never marked, a live fork's
+        # file is skipped regardless of mtime). NOTE: globs the whole
+        # sessions tree each interval by design.
         try:
             files = list(self.sessions_root.glob("**/*.jsonl"))
         except OSError:
@@ -66,16 +54,22 @@ class StateGc:
                 for entry in self.registry.values()
                 if entry.get("session")
             }
+        self._sweep(files, live, now, self.session_grace,
+                    self.sessions_root, teammate_marked=True)
+
+    def _sweep(self, files, live, now, grace, base, teammate_marked=False):
+        # One orphan sweep for every file kind: remove files neither
+        # live-owned nor touched within the grace.
         for path in files:
             try:
                 if str(path.resolve()) in live:
                     continue
-                if path.stat().st_mtime > now - self.session_grace:
+                if path.stat().st_mtime > now - grace:
                     continue
             except OSError:
                 continue
-            if self.is_teammate_session(path):
-                self.root.unlink_under(str(path), self.sessions_root)
+            if not teammate_marked or self.is_teammate_session(path):
+                self.root.unlink_under(str(path), base)
 
     def remove_session_file(self, entry):
         if (entry or {}).get("role") != "fork":

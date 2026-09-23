@@ -27,9 +27,8 @@ export function requestId(prefix: string): string {
 	return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
-/** Mints a send token: the session's credential for gated broker ops.
- *  One owner for both the session token and a spawned teammate's
- *  fresh one, so token generation stays in the protocol module. */
+/** Mints a send token: the session credential for gated broker ops
+ *  (session and spawned teammates alike). */
 export function mintSendToken(): string {
 	return `stk-${Date.now().toString(16)}-` +
 		Math.random().toString(16).slice(2, 10) +
@@ -43,8 +42,8 @@ export const DEFAULT_WAIT_SECONDS = 300;
 export const WAIT_POLL_MS = 250;
 
 /** One spawn request's answer window per candidate target, in ms;
- *  overridable with PI_TEAMS_SPAWN_WINDOW. A target that stays silent
- *  past it fails, and the next candidate on the host is tried. */
+ *  PI_TEAMS_SPAWN_WINDOW overrides. A silent target fails to the
+ *  next candidate on the host. */
 export const DEFAULT_SPAWN_WINDOW_MS = 15000;
 
 /** Resolves the spawn answer window from the environment, then the
@@ -58,9 +57,7 @@ export function spawnWindowMs(): number {
  *  overridable with PI_TEAMS_STALL; 0 disables the nudge. */
 export const DEFAULT_STALL_SECONDS = 90;
 
-/** The steering message a wait sends a teammate that has gone silent.
- *  One owner for the nudge wording, shared by the wait tool's stall
- *  watchdog wherever it fires. */
+/** The steering message a wait sends a teammate gone silent. */
 export const STEER_NUDGE_TEXT =
 	"team_wait: you have not reported for a while and may look hung. " +
 	"If you are still working, continue; if you are done or stuck, " +

@@ -1,16 +1,11 @@
 /**
  * pi-teams - cross-pi-agent communication and self-forks.
  *
- * On session start this extension registers the running pi process with
- * the team broker (src/teamd.py) through a held connection, so the agent
- * gains an endpoint other agents can reach. A compact awareness note is
- * injected before the agent first runs, listing live teammates and the
- * commands used to reach or spawn them.
- *
- * This file is a thin entry point: it composes the responsibility
- * modules under ./pi-teams/ and registers the tools, events, and
- * command. The modules are not auto-discovered as extensions because
- * the subdirectory has no index.ts.
+ * Registers the running pi process with the team broker through a held
+ * connection (an endpoint other agents can reach), injects a pre-turn
+ * awareness note, and registers the team tools, events, and command.
+ * Thin entry: the modules under ./pi-teams/ carry the responsibilities
+ * (not auto-discovered - the subdirectory has no index.ts).
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -19,9 +14,9 @@ import { TeamAgent } from "./pi-teams/agent.ts";
 import { ChatTail } from "./pi-teams/chat-tail.ts";
 import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
+	announceAgents,
 	deliverToAgent,
-	formatReport,
-	logTeamMessage,
+	registerLogRenderer,
 } from "./pi-teams/messages.ts";
 import { sessionsRoot } from "./pi-teams/paths.ts";
 import { ProcessRunner } from "./pi-teams/process-runner.ts";
@@ -33,8 +28,8 @@ import {
 	type TeamMessage,
 } from "./pi-teams/protocol.ts";
 
-// Re-exported so tests and embedders can reach the seam classes from the
-// extension entry alone.
+// Re-exported so tests and embedders reach the seam classes from the
+// entry alone.
 export { TeamAgent } from "./pi-teams/agent.ts";
 export { ChatTail } from "./pi-teams/chat-tail.ts";
 export { ProcessRunner } from "./pi-teams/process-runner.ts";
@@ -50,11 +45,10 @@ export { BrokerOps } from "./pi-teams/broker-ops.ts";
 export { SpawnService } from "./pi-teams/spawn.ts";
 
 export default async function (pi: ExtensionAPI) {
-	// A reload builds a second TeamAgent in this process while the
-	// first one's hold may still be registered: the duplicate showed
-	// up as two ids for one session (same owner pid). Hand over: the
-	// fresh instance inherits the live identity, and the previous one
-	// stops holding without a resurrect.
+	// A reload builds a second TeamAgent while the first one's hold may
+	// still be registered (two ids, one session). Hand over: the fresh
+	// instance inherits the live identity; the previous one stops
+	// holding without a resurrect.
 	const holder = globalThis as unknown as {
 		__piTeamsAgent?: TeamAgent;
 	};
@@ -67,55 +61,28 @@ export default async function (pi: ExtensionAPI) {
 	if (previous) app.inheritIdentity(previous);
 	holder.__piTeamsAgent = app;
 
-	pi.registerEntryRenderer("pi-teams-log", (entry, options, theme) => {
-		const data = entry.data as {
-			direction?: string;
-			from?: string;
-			kind?: string;
-			preview?: string;
-			payload?: string;
-		} | undefined;
-		const arrow = data?.direction === "sent" ? "->" : "<-";
-		const head = `[pi-teams] ${arrow} ${data?.from ?? "?"} ` +
-			`(${data?.kind ?? "text"})`;
-		const lines = options.expanded && data?.payload
-			? [theme.fg("dim", head)]
-				.concat(data.payload.split("\n").map((line) =>
-					theme.fg("dim", `  ${line}`)))
-			: [theme.fg("dim", `${head}: ${data?.preview ?? ""}`)];
-		return { render: () => lines, invalidate() {} };
-	});
+	registerLogRenderer(pi);
 
 	// -- agent-facing teammate spawn -------------------------------------
-	// The teammate template lives here: the agent names a task and gets a
-	// separate, resumable pi session back. No wrapper script or command
-	// line is needed.
+	// The agent names a task and gets a resumable session back; no
+	// wrapper script or command line is needed.
 	const { Type } = await import("typebox");
 	pi.registerTool({
 		name: "team_spawn",
 		label: "spawn teammate",
 		description:
-			"Spawn a pi-teams teammate that runs in its own persistent, " +
-			"resumable pi session and reports its result back as a team " +
-			"message. Give it exactly one task. Wait for the report with " +
-			"team_wait when you want to block; otherwise keep working and " +
-			"the report arrives as a pi-teams message. The teammate starts " +
-			"with a clean context and receives only the task, like a " +
-			"subagent delegation, and runs with the general teammate role: " +
-			"it reports to you, messages the team, waits, can lead its own " +
-			"sub-team, and writes no memory.",
+			"Spawn a teammate: a persistent, resumable pi session that " +
+			"reports back as a team message. One task each; wait with " +
+			"team_wait or let the report arrive on its own. The " +
+			"teammate starts with a clean context, receives only the " +
+			"task, and runs with the general teammate role (reports, " +
+			"messages, waits, leads its own sub-team, no memory).",
 		promptSnippet:
 			"Spawn a pi-teams teammate to do a task in its own session",
 		promptGuidelines: [
-			"Use team_spawn to delegate a bounded task to a teammate: it " +
-				"runs as a separate pi session with its own /resume entry and " +
-				"sends its result back as a pi-teams message. Pass a " +
-				"self-contained task - the teammate starts with a clean " +
-				"context and receives only the task text, like a subagent, " +
-				"under the general teammate role (reporting, messaging, " +
-				"waiting, leading its own sub-team). Call team_wait to block " +
-				"for the report when you want to, or continue with other " +
-				"work and let it arrive as a pi-teams message.",
+			"Delegate bounded tasks: pass one self-contained task per " +
+				"team_spawn, then call team_wait to block for the report " +
+				"or keep working and let it arrive as a message.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "The task the teammate must do" }),
@@ -123,8 +90,7 @@ export default async function (pi: ExtensionAPI) {
 				description: "Teammate and session name",
 			})),
 			host: Type.Optional(Type.String({
-				description:
-					"Peer host label to spawn on; defaults to this host",
+				description: "Peer host to spawn on; default this host",
 			})),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -144,16 +110,15 @@ export default async function (pi: ExtensionAPI) {
 					a.remote && (!a.origin || a.origin === host)).length;
 				if (advertised === 0) {
 					throw new Error(
-						`no peer agent on ${host}: the broker link is up, ` +
-						`but that host advertises no agents. Start the ` +
-						`host's pi session with pi-teams so an agent registers ` +
-						`on its broker, then retry.`);
+						`no peer agent on ${host}: the link is up but that ` +
+						`host advertises no agents. Start its pi session ` +
+						`with pi-teams so one registers, then retry.`);
 				}
 				throw new Error(
 					`spawn on ${host} timed out or was refused by all ` +
-					`${advertised} advertised agent(s): each target either did ` +
-					`not answer within 15s or replied spawn-error. Check that ` +
-					`the host's main pi session is responsive, then retry.`);
+					`${advertised} advertised agent(s) (no answer within ` +
+					`15s, or spawn-error). Check that the host's main pi ` +
+					`session is responsive, then retry.`);
 			}
 			const where = host ? ` on ${host}` : ` as session "${ref.session}"`;
 			return {
@@ -169,25 +134,22 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing teammate attach ------------------------------------
-	// Turns an existing live agent into a teammate without spawning a new
-	// session: it re-registers under a fork id of this agent.
+	// Makes an existing live agent a teammate without a new session:
+	// it re-registers under a fork id of this agent.
 	pi.registerTool({
 		name: "team_attach",
 		label: "attach a teammate",
 		description:
-			"Attach an existing live pi agent (by id) as this agent's " +
-			"teammate. The target re-registers as a fork of this agent, so " +
-			"team_wait can block for its reports and the broker reaps it " +
-			"(its process is signalled) when this agent goes away; it is " +
-			"exempt from fork-idle GC while the parent stays connected. " +
-			"An agent belongs to one team, so a target that already has a " +
-			"parent is refused, and a teammate cannot attach: a root runs " +
-			"the attach. " +
-			"Use team_spawn to create a new teammate instead.",
+			"Attach an existing live pi agent (by id) as your teammate. " +
+			"It re-registers as your fork, so team_wait blocks for its " +
+			"reports and the broker reaps it with you (exempt from " +
+			"fork-idle GC while you stay connected). One team per agent: " +
+			"a target with a parent is refused, and a teammate cannot " +
+			"attach (a root runs the attach). Use team_spawn for a new " +
+			"teammate instead.",
 		parameters: Type.Object({
 			target: Type.String({
-				description:
-					"Agent id to attach, from /team-ls or team_wait",
+				description: "Agent id to attach (from /team-ls)",
 			}),
 			name: Type.Optional(Type.String({
 				description: "Teammate name; defaults to the target's id",
@@ -212,60 +174,46 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing teammate wait --------------------------------------
-	// An active poll: it waits for result messages while staying
-	// interruptible. The run's AbortSignal (Escape) ends it at once, and
-	// a queued user message makes it yield early so the steer is not
-	// delayed; in both cases the report still arrives as a message.
+	// An active poll that stays interruptible (Escape ends it at once,
+	// a queued message yields early); the report arrives either way.
 	pi.registerTool({
 		name: "team_wait",
 		label: "wait for teammates",
 		description:
-			"Wait for teammates to report and return as soon as the first " +
-			"report lands: the tool result carries every report available " +
-			"at that moment, and details lists the remaining ids. " +
-			"Remaining teammates keep running; their reports arrive as " +
-			"pi-teams messages, or re-call team_wait with the remaining " +
-			"ids to block again. While waiting the agent stays " +
-			"interruptible, yields early if you queue a message, and the " +
-			"tool call shows a live elapsed/pending status. A teammate " +
-			"silent for the stall bound looks hung: the wait auto-sends " +
-			"it a continue-or-report steering message once (stall " +
-			`parameter, PI_TEAMS_STALL, or ${DEFAULT_STALL_SECONDS}s; 0 ` +
-			"disables). Requires this session to be a team member. Pass " +
-			"the ids returned by team_spawn or team_attach.",
+			"Wait for teammates to report; returns on the first report " +
+			"(details lists remaining ids, which keep running and " +
+			"report as messages). While waiting the agent stays " +
+			"interruptible, yields early on a queued message, and the " +
+			"call shows live elapsed/pending status. A teammate silent " +
+			`past the stall bound is nudged once (PI_TEAMS_STALL or ` +
+			`${DEFAULT_STALL_SECONDS}s; 0 disables). Requires team ` +
+			"membership; ids come from team_spawn or team_attach.",
 		promptSnippet: "Wait for teammate reports; aborts on interrupt",
 		promptGuidelines: [
-			"Call team_wait with the teammate ids to wait for their " +
-				"reports; it returns as soon as the first report lands, " +
-				"listing the still-running ids in details.remaining. If it " +
-				"returns without a report, that teammate is still running " +
-				"and will report as a message; re-call team_wait with the " +
-				"remaining ids to keep blocking. A hung-looking teammate " +
-				"is nudged automatically once per wait - do not send your " +
-				"own steering message for that.",
+			"team_wait returns the first report; re-call it with " +
+				"details.remaining to keep blocking. Silent teammates " +
+				"are nudged automatically once per wait.",
 		],
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({
-				description: "One teammate id returned by team_spawn",
+				description: "One teammate id from team_spawn",
 			})),
 			ids: Type.Optional(Type.Array(Type.String(), {
-				description: "Several teammate ids returned by team_spawn",
+				description: "Several teammate ids from team_spawn",
 			})),
 			timeout: Type.Optional(Type.Number({
 				description: "Seconds to wait (default PI_TEAMS_WAIT or " +
 					`${DEFAULT_WAIT_SECONDS})`,
 			})),
 			stall: Type.Optional(Type.Number({
-				description: "Seconds of teammate silence before the wait " +
-					"auto-sends each still-running teammate a " +
-					"continue-or-report nudge (default PI_TEAMS_STALL or " +
-					`${DEFAULT_STALL_SECONDS}; 0 disables)`,
+				description: "Seconds of teammate silence before the " +
+					`auto-nudge (PI_TEAMS_STALL or ${DEFAULT_STALL_SECONDS}; ` +
+					"0 disables)",
 			})),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			await app.requireTeammate("team_wait");
-			// A duplicated id would wait on one teammate twice; dedupe so
-			// the wait's result mapping stays one entry per teammate.
+			// Dedupe: a duplicated id would wait on one teammate twice.
 			const requested = (params.ids && params.ids.length > 0)
 				? params.ids
 				: params.id ? [params.id] : [];
@@ -274,9 +222,8 @@ export default async function (pi: ExtensionAPI) {
 				throw new Error("team_wait needs at least one teammate id");
 			}
 			const bound = waitSeconds(params.timeout);
-			// Live wait status: a partial tool result the TUI re-renders
-			// while the call runs, refreshed from the wait's own poll at
-			// most once a second so the row is not rebuilt on every tick.
+			// Live wait status: a partial result the TUI re-renders
+			// while the call runs, at most once a second.
 			const startedAt = Date.now();
 			let lastStatus = 0;
 			const updateStatus = (): void => {
@@ -293,8 +240,8 @@ export default async function (pi: ExtensionAPI) {
 					details: undefined,
 				});
 			};
-			// A waiting agent is not working: publish that for the whole
-			// wait so the broker keeps a fork exempt from idle GC, then
+			// A waiting agent is not working: publish that for the
+			// whole wait (the fork stays exempt from idle GC), then
 			// restore the turn's busy state.
 			app.setState("waiting");
 			try {
@@ -342,18 +289,16 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing messaging ------------------------------------------
-	// Sends through the local broker, so a peer-hosted target is relayed
-	// across the broker's peer link without the agent touching ssh.
+	// Sends through the local broker: a peer-hosted target is relayed
+	// over the peer link, no ssh in the extension.
 	pi.registerTool({
 		name: "team_send",
 		label: "message an agent",
 		description:
-			"Send a pi-teams message to a live agent id, local or on a " +
-			"linked peer host. Requires this session to be a team member " +
-			"(attached or spawned), and a teammate may only message its " +
-			"own team - ask your parent to attach an outsider first. The " +
-			"broker relays it, so peer hosts work through the existing " +
-			"peer link. Returns the broker's ack.",
+			"Send a pi-teams message to a live agent id, local or " +
+			"peer-hosted (relayed over the peer link). Teammates " +
+			"message only their own team - ask your parent to attach " +
+			"an outsider first. Returns the broker's ack.",
 		parameters: Type.Object({
 			to: Type.String({ description: "Target agent id" }),
 			text: Type.String({ description: "Message text" }),
@@ -381,8 +326,8 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_ls",
 		label: "list agents",
 		description:
-			"List live pi-teams agents, including agents federated from a " +
-			"linked peer host, with their id, role, and online state.",
+			"List live pi-teams agents (id, role, online state), " +
+			"including peer-host agents.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 			const agents = await app.snapshot();
@@ -414,11 +359,9 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_tail",
 		label: "tail chat history",
 		description:
-			"Tail the pi chat history: returns the last lines of the most " +
-			"recent session transcript (.jsonl) under the pi agent " +
-			"sessions directory, so the agent can see its own conversation. " +
-			"Useful to reconstruct context after a compacted, resumed, or " +
-			"aborted turn.",
+			"Tail the pi chat history: the last lines of the newest " +
+			"session transcript (.jsonl), to reconstruct context after " +
+			"a compacted, resumed, or aborted turn.",
 		parameters: Type.Object({
 			lines: Type.Optional(Type.Number({
 				description: "Trailing lines to return (default 60, max 500)",
@@ -437,25 +380,22 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- cross-host peers ------------------------------------------------
-	// One call links another host's broker over an existing SSH session:
-	// the broker fetches the peer endpoint and owns the ssh tunnel.
+	// Links another host's broker over an existing SSH session: the
+	// broker fetches the peer endpoint and owns the tunnel.
 	pi.registerTool({
 		name: "team_peer",
 		label: "link a peer host",
 		description:
-			"Connect another host's pi-teams broker over an existing SSH " +
-			"session. add asks the broker to fetch the peer's loopback " +
-			"endpoint and own the ssh tunnel, then links the two brokers " +
-			"so agents can message across hosts; remove drops the link. " +
-			"The peer host must already run pi-teams.",
+			"Link another host's pi-teams broker over an existing SSH " +
+			"session (add links it and owns the ssh tunnel; remove " +
+			"drops the link) so agents can message across hosts. The " +
+			"peer host must already run pi-teams.",
 		promptSnippet: "Link another host's pi-teams broker over SSH",
 		promptGuidelines: [
-			"Call team_peer add <ssh-host> once to enable cross-host " +
-				"teammates. After that, team_spawn with host=<label> spawns " +
-				"on that host and messages route both ways.",
-			"If team_peer add reports that SSH is not usable " +
-				"non-interactively, do not ask for a password: tell the user " +
-				"to run the one-line setup command from the error, then retry.",
+			"team_peer add <ssh-host> once enables cross-host teammates " +
+				"(team_spawn host=<label>); if SSH is not usable " +
+				"non-interactively, have the user run the one-line setup " +
+				"command from the error, then retry.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([
@@ -463,8 +403,7 @@ export default async function (pi: ExtensionAPI) {
 				Type.Literal("remove"),
 			]),
 			host: Type.String({
-				description: "SSH host to reach, or an already-linked " +
-					"peer label (also the default peer label)",
+				description: "SSH host or linked peer label",
 			}),
 			label: Type.Optional(Type.String({
 				description: "Peer label override",
@@ -486,10 +425,8 @@ export default async function (pi: ExtensionAPI) {
 			}
 			await app.peerRemove(params.host);
 			return {
-				content: [{
-					type: "text",
-					text: `unlinked peer ${params.host}`,
-				}],
+				content: [{ type: "text",
+					text: `unlinked peer ${params.host}` }],
 				details: undefined,
 			};
 		},
@@ -513,7 +450,7 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, _ctx) => {
 		const agents = await app.snapshot();
-		const note = app.announce(agents);
+		const note = announceAgents(agents);
 		if (note) return { message: note };
 	});
 
@@ -523,10 +460,9 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.registerCommand("team-ls", {
 		description:
-			"pi-teams: open the teammates dock (all live teammates, " +
-			"settings-style layout, last-active times). Read-only; acting " +
-			"on a teammate is a tool call (team_send, team_attach, " +
-			"team_kill).",
+			"pi-teams: open the teammates dock (live teammates, " +
+			"settings-style layout, last-active times). Read-only; " +
+			"acting on a teammate is a tool call.",
 		handler: async (_args, ctx) => {
 			const agents = await app.snapshot();
 			await openTeammatesDock(agents, ctx);
@@ -534,17 +470,14 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing teammate detach -------------------------------------
-	// Returns an attached session to a plain main agent so it is no
-	// longer reaped with its parent. A command-shaped ability kept
-	// available only as a tool call, like attach and send.
+	// Returns an attached session to a plain main agent.
 	pi.registerTool({
 		name: "team_detach",
 		label: "detach from team",
 		description:
-			"Returns this session to a plain main agent when it was " +
-			"attached as a teammate: the fork identity is dropped, so " +
-			"the broker no longer reaps it with a parent and the parent " +
-			"can no longer wait on it. A root (no parent) is refused.",
+			"Return this session to a plain main agent when it was a " +
+			"teammate: the fork identity is dropped, so the parent can " +
+			"no longer wait on or reap it. A root (no parent) is refused.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 			if (!app.hasParent()) {
@@ -564,16 +497,14 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing teammate termination ---------------------------------
-	// The kill path: ends a teammate's process the way the broker GC
-	// would, including its spawned session file.
+	// Ends a teammate like the broker GC would, session file included.
 	pi.registerTool({
 		name: "team_kill",
 		label: "terminate a teammate",
 		description:
-			"Terminate a pi-teams agent by id, local or on a linked peer " +
-			"host (peer-hosted ids are routed through the existing link). " +
-			"The teammate's process is signalled and its spawned session " +
-			"file is removed. Requires this session to be a team member.",
+			"Terminate a pi-teams agent by id, local or peer-hosted " +
+			"(routed through the link): its process is signalled and " +
+			"its session file removed. Requires team membership.",
 		promptSnippet: "Terminate a teammate by id",
 		parameters: Type.Object({
 			target: Type.String({

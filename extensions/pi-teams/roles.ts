@@ -1,9 +1,7 @@
 /**
- * The general teammate role. Every teammate is launched with the same
- * role specification, independent of its task: what a teammate is, the
- * capabilities it holds as a teammate, and the boundaries of the role.
- * The per-spawn task prompt stays in the agent; this role is the
- * constant system prompt appended to every teammate launch.
+ * The general teammate role: the constant system prompt appended to
+ * every teammate launch (what a teammate is, its capabilities, its
+ * boundaries). The per-spawn task prompt stays in the agent.
  */
 
 const ROLE_TEXT = [
@@ -36,12 +34,8 @@ const ROLE_TEXT = [
 		"final validation.",
 ].join("\n");
 
-/** The teammate role: one immutable specification shared by every
- *  teammate launch. Passed inline through `--append-system-prompt`: a
- *  fixed constant far below the Windows ~32k argv limit, and pi reads
- *  the value as text unless it names an existing file, which a
- *  multi-line prompt never does (pi's resource loader resolves file
- *  paths first). */
-export class TeammateRole {
-	readonly systemPrompt: string = ROLE_TEXT;
-}
+/** Passed inline via `--append-system-prompt`: a fixed constant far
+ *  below the Windows ~32k argv limit; pi reads the value as text
+ *  (its resource loader resolves file paths first, and a multi-line
+ *  prompt never names an existing file). */
+export const TEAM_ROLE_PROMPT = ROLE_TEXT;
