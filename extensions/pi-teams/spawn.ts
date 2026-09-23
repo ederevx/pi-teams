@@ -9,6 +9,7 @@ import type { AgentDirectory } from "./directory.ts";
 import type { BrokerOps } from "./broker-ops.ts";
 import {
 	requestId,
+	spawnWindowMs,
 	type TeammateRef,
 } from "./protocol.ts";
 import type { PendingRequests } from "./pending.ts";
@@ -73,18 +74,29 @@ export class SpawnService {
 		task: string,
 		options: SpawnOptions,
 	): Promise<TeammateRef | null> {
-		const target = await this.directory.mainAgent(host);
-		if (!target) return null;
-		const id = requestId("spawn");
-		const wait = this.pending.register(id, 15000);
-		await this.broker.send(target.id, "spawn", JSON.stringify({
-			task,
-			name,
-			requestId: id,
-			provider: options.provider,
-			model: options.model,
-			thinking: options.thinking,
-		}));
-		return wait;
+		const candidates = await this.directory.mainAgents(host);
+		if (candidates.length === 0) return null;
+		// One request window per candidate: a timeout or a spawn-error
+		// only fails that target, so the next live main is tried instead
+		// of stranding the spawn behind one unresponsive session.
+		for (const target of candidates) {
+			const id = requestId("spawn");
+			const wait = this.pending.register(id, spawnWindowMs());
+			try {
+				await this.broker.send(target.id, "spawn", JSON.stringify({
+					task,
+					name,
+					requestId: id,
+					provider: options.provider,
+					model: options.model,
+					thinking: options.thinking,
+				}));
+			} catch {
+				continue;
+			}
+			const ref = await wait;
+			if (ref) return ref;
+		}
+		return null;
 	}
 }

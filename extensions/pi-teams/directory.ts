@@ -40,10 +40,19 @@ export class AgentDirectory {
 	/** The live main agent that owns `host`, or a fallback agent there.
 	 *  This is the target a host-addressed request is delivered to. */
 	async mainAgent(host: string): Promise<AgentInfo | null> {
+		return (await this.mainAgents(host))[0] ?? null;
+	}
+
+	/** Every live candidate on `host` that may serve a host-addressed
+	 *  request, mains first in registry order. Callers try them in
+	 *  order: one agent can be alive as a broker connection while its
+	 *  pi process no longer surfaces messages, so a single pick would
+	 *  strand every request behind an unresponsive session. */
+	async mainAgents(host: string): Promise<AgentInfo[]> {
 		const agents = await this.snapshot();
 		const own = (a: AgentInfo): boolean =>
 			a.origin === host || a.id.startsWith(`${host}:`);
-		return agents.find((a) => own(a) && a.role === "main")
-			?? agents.find(own) ?? null;
+		const mains = agents.filter((a) => own(a) && a.role === "main");
+		return mains.length > 0 ? mains : agents.filter(own);
 	}
 }
