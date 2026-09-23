@@ -1,8 +1,8 @@
 /**
  * The teammates dock: a settings-style overlay listing every live
- * pi-teams agent. It uses the same SettingsList component and theme the
- * settings screen uses, so the layout matches, and each row shows how
- * long since the agent was last seen active. The dock is read-only by
+ * pi-teams agent. It uses a SelectList with the select-list theme so
+ * the layout matches the host's pickers, and each row shows the
+ * agent's role, last-active age, and how long since it was seen. The dock is read-only by
  * design: it shows the team, while acting on a teammate stays a tool
  * call (team_send, team_attach, team_kill).
  */
@@ -24,19 +24,19 @@ export async function openTeammatesDock(
 	}
 	// The host provides these at runtime; the imports stay dynamic so a
 	// test or embedder without the TUI package never needs them.
-	const [{ Container, SettingsList }, { getSettingsListTheme }] =
+	const [{ Container, SelectList }, { getSelectListTheme }] =
 		await Promise.all([
 			import("@earendil-works/pi-tui"),
 			import("@earendil-works/pi-coding-agent"),
 		]);
 	const now = Date.now() / 1000;
 	const items = agents.map((agent) => ({
-		id: agent.id,
+		value: agent.id,
 		label: agent.name && agent.name !== agent.id
 			? `${agent.name} — ${agent.id}`
 			: agent.id,
-		description: describeAgent(agent),
-		currentValue: presenceText(agent, now),
+		description:
+			`${describeAgent(agent)} · ${presenceText(agent, now)}`,
 	}));
 	await ctx.ui.custom((tui, theme, _keybindings, done) => {
 		const container = new Container();
@@ -51,15 +51,14 @@ export async function openTeammatesDock(
 			}
 			invalidate(): void {}
 		})());
-		const list = new SettingsList(
+		// Read-only rows: no onSelect, so Enter/Space do nothing;
+		// Escape closes through onCancel.
+		const list = new SelectList(
 			items,
 			Math.min(items.length + 2, 15),
-			getSettingsListTheme(),
-			// Read-only rows: no values to cycle, so onChange cannot
-			// fire; Escape closes through onCancel.
-			() => {},
-			() => done(undefined),
+			getSelectListTheme(),
 		);
+		list.onCancel = () => done(undefined);
 		container.addChild(list);
 		return {
 			render(width: number): string[] {
