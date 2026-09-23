@@ -1,15 +1,15 @@
 """Team root paths, constants, and atomic file access.
 
-A team root is one broker's on-disk state: the endpoint it publishes,
-the mirrored registry, its pid file, persisted peers, and the busy
-files its agents use to report state. This module owns every path and
-every atomic write under that root, so no other module has to know the
-layout. It owns no runtime state and starts no threads.
+A team root is one broker's on-disk state: endpoint, mirrored registry,
+pid file, persisted peers, and the agents' busy files. This module owns
+every path and atomic write under that root (no other module knows the
+layout); no runtime state, no threads.
 """
 
 import json
 import os
 import pathlib
+import secrets
 import time
 
 DEFAULT_ROOT = os.path.join(os.path.expanduser("~"), ".local", "state", "pi-teams")
@@ -18,9 +18,9 @@ REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"
 PEERS_NAME = "peers.json"
 BUSY_SUFFIX = ".busy"
-# The extension's spawn prompt marks a forked teammate session; the broker
-# uses it to tell teammate sessions apart from a user's own sessions. Keep
-# in sync with taskPrompt() in extensions/pi-teams.ts.
+# The extension's spawn prompt marks a forked teammate session; the
+# broker tells teammate sessions from a user's own by it. Keep in sync
+# with taskPrompt() in extensions/pi-teams.ts.
 TEAMMATE_MARKER = "a teammate spawned by a parent pi session"
 
 
@@ -42,43 +42,49 @@ class TeamRoot:
     def write_atomic(self, relative, data, mode=0o644):
         self.ensure()
         target = self.base / relative
-        tmp = self.base / ("%s.tmp.%d" % (relative, os.getpid()))
+        # Random scratch suffix: concurrent writers to one target
+        # (registry mirroring) never clobber each other.
+        tmp = self.base / ("%s.tmp.%d.%s"
+                           % (relative, os.getpid(), secrets.token_hex(4)))
         tmp.write_text(data, encoding="utf-8")
         try:
             os.chmod(str(tmp), mode)
         except OSError:
             # Windows chmod only toggles the read-only bit.
             pass
-        # On Windows os.replace can raise PermissionError while a reader
-        # holds the destination open; retry briefly instead of failing.
+        # Windows os.replace fails while a reader holds the destination
+        # open; retry briefly instead of failing.
         for attempt in range(11):
             try:
                 os.replace(str(tmp), str(target))
                 return
             except FileNotFoundError:
-                # Mirror-only write: the owning root was removed (e.g. test
-                # teardown raced a lingering connection thread). The
-                # in-memory registry remains authoritative.
+                # The owning root vanished (teardown raced a lingering
+                # connection thread); memory stays authoritative.
                 return
             except PermissionError:
                 if attempt >= 10:
                     break
                 time.sleep(0.05)
         # The rename never succeeded: drop the scratch so a locked
-        # destination cannot litter the root with tmp copies.
+        # destination cannot litter the root.
         try:
             tmp.unlink()
         except OSError:
             pass
 
     def tmp_files(self):
-        return sorted(self.base.glob("*.tmp.*"))
+        # Scratch can sit below the root (a mailbox write), so the
+        # scan is recursive.
+        try:
+            return sorted(self.base.rglob("*.tmp.*"))
+        except OSError:
+            return []
 
     def gc_tmp_files(self, now, grace):
-        # write_atomic leaves a .tmp.<pid> scratch only when every
-        # rename retry failed while a reader held the destination open;
-        # remove the aged leftovers so a crashed write cannot litter
-        # the root forever.
+        # A .tmp scratch survives only when every rename retry failed
+        # under a holding reader; sweep the aged leftovers so a crashed
+        # write cannot litter the root (any depth) forever.
         for path in self.tmp_files():
             try:
                 if path.stat().st_mtime > now - grace:
@@ -130,6 +136,13 @@ class TeamRoot:
         except OSError:
             pass
 
+    # -- broker pid ---------------------------------------------------
+
+    def write_pid(self):
+        # Publishes the broker pid + start mark: readers tell the live
+        # holder from a reused pid.
+        self.write_atomic(PID_NAME, self._lock_record_text())
+
     # -- single-broker lock ------------------------------------------
 
     def acquire_lock(self):
@@ -144,7 +157,7 @@ class TeamRoot:
                     return False
                 continue
             try:
-                (self._lockbase / "pid").write_text("%d\n" % os.getpid())
+                self._write_lock_record()
                 self._lockpath = self._lockbase
             except OSError:
                 try:
@@ -154,6 +167,18 @@ class TeamRoot:
                 raise
             return True
         return False
+
+    def _lock_record_text(self):
+        # A pid alone cannot prove a lock abandoned: crashed pids are
+        # reused, and poking a reused pid keeps the lock forever; the
+        # start mark pins the holder.
+        return json.dumps(
+            {"pid": os.getpid(), "start": TeamRoot.process_start_mark(
+                os.getpid())}) + "\n"
+
+    def _write_lock_record(self):
+        (self._lockbase / "pid").write_text(
+            self._lock_record_text(), encoding="utf-8")
 
     def release_lock(self):
         if self._lockpath is None:
@@ -166,17 +191,23 @@ class TeamRoot:
         self._lockpath = None
 
     def _reap_stale_lock(self):
-        # The pid file may lag mkdir by a moment, so give it a short
-        # grace before deciding the lock is abandoned. Only a pid that is
-        # provably gone makes the lock stale.
-        pid = None
+        # The pid file may lag mkdir by a moment (short grace). Stale
+        # only when the holder is provably gone: a dead pid, or a live
+        # pid whose start mark differs from the recorded one (reused
+        # pid). An old-format record keeps the pid-only check.
+        record = None
         for _ in range(5):
-            pid = self._lock_pid()
-            if pid is not None:
+            record = self._lock_record()
+            if record is not None:
                 break
             time.sleep(0.05)
-        if pid is not None and self._pid_alive(pid):
+        else:
             return False
+        pid = record.get("pid")
+        if self._pid_alive(pid):
+            recorded, live = record.get("start"), self.process_start_mark(pid)
+            if recorded is None or live is None or recorded == live:
+                return False
         try:
             (self._lockbase / "pid").unlink()
         except OSError:
@@ -187,15 +218,70 @@ class TeamRoot:
             return False
         return True
 
-    def _lock_pid(self):
+    def _lock_record(self):
+        # The lock record: a plain pid (older brokers) or pid + start
+        # mark; None when unreadable or malformed.
         try:
-            text = (self._lockbase / "pid").read_text(encoding="utf-8").strip()
+            text = (self._lockbase / "pid").read_text(
+                encoding="utf-8").strip()
         except OSError:
             return None
         try:
-            return int(text)
+            return {"pid": int(text), "start": None}
+        except ValueError:
+            pass
+        try:
+            record = json.loads(text)
         except ValueError:
             return None
+        if not isinstance(record, dict) or "pid" not in record:
+            return None
+        return record
+
+    @staticmethod
+    def process_start_mark(pid):
+        """When `pid` started, stable across pid reuse: the /proc
+        starttime field on Linux, the handle creation time on
+        Windows, None elsewhere (liveness falls back to the pid
+        probe)."""
+        if pid is None or pid <= 0:
+            return None
+        if os.name == "nt":
+            return TeamRoot._start_mark_windows(pid)
+        try:
+            with open("/proc/%d/stat" % pid, "rb") as fh:
+                fields = fh.read().rsplit(b")", 1)[-1].split()
+            return int(fields[19])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _start_mark_windows(pid):
+        # Creation time via the handle probe; no handle, or an exit
+        # code set (STILL_ACTIVE = 259), means no mark (reads dead).
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except ImportError:
+            return None
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(
+                    handle, ctypes.byref(exit_code)) or exit_code.value != 259:
+                return None
+            created, exited, kernel_us, user_us = (
+                wintypes.FILETIME() for _ in range(4))
+            if not kernel32.GetProcessTimes(
+                    handle, ctypes.byref(created), ctypes.byref(exited),
+                    ctypes.byref(kernel_us), ctypes.byref(user_us)):
+                return None
+            return (created.dwHighDateTime << 32) | created.dwLowDateTime
+        finally:
+            kernel32.CloseHandle(handle)
 
     def _pid_alive(self, pid):
         if pid is None or pid <= 0:
@@ -207,32 +293,13 @@ class TeamRoot:
         except ProcessLookupError:
             return False
         except PermissionError:
-            # Owned by another user: the process exists.
+            # Owned by another user: it exists.
             return True
         except OSError:
             return True
         return True
 
     def _pid_alive_windows(self, pid):
-        # os.kill(pid, 0) would TerminateProcess on Windows, so probe the
-        # process handle instead. A handle that opens for a process that
-        # already exited is not alive.
-        try:
-            import ctypes
-            from ctypes import wintypes
-        except ImportError:
-            return False
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            code = wintypes.DWORD()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return False
-            return code.value == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
+        # os.kill(pid, 0) would TerminateProcess on Windows, so probe
+        # the start mark instead: it reads None for an exited process.
+        return self.process_start_mark(pid) is not None

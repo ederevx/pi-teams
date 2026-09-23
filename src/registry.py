@@ -9,7 +9,7 @@ its lock; this class renders from it and never mutates entries.
 import json
 import time
 
-REGISTRY_NAME = "registry.json"
+from team_root import REGISTRY_NAME
 
 # Heartbeats refresh the mirror at most this often, so readers of the
 # file never see a snapshot frozen at the last registry event.
@@ -43,13 +43,7 @@ class RegistryMirror:
 
     def due(self, now):
         # True once per cadence window; the caller writes.
-        if now - self._last_write >= MIRROR_CADENCE:
-            self._last_write = now
-            return True
-        return False
-
-    def write(self, now=None):
-        # Event-driven writes stay with the caller that broadcasts; this
-        # cadence write keeps only the on-disk mirror fresh.
-        self.root.write_atomic(
-            REGISTRY_NAME, self.render(now or time.time()) + "\n")
+        if now - self._last_write < MIRROR_CADENCE:
+            return False
+        self._last_write = now
+        return True

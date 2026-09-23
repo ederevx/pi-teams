@@ -1,11 +1,10 @@
 """Broker-owned ssh transport for peer links.
 
 One owner for the ssh-tunnel side of peer federation: which tunnel
-serves which label, which tunnel owns a host's link, the durable
-label -> ssh config, and the add/remove/list/restore operations over
-them. The broker composes this owner and keeps the link-level logic
-(which peer serves a host, remote views, relay accounting) to itself;
-PeerTunnel still owns a single tunnel's transport details.
+serves which label, which owns a host's link, the durable config, and
+the add/remove/list/restore operations. The broker keeps the
+link-level logic (which peer serves a host, remote views, relay
+accounting); PeerTunnel owns one tunnel's transport details.
 """
 
 from peer_tunnel import PeerTunnel, PeerUnreachable
@@ -17,8 +16,8 @@ class PeerTransport:
     def __init__(self, host, tunnel_factory=None):
         self.host = host
         self._tunnel_factory = tunnel_factory or PeerTunnel
-        # A live tunnel per label, the durable label -> ssh config, and
-        # which tunnel opened each host's outbound link.
+        # Live tunnels per label, the durable label -> ssh config,
+        # and each host's outbound-link owner.
         self._tunnels = {}
         self._peer_config = {}
         self._peer_owner = {}
@@ -36,26 +35,23 @@ class PeerTransport:
         # drop that link.
         if self._tunnels.get(tunnel.label) is tunnel:
             self._tunnels.pop(tunnel.label, None)
-        owns = bool(tunnel.host) \
-            and self._peer_owner.get(tunnel.host) is tunnel
-        if owns:
-            self._peer_owner.pop(tunnel.host, None)
-        return tunnel.host if owns else None
-
-    def owns_link(self, target_host, tunnel):
-        return self._peer_owner.get(target_host) is tunnel
+        return self.drop_owner(tunnel.host, tunnel)
 
     def link_owned(self, target_host):
-        # Whether any tunnel currently owns the host's outbound link.
+        # Whether a tunnel currently owns the host's outbound link.
         return self._peer_owner.get(target_host) is not None
 
+    def drop_owner(self, target_host, tunnel):
+        """Clears the host's ownership entry when `tunnel` owns it (or
+        unconditionally when it is None); returns the host then."""
+        owns = bool(target_host) \
+            and self._peer_owner.get(target_host) is tunnel
+        if owns or tunnel is None:
+            self._peer_owner.pop(target_host, None)
+        return target_host if owns else None
+
     def clear_owner(self, target_host, tunnel=None):
-        # Drops the ownership entry for a host; with a tunnel given, only
-        # that tunnel's ownership is dropped.
-        if tunnel is None:
-            self._peer_owner.pop(target_host, None)
-        elif self._peer_owner.get(target_host) is tunnel:
-            self._peer_owner.pop(target_host, None)
+        self.drop_owner(target_host, tunnel)
 
     def config(self, label):
         return self._peer_config.get(label)

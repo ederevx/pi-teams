@@ -1,16 +1,14 @@
 """The pi-teams client: one agent's persistent broker connection.
 
 Speaks the broker protocol over its loopback TCP endpoint. Identity
-comes from the environment (TEAM_ID, TEAM_NAME, TEAM_ROLE,
-TEAM_PARENT_ID, TEAM_SESSION) or is derived from the process. One
-TeamClient holds one persistent connection: while it stays open the
-agent is reachable and broker relays arrive on it.
+comes from the environment (TEAM_ID, TEAM_NAME, ...) or is derived
+from the process. One TeamClient holds one persistent connection:
+while it stays open the agent is reachable and relays arrive on it.
 
 Liveness is connection-based on every platform: hold() keeps the
-endpoint open and exits when the broker closes it (deregister), a
-terminate notice arrives (parent gone or explicit kill), or the
-connection drops (broker down). Nothing here kills processes or names
-pids, so the client is portable across POSIX and Windows.
+endpoint open and exits on deregister, a terminate notice, or a
+connection drop. Nothing here kills processes or names pids, so the
+client stays portable across POSIX and Windows.
 """
 
 import json
@@ -22,6 +20,7 @@ import threading
 import time
 
 from team_root import DEFAULT_ROOT, TeamRoot
+from wire import LineStream, dump_line
 
 HEARTBEAT_DEFAULT = 6.0
 
@@ -41,14 +40,12 @@ class TeamClient:
         self.owner_pid = os.environ.get("TEAM_OWNER_PID")
         self.busy_file = os.environ.get("TEAM_BUSY_FILE")
         self.attached = os.environ.get("TEAM_ATTACHED") == "1"
-        # The send token this client's agent already owns: the hold is
-        # launched with it, so gated ops stay pre-authorized and an old
-        # broker (no gating) just ignores the extra field.
+        # The send token the hold was launched with, so gated ops stay
+        # pre-authorized (an old gate-less broker ignores the field).
         self.send_token = os.environ.get("TEAM_SEND_TOKEN")
         self._conn = None
-        self._readbuf = b""
-        # Guards _conn replacement and the watcher handles so close() and
-        # the heartbeat cannot mutate them from two owners at once.
+        self._stream = LineStream()
+        # Guards _conn and watcher handles against two-owner mutation.
         self._lock = threading.RLock()
         self._generation = 0
         self._heartbeat_thread = None
@@ -83,8 +80,8 @@ class TeamClient:
     def set_identity(self, agent_id=None, name=None, role=None, parent=None,
                      session=None, owner_pid=None, busy_file=None,
                      attached=None, send_token=None):
-        # Explicit identity from CLI arguments (pi.exec cannot pass env
-        # on Windows, so the extension hands identity over as args).
+        # Explicit identity from CLI args (pi.exec cannot pass env on
+        # Windows, so identity travels as args).
         if agent_id:
             self.id = agent_id
         if name:
@@ -115,8 +112,7 @@ class TeamClient:
         conn = self._open(endpoint)
         with self._lock:
             if self._conn is not None:
-                # Another thread won the race; discard the extra socket
-                # rather than leaking it.
+                # Another thread won the race; drop the extra socket.
                 try:
                     conn.close()
                 except OSError:
@@ -151,7 +147,7 @@ class TeamClient:
     def close(self):
         with self._lock:
             conn, self._conn = self._conn, None
-            self._readbuf = b""
+            self._stream = LineStream()
             # A generation bump retires every heartbeat and read loop that
             # captured the old connection.
             self._generation += 1
@@ -166,27 +162,25 @@ class TeamClient:
                 pass
 
     def _send_line(self, obj):
-        data = json.dumps(obj, separators=(",", ":")) + "\n"
-        self.connect().sendall(data.encode())
+        self.connect().sendall(dump_line(obj))
 
     def _read_line(self):
-        while b"\n" not in self._readbuf:
+        while True:
+            line = self._stream.next_line()
+            if line is not None:
+                return json.loads(line.decode("utf-8"))
             chunk = self.connect().recv(65536)
             if not chunk:
                 return None
-            self._readbuf += chunk
-        line, rest = self._readbuf.split(b"\n", 1)
-        self._readbuf = rest
-        return json.loads(line.decode("utf-8"))
+            self._stream.push(chunk)
 
     def send(self, obj):
         self._send_line(obj)
 
     def request(self, op, expected=("ack", "error", "registry"),
                 timeout=None, **fields):
-        # A peer-add blocks the broker while it reads the peer endpoint
-        # over ssh, so that op needs a longer socket wait than the
-        # default round-trip timeout.
+        # `timeout` extends the socket wait for ops where the broker
+        # blocks (peer-add reads the peer endpoint over ssh).
         conn = self.connect()
         if timeout is not None:
             conn.settimeout(timeout)
@@ -221,19 +215,20 @@ class TeamClient:
     def ls(self):
         return self.request("ls", expected=("registry", "error"))
 
+    def _peer_op(self, op, timeout, **params):
+        return self.request(op, expected=("ack", "error"),
+                            timeout=timeout, **params)
+
     def terminate(self, agent_id, why="requested"):
         # A peer-terminate waits for the target host's broker to ack or
         # for the pending-relay window, so allow more than a round trip.
-        return self.request("terminate", expected=("ack", "error"),
-                            timeout=20, to=agent_id, why=why)
+        return self._peer_op("terminate", 20, to=agent_id, why=why)
 
     def peer_add(self, label, ssh):
-        return self.request("peer-add", expected=("ack", "error"),
-                            timeout=35, label=label, ssh=ssh)
+        return self._peer_op("peer-add", 35, label=label, ssh=ssh)
 
     def peer_remove(self, label):
-        return self.request("peer-remove", expected=("ack", "error"),
-                            timeout=15, label=label)
+        return self._peer_op("peer-remove", 15, label=label)
 
     def peer_list(self):
         return self.request("peer-list", expected=("peers", "error"))
@@ -261,9 +256,9 @@ class TeamClient:
         thread.start()
 
     def _heartbeat(self, generation):
-        # The captured generation pins this loop to the connection that
-        # started it: close() bumps the generation, so a heartbeat that
-        # wakes after close cannot send on a dead or replaced socket.
+        # The captured generation pins this loop to its connection:
+        # close() bumps it, so a late wake cannot send on a dead or
+        # replaced socket.
         while True:
             time.sleep(self.heartbeat)
             with self._lock:
@@ -271,11 +266,11 @@ class TeamClient:
                     return
                 conn = self._conn
             state = self._state()
-            data = (json.dumps({
+            data = dump_line({
                 "op": "ping",
                 "busy": state == "busy",
                 "waiting": state == "waiting",
-            }, separators=(",", ":")) + "\n").encode()
+            })
             with self._lock:
                 if self._generation != generation or self._conn is not conn:
                     return
@@ -314,21 +309,18 @@ class TeamClient:
                 if on_message is not None:
                     on_message(msg)
                 else:
-                    print(json.dumps(msg, separators=(",", ":")),
-                          flush=True)
+                    print(dump_line(msg).decode("utf-8"), flush=True)
         finally:
             self.close()
 
     def _watch_stdin(self):
-        # When the spawner hosts us on a pipe or a PTY, EOF on stdin
-        # means the hosting process is gone: exit so the endpoint dies
-        # with its pi instead of pinging forever as an orphan. Watch
-        # every stdin except a real interactive console, whose input
-        # must never be consumed. A console is recognized with
-        # os.get_terminal_size, not isatty: on Windows isatty reports
-        # true for the NUL device too, so a hold launched with a
-        # detached stdin would never see its EOF and would outlive its
-        # host.
+        # EOF on stdin means the hosting process is gone: exit so the
+        # endpoint dies with its pi instead of pinging as an orphan.
+        # Every stdin is watched except a real interactive console,
+        # whose input must never be consumed; a console is recognized
+        # with os.get_terminal_size, not isatty (Windows reports isatty
+        # true for the NUL device, so a detached-stdin hold would never
+        # see its EOF and would outlive its host).
         dead = threading.Event()
         try:
             os.get_terminal_size(sys.stdin.fileno())
@@ -353,18 +345,19 @@ class TeamClient:
         return dead
 
     def _emit(self, msg):
-        # Surface inbound relayed traffic on stdout for the hosting
-        # extension to forward to its agent. Registry churn is internal
-        # bookkeeping, never agent-facing.
+        # Inbound relayed traffic on stdout for the hosting extension;
+        # registry churn is internal bookkeeping, never agent-facing.
         if msg.get("op") != "message" or msg.get("kind") == "registry-change":
             return
         print(json.dumps(msg, separators=(",", ":")), flush=True)
 
     def answer_finish(self, done):
-        # The agent-facing answer to a finish query: run from the agent's
-        # shell tool after it sees the surfaced "finish?" question. The
-        # idle agent cannot answer through its heartbeat, so this CLI
-        # command speaks for it.
+        """The CLI answer to a surfaced finish query: the idle agent
+        cannot answer through its heartbeat, so the shell speaks."""
+        return self._answer(done)
+
+    def _answer(self, done):
+        # One finish answer shape, shared by the CLI and the hold.
         return self.send_msg("*", "finish-yes" if not done else "finish-no",
                              {"id": self.ensure_id(),
                               "state": self._state()})
@@ -385,16 +378,11 @@ class TeamClient:
                 if msg is None or msg.get("kind") == "terminate":
                     return
                 if msg.get("kind") == "finish?":
-                    # The broker asks whether this agent is done before
-                    # reaping it. A busy or waiting agent is still
-                    # working and answers at once; an idle agent is
-                    # blocked in pi and cannot answer by itself, so the
-                    # question is surfaced for its next turn to decide.
-                    state = self._state()
-                    if state in ("busy", "waiting"):
-                        self.send_msg("*", "finish-yes", {
-                            "id": self.ensure_id(), "state": state,
-                        })
+                    # A busy or waiting agent is still working and
+                    # answers at once; an idle one is blocked in pi, so
+                    # the question is surfaced for its next turn.
+                    if self._state() in ("busy", "waiting"):
+                        self._answer(True)
                     else:
                         self._emit(msg)
                     continue

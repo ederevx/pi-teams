@@ -20,9 +20,9 @@ export interface AgentInfo {
 	"last_seen"?: number;
 }
 
-/** Resolves a host label to its live agents. Every broker prefixes its
- *  agents' ids with the host label, so a peer's agents are addressed
- *  exactly like local ones; only the backend that reaches them differs. */
+/** Resolves a host label to its live agents. Brokers prefix ids with
+ *  the host label, so a peer's agents are addressed like local ones;
+ *  only the backend that reaches them differs. */
 export class AgentDirectory {
 	private readonly snapshot: () => Promise<AgentInfo[]>;
 	private readonly host: string;
@@ -44,10 +44,9 @@ export class AgentDirectory {
 	}
 
 	/** Every live candidate on `host` that may serve a host-addressed
-	 *  request, mains first in registry order. Callers try them in
-	 *  order: one agent can be alive as a broker connection while its
-	 *  pi process no longer surfaces messages, so a single pick would
-	 *  strand every request behind an unresponsive session. */
+	 *  request, mains first. Callers try them in order: an agent can
+	 *  hold its broker connection while its pi process no longer
+	 *  surfaces messages, so a single pick would strand requests. */
 	async mainAgents(host: string): Promise<AgentInfo[]> {
 		const agents = await this.snapshot();
 		const own = (a: AgentInfo): boolean =>

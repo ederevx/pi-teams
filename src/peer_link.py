@@ -1,14 +1,16 @@
 """One broker's authenticated link to a peer broker.
 
 Either side may open it: the initiator connects and starts a read
-loop; the acceptor wraps the accepted socket and lets the caller's
-connection loop feed it. Both directions carry peer-relay traffic and
-peer-registry snapshots over a single stream.
+loop; the acceptor wraps the accepted socket for the caller's loop to
+feed. Both directions carry relay traffic and registry snapshots over
+one stream.
 """
 
 import json
 import socket
 import threading
+
+from wire import LineStream, dump_line
 
 
 class PeerLink:
@@ -20,14 +22,13 @@ class PeerLink:
         self.endpoint = endpoint or {}
         self.conn = conn
         self.connected = conn is not None
-        self._buf = b""
+        self._stream = LineStream()
         self._send_lock = threading.Lock()
         self._drop_lock = threading.Lock()
 
     def drop_in_place(self):
-        # Drops the link and clears the endpoint in one owned step, so a
-        # drop-in-place (an explicit removal or shutdown) cannot leave a
-        # reconnectable endpoint behind on a dead link.
+        # Link drop + endpoint clear in one step: an explicit removal
+        # cannot leave a reconnectable endpoint on a dead link.
         self.endpoint = {}
         self.drop()
 
@@ -56,9 +57,7 @@ class PeerLink:
             return False
         try:
             with self._send_lock:
-                self.conn.sendall(
-                    (json.dumps(obj, separators=(",", ":")) + "\n").encode()
-                )
+                self.conn.sendall(dump_line(obj))
             return True
         except OSError:
             self.drop()
@@ -75,9 +74,11 @@ class PeerLink:
                     break
                 if not chunk:
                     break
-                self._buf += chunk
-                while b"\n" in self._buf:
-                    line, self._buf = self._buf.split(b"\n", 1)
+                self._stream.push(chunk)
+                while True:
+                    line = self._stream.next_line()
+                    if line is None:
+                        break
                     if not line.strip():
                         continue
                     try:

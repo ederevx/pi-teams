@@ -1,11 +1,11 @@
 """Park-and-forward decision layer between the broker and the mailbox.
 
-One owner for the delivery semantics the broker dispatch and register
-paths need: which connection-less local targets still belong to the
-team (a recent connection drop, not an eviction), when to park a
-message instead of failing it, and how parked messages replay onto a
-re-registered connection. The Mailbox store owns the files; this class
-owns the drop bookkeeping and the redelivery order.
+One owner for the delivery semantics the broker needs: which
+connection-less local targets still belong to the team (a recent
+drop, not an eviction), when to park instead of failing, and how
+parked messages replay onto a re-registered connection. The Mailbox
+store owns the files; this class owns drop bookkeeping and replay
+order.
 """
 
 import time
@@ -16,9 +16,8 @@ class MailboxDelivery:
 
     def __init__(self, store):
         self.store = store
-        # agent_id -> time.time() of the last connection loss. A
-        # connection loss is not an eviction, so sends during the
-        # hold-restart gap park instead of failing outright.
+        # agent_id -> last connection loss (a drop is not an eviction:
+        # sends during the hold-restart gap park).
         self._dropped_at = {}
 
     def mark_dropped(self, agent_id):
@@ -39,10 +38,9 @@ class MailboxDelivery:
 
     def replay(self, agent_id, write):
         # Write every parked envelope to the reconnected target, then
-        # drop the delivered ones from disk. A crash between the write
-        # and the drop redelivers once; the client filters that by
-        # envelope id. A write that failed leaves the message parked
-        # for the next register.
+        # drop the delivered ones: a crash in between costs a
+        # redelivery the client filters by id, never a loss; a failed
+        # write stays parked for the next register.
         delivered = []
         for record in self.store.parked(agent_id):
             msg_id = str(record.get("id") or "")
