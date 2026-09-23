@@ -518,6 +518,23 @@ test("requireSameTeam is team-scoped for a teammate", async () => {
 	agent.stopHold();
 });
 
+test("deliverMessage filters a redelivered envelope id", async () => {
+	const delivered = [];
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, (m) => delivered.push(m));
+	const line = (id) => JSON.stringify({
+		op: "message", id, from: "a", to: "parent-1",
+		kind: "text", payload: "hi", ts: 1,
+	});
+	agent.deliverMessage(line("m1"));
+	agent.deliverMessage(line("m1"));
+	agent.deliverMessage(line("m2"));
+	assert.equal(delivered.length, 2);
+	assert.deepEqual(
+		delivered.map((m) => m.id), ["m1", "m2"]);
+});
+
 test("attach refuses a target that already has a parent", async () => {
 	const { runner } = makeRunner((file, args) => {
 		if (args.includes("ls")) {

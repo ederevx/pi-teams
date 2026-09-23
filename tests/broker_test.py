@@ -328,7 +328,109 @@ class BrokerProtocolTests(unittest.TestCase):
         alpha.close()
         thread.join(timeout=3)
 
+    def test_online_requires_fresh_heartbeat(self):
+        # online is computed from heartbeat freshness, never stored: a
+        # stale entry reads offline even before the sweep removes it.
+        # The sweep shares the liveness window, so this broker's sweep
+        # never fires and the stale entry survives to be observed.
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=0.4, sweep_interval=999)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        try:
+            wait_endpoint(root)
+            ghost = TeamClient(root, heartbeat=None)
+            ghost.id = "ghost"
+            ghost.name = "ghost"
+            ghost.register()
+            broker._registry["ghost"]["last_seen"] = time.time() - 0.5
+            agents = {
+                a["id"]: a for a in ghost.ls()["agents"]
+            }
+            self.assertFalse(agents["ghost"]["online"], agents["ghost"])
+            ghost.close()
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_send_parks_for_dropped_target(self):
+        alpha = self._agent("alpha")
+        beta = self._agent("beta")
+        beta.close()
+        self.assertTrue(
+            wait_until(lambda: "beta" not in self._agents()),
+            "beta's connection was not swept",
+        )
+        reply = alpha.send_msg("beta", "text", {"ping": 1})
+        self.assertEqual(reply.get("op"), "ack", reply)
+        self.assertTrue(reply.get("queued"), reply)
+        parked = self.broker.delivery.store.parked("beta")
+        self.assertEqual(len(parked), 1, parked)
+        self.assertEqual(parked[0]["payload"], {"ping": 1})
+        alpha.close()
+
+    def test_parked_message_delivers_on_reregister(self):
+        alpha = self._agent("alpha")
+        beta = self._agent("beta")
+        beta.close()
+        self.assertTrue(
+            wait_until(lambda: "beta" not in self._agents()),
+            "beta's connection was not swept",
+        )
+        reply = alpha.send_msg("beta", "text", {"ping": 1})
+        self.assertEqual(reply.get("op"), "ack", reply)
+        parked_id = self.broker.delivery.store.parked("beta")[0]["id"]
+        reconnected = TeamClient(self.root)
+        reconnected.id = "beta"
+        reconnected.name = "beta"
+        reconnected.send_token = "st-beta"
+        received = []
+        ready = threading.Event()
+        thread = threading.Thread(
+            target=reconnected.follow,
+            args=(received.append, ready.set),
+            daemon=True,
+        )
+        thread.start()
+        self.assertTrue(ready.wait(timeout=3), "re-register never finished")
+        self.assertTrue(
+            wait_until(lambda: received),
+            "parked message was never delivered on re-register",
+        )
+        msg = received[0]
+        self.assertEqual(msg["kind"], "text")
+        self.assertEqual(msg["payload"], {"ping": 1})
+        self.assertEqual(msg["id"], parked_id)
+        self.assertEqual(self.broker.delivery.store.parked("beta"), [])
+        reconnected.close()
+        alpha.close()
+        thread.join(timeout=3)
+
+    def test_parked_message_expires_with_ttl(self):
+        alpha = self._agent("alpha")
+        beta = self._agent("beta")
+        beta.close()
+        self.assertTrue(
+            wait_until(lambda: "beta" not in self._agents()),
+            "beta's connection was not swept",
+        )
+        self.broker.delivery.store.ttl = 0.3
+        reply = alpha.send_msg("beta", "text", {"ping": 1})
+        self.assertEqual(reply.get("op"), "ack", reply)
+        self.assertTrue(
+            wait_until(lambda: not self.broker.delivery.store.parked("beta")),
+            "expired parked message was never pruned",
+        )
+        reply = alpha.send_msg("beta", "text", {"ping": 2})
+        self.assertEqual(reply.get("op"), "error", reply)
+        self.assertEqual(reply.get("error"), "undeliverable", reply)
+        alpha.close()
+
     def test_undeliverable(self):
+        # A target the broker never knew (no registry entry, no recent
+        # connection drop) stays undeliverable; the mailbox only parks
+        # for targets the team actually had.
         alpha = self._agent("alpha")
         reply = alpha.send_msg("ghost", "text", "hello")
         self.assertEqual(reply.get("op"), "error")
