@@ -4,7 +4,7 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
-## Unreleased
+## v0.4.11 - 2026-09-22
 
 - The broker asks an idle fork whether it is done before reaping it: a
   `finish?` query goes to the fork's client, which answers at once
@@ -28,6 +28,26 @@ maps each tag to its commit.
   owned `PeerLink.drop_in_place()` instead of direct endpoint mutation,
   a glob-based pycache cleanup in `scripts/uninstall.sh`, and the `/team
   send` command reusing the shared member gate.
+
+- `/team` is gone; the one command is `/team-ls`, a settings-style
+  dock (pi's own SettingsList layout and theme) listing every live
+  agent with its role and last-active time, read-only. Send, attach,
+  detach, and kill are tool calls only: new `team_detach` and
+  `team_kill` tools cover what the command used to do, and registry
+  entries carry `last_work`/`last_seen` through the snapshot for the
+  display.
+- README rewritten under the shared concise-documentation convention:
+  same content, rescanned into short grouped bullets, a tools table,
+  and tightened validation and deployment sections.
+
+## v0.4.10 - 2026-09-22
+
+- Settings reconciler runs from a new postinstall hook: pi treats every
+  packages entry as an independent package, so a git pin and a
+  local-path install of the same checkout coexist, both extension
+  copies load, and pi aborts startup with tool-conflict errors. The
+  reconciler drops duplicate entries for this package, preferring the
+  git pin matching the installed version, and fails soft always.
 
 ## v0.4.9 - 2026-09-22
 
