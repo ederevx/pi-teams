@@ -37,6 +37,7 @@ class ForkLifecycleTests(unittest.TestCase):
         parent.id = agent_id
         parent.name = agent_id
         parent.role = "main"
+        parent.send_token = "st-%s" % agent_id
         reply = parent.register()
         self.assertEqual(reply.get("op"), "ack", reply)
         return parent
@@ -88,7 +89,9 @@ class ForkLifecycleTests(unittest.TestCase):
                 wait_until(lambda: "fork-m" in self._ids(), timeout=3),
                 "fork never registered",
             )
-            run_team(self.root, ["send", "fork-m", "result", "report"])
+            # The report rides the registered parent's credential; an
+            # anonymous CLI sender is refused by the send gate.
+            parent.send_msg("fork-m", "result", "report")
             lines = []
             reader = threading.Thread(
                 target=lambda: lines.append(child.stdout.readline()),
@@ -108,20 +111,28 @@ class ForkLifecycleTests(unittest.TestCase):
             parent.close()
 
     def test_send_identity_arg_stamps_the_sender(self):
-        # send must carry the caller's real id: a peer's spawn handler
-        # replies to `from`, and a remote fork is parented to it, so a
-        # throwaway cli id would strand the reply and the fork.
+        # send must carry the caller's real id and its send token: a
+        # peer's spawn handler replies to `from`, and a remote fork is
+        # parented to it, so a throwaway cli id would strand the reply
+        # and the fork - and the gate refuses an unregistered sender.
         holder = team_proc(
             self.root,
             ["hold", "--id", "target-1", "--role", "main"],
         )
+        sender = TeamClient(self.root)
+        sender.id = "sender-1"
+        sender.name = "sender-1"
+        sender.send_token = "st-sender-1"
+        sender.register()
         try:
             self.assertTrue(
                 wait_until(lambda: "target-1" in self._ids(), timeout=3),
                 "hold never registered",
             )
             run_team(self.root, [
-                "send", "--id", "sender-1", "target-1", "text", "hello",
+                "send", "--id", "sender-1",
+                "--send-token", "st-sender-1",
+                "target-1", "text", "hello",
             ])
             lines = []
             reader = threading.Thread(
@@ -135,6 +146,7 @@ class ForkLifecycleTests(unittest.TestCase):
             self.assertEqual(msg["from"], "sender-1")
             self.assertEqual(msg["to"], "target-1")
         finally:
+            sender.close()
             holder.kill()
             holder.wait(timeout=5)
 
