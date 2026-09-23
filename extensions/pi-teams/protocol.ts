@@ -30,6 +30,18 @@ export const DEFAULT_WAIT_SECONDS = 300;
 /** How often an active team_wait re-checks its stop conditions. */
 export const WAIT_POLL_MS = 250;
 
+/** One spawn request's answer window per candidate target, in ms;
+ *  overridable with PI_TEAMS_SPAWN_WINDOW. A target that stays silent
+ *  past it fails, and the next candidate on the host is tried. */
+export const DEFAULT_SPAWN_WINDOW_MS = 15000;
+
+/** Resolves the spawn answer window from the environment, then the
+ *  default. */
+export function spawnWindowMs(): number {
+	const env = Number(process.env.PI_TEAMS_SPAWN_WINDOW);
+	return Number.isFinite(env) && env > 0 ? env : DEFAULT_SPAWN_WINDOW_MS;
+}
+
 /** Default silence bound before team_wait nudges silent teammates,
  *  overridable with PI_TEAMS_STALL; 0 disables the nudge. */
 export const DEFAULT_STALL_SECONDS = 90;
