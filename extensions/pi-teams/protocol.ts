@@ -9,6 +9,9 @@ export interface TeamMessage {
 	kind: string;
 	payload: unknown;
 	ts?: number;
+	/** Wire id the broker stamps on delivered envelopes; a client
+	 *  filters redeliveries (mailbox handoff after a crash) by it. */
+	id?: string;
 }
 
 export type DeliverFn = (message: TeamMessage) => void;
