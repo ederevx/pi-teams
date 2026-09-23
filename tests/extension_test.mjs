@@ -163,6 +163,7 @@ test("hold forwards identity and owns the held connection's stdin", () => {
 	assert.equal(call.options.env.TEAM_OWNER_PID, String(process.pid));
 	assert.equal(call.options.env.TEAM_NAME, "pi@/work");
 	assert.ok(call.options.env.TEAM_BUSY_FILE.endsWith(`${agent.id}.busy`));
+	assert.ok(call.options.env.TEAM_SEND_TOKEN, "hold must carry a send token");
 
 	agent.stopHold();
 	assert.equal(call.stdinEnded, true);
@@ -389,12 +390,20 @@ test("a stalled wait nudges each silent teammate once", async () => {
 	// Silence past the stall bound sends one nudge per teammate; the
 	// 250ms poll fires several times but the nudge must not repeat.
 	await new Promise((resolve) => setTimeout(resolve, 50));
-	// The nudge goes through `team send --id <parent> <to> text <text>`.
+	// The nudge goes through `team send --id <parent> --send-token <tok>
+	// <to> text <text>`: the first positional after the flags is the
+	// target id.
+	const sendTarget = (args) => {
+		const start = args.indexOf("send") + 1;
+		for (let i = start; i < args.length; i += 2) {
+			if (!args[i].startsWith("--")) return args[i];
+		}
+		return "";
+	};
 	const nudges = runCalls.filter((args) => args.includes("send"));
 	assert.equal(nudges.length, 2,
 		`expected one nudge per teammate, got ${nudges.length}`);
-	const nudgeTargets = nudges.map(
-		(args) => args[args.indexOf("send") + 3]);
+	const nudgeTargets = nudges.map(sendTarget);
 	assert.deepEqual([...nudgeTargets].sort(), ["kid", "other"]);
 	for (const args of nudges) {
 		assert.ok(String(args[args.length - 1]).includes("continue"));
@@ -603,6 +612,10 @@ test("spawnTask builds the teammate template from a task alone", () => {
 		assert.ok(sent.message.includes(join(binDir, "team")));
 		assert.equal(call.options.env.TEAM_ROOT, stateRoot);
 		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
+		assert.ok(call.options.env.TEAM_SEND_TOKEN,
+			"teammate env must carry its own send token");
+		assert.notEqual(call.options.env.TEAM_SEND_TOKEN, agent.sendToken,
+			"each teammate mints its own token");
 		// The teammate must not inherit the parent's session or host
 		// binding, whichever layer set it; its own identity is set fresh.
 		assert.equal(call.options.env.PI_SESSION_BINDING, undefined);
