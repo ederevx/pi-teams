@@ -138,7 +138,7 @@ export class TeamAgent {
 	private guard(child: SpawnedProcess | null): SpawnedProcess | null {
 		child?.on("error", () => {
 			// A failed broker/hold/pi start must not crash the session;
-			// the next /team call retries.
+			// the next agent action retries.
 		});
 		return child;
 	}
@@ -384,8 +384,8 @@ export class TeamAgent {
 	async requireTeammate(action: string): Promise<void> {
 		if (await this.isTeammate()) return;
 		throw new Error(
-			`${action} requires being a team member; attach first with ` +
-			`team_attach or /team attach <parent>`);
+			`${action} requires being a team member; a parent attaches you ` +
+			`with team_attach`);
 	}
 
 	/** Whether this session is itself a teammate of another agent (has a
@@ -982,23 +982,22 @@ export class TeamAgent {
 	}
 
 	announce(agents: AgentInfo[]): { customType: string; content: string; display: boolean } | null {
-		if (this.announced) return null;
-		this.announced = true;
-		const lines = agents
-			.slice(0, 8)
-			.map((a) =>
-				`- ${a.id} ${a.name} (${a.role}, ${a.online ? "online" : "offline"}` +
-				(a.session ? `, session ${basename(a.session)}` : "") +
-				`): /team send ${a.id} text <message>`);
-		const content =
-			`## pi-teams teammates (broker: ${stateRoot})\n` +
-			`${lines.join("\n") || "- none live yet"}\n` +
-			`Spawn a teammate: team_spawn (task, name). Messaging and ` +
-			`waiting require a team member; attach with team_attach or ` +
-			`/team attach <parent>. A teammate may only message its own ` +
-			`team, so ask your parent to attach an outsider first, and an ` +
-			`agent belongs to one team. Peer hosts: team_peer add ` +
-			`<ssh-host>, then team_spawn host=<label>. list: /team ls.`;
-		return { customType: "pi-teams", content, display: false };
+	const lines = agents
+		.slice(0, 8)
+		.map((a) =>
+			`- ${a.id} ${a.name} (${a.role}, ${a.online ? "online" : "offline"}` +
+			(a.session ? `, session ${basename(a.session)}` : "") +
+			`)`);
+	const content =
+		`## pi-teams teammates (broker: ${stateRoot})\n` +
+		`${lines.join("\n") || "- none live yet"}\n` +
+		`Spawn a teammate with team_spawn (task, name); message, wait, ` +
+		`attach, detach, and terminate are tool calls only (team_send, ` +
+		`team_wait, team_attach, team_detach, team_kill). A teammate ` +
+		`may only message its own team, so ask your parent to attach an ` +
+		`outsider first, and an agent belongs to one team. Peer hosts: ` +
+		`team_peer add <ssh-host>, then team_spawn host=<label>. The ` +
+		`/team-ls command opens the teammates dock.`;
+	return { customType: "pi-teams", content, display: false };
 	}
 }

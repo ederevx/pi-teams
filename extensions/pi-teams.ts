@@ -17,6 +17,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { TeamAgent } from "./pi-teams/agent.ts";
 import { ChatTail } from "./pi-teams/chat-tail.ts";
+import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
 	deliverToAgent,
 	formatReport,
@@ -166,7 +167,8 @@ export default async function (pi: ExtensionAPI) {
 			"Use team_spawn to create a new teammate instead.",
 		parameters: Type.Object({
 			target: Type.String({
-				description: "Agent id to attach, from /team ls or team_wait",
+				description:
+					"Agent id to attach, from /team-ls or team_wait",
 			}),
 			name: Type.Optional(Type.String({
 				description: "Teammate name; defaults to the target's id",
@@ -220,8 +222,8 @@ export default async function (pi: ExtensionAPI) {
 				"returns without a report, that teammate is still running " +
 				"and will report as a message; re-call team_wait with the " +
 				"remaining ids to keep blocking. A hung-looking teammate " +
-					"is nudged automatically once per wait - do not send your " +
-					"own steering message for that.",
+				"is nudged automatically once per wait - do not send your " +
+				"own steering message for that.",
 		],
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({
@@ -500,87 +502,78 @@ export default async function (pi: ExtensionAPI) {
 		app.deregister();
 	});
 
-	pi.registerCommand("team", {
+	pi.registerCommand("team-ls", {
 		description:
-			"pi-teams: ls|status|send <id> [kind] <text>|attach <parent>" +
-			" [name]|detach|kill <id>",
-		handler: async (args, ctx) => {
-			const parts = (args || "").trim().split(/\s+/).filter(Boolean);
-			const sub = parts.shift() || "status";
-			const rest = parts.join(" ");
-			if (sub === "ls" || sub === "status") {
-				const agents = await app.snapshot();
-				const lines = agents.map((a) =>
-					`${a.id}\t${a.name}\t${a.role}\t${a.online ? "online" : "offline"}` +
-					(a.parent ? `\tchild-of ${a.parent}` : "") +
-					(a.session ? `\tsession ${basename(a.session)}` : ""));
-				ctx.ui.notify(
-					`pi-teams: ${agents.length} agent(s)\n${lines.join("\n")}`,
-					"info",
-				);
-				return;
+			"pi-teams: open the teammates dock (all live teammates, " +
+			"settings-style layout, last-active times). Read-only; acting " +
+			"on a teammate is a tool call (team_send, team_attach, " +
+			"team_kill).",
+		handler: async (_args, ctx) => {
+			const agents = await app.snapshot();
+			await openTeammatesDock(agents, ctx);
+		},
+	});
+
+	// -- agent-facing teammate detach -------------------------------------
+	// Returns an attached session to a plain main agent so it is no
+	// longer reaped with its parent. A command-shaped ability kept
+	// available only as a tool call, like attach and send.
+	pi.registerTool({
+		name: "team_detach",
+		label: "detach from team",
+		description:
+			"Returns this session to a plain main agent when it was " +
+			"attached as a teammate: the fork identity is dropped, so " +
+			"the broker no longer reaps it with a parent and the parent " +
+			"can no longer wait on it. A root (no parent) is refused.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+			if (!app.hasParent()) {
+				throw new Error(
+					"team_detach needs an attached session; this " +
+					"session is a team root");
 			}
-			if (sub === "send") {
-				const m = /^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]+))?$/.exec(rest);
-				if (!m || !m[1] || !m[3]) {
-					ctx.ui.notify("usage: /team send <id> [kind] <text>", "warning");
-					return;
-				}
-				try {
-					// One gate owner: the same member check the tools use.
-					await app.requireTeammate("/team send");
-				} catch (error) {
-					ctx.ui.notify(
-						`pi-teams: ${error instanceof Error ? error.message : error}`,
-						"warning");
-					return;
-				}
-				const kind = m[2] || "text";
-				const reply = await app.send(m[1], kind, m[3]);
-				logTeamMessage(pi, "sent", {
-					from: app.id, to: m[1], kind, payload: m[3],
-				});
-				ctx.ui.notify(`pi-teams: ${reply}`, "info");
-				return;
-			}
-			if (sub === "attach") {
-				const m = /^(\S+)(?:\s+(\S+))?$/.exec(rest);
-				if (!m || !m[1]) {
-					ctx.ui.notify("usage: /team attach <parent> [name]",
-						"warning");
-					return;
-				}
-				if (app.hasParent()) {
-					ctx.ui.notify(
-						"pi-teams: already a teammate; an agent belongs " +
-						"to one team (detach first)", "warning");
-					return;
-				}
-				const ref = await app.attachTo(m[1], m[2] || "");
-				ctx.ui.notify(
-					`pi-teams: attached as teammate ${ref.id}`, "info");
-				return;
-			}
-			if (sub === "detach") {
-				const id = app.detach();
-				ctx.ui.notify(`pi-teams: detached; now ${id}`, "info");
-				return;
-			}
-			if (sub === "kill") {
-				const target = rest.trim();
-				if (!target) {
-					ctx.ui.notify("usage: /team kill <id>", "warning");
-					return;
-				}
-				await app.terminate(target);
-				ctx.ui.notify(`pi-teams: terminated ${target}`, "info");
-				return;
-			}
-			ctx.ui.notify(
-				"pi-teams: subcommands: ls | status | send <id> [kind] " +
-					"<text> | attach <parent> [name] | detach | kill <id>",
-				"warning",
-			);
+			const id = app.detach();
+			return {
+				content: [{
+					type: "text",
+					text: `detached; this session is now ${id}`,
+				}],
+				details: { id },
+			};
+		},
+	});
+
+	// -- agent-facing teammate termination ---------------------------------
+	// The kill path: ends a teammate's process the way the broker GC
+	// would, including its spawned session file.
+	pi.registerTool({
+		name: "team_kill",
+		label: "terminate a teammate",
+		description:
+			"Terminate a pi-teams agent by id, local or on a linked peer " +
+			"host (peer-hosted ids are routed through the existing link). " +
+			"The teammate's process is signalled and its spawned session " +
+			"file is removed. Requires this session to be a team member.",
+		promptSnippet: "Terminate a teammate by id",
+		parameters: Type.Object({
+			target: Type.String({
+				description: "Agent id to terminate",
+			}),
+			why: Type.Optional(Type.String({
+				description: "Why it is terminated; recorded in the log",
+			})),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			await app.requireTeammate("team_kill");
+			await app.terminate(params.target);
+			return {
+				content: [{
+					type: "text",
+					text: `terminated ${params.target}`,
+				}],
+				details: { target: params.target },
+			};
 		},
 	});
 }
