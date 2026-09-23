@@ -62,8 +62,30 @@ class TeamRoot:
                 return
             except PermissionError:
                 if attempt >= 10:
-                    return
+                    break
                 time.sleep(0.05)
+        # The rename never succeeded: drop the scratch so a locked
+        # destination cannot litter the root with tmp copies.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+    def tmp_files(self):
+        return sorted(self.base.glob("*.tmp.*"))
+
+    def gc_tmp_files(self, now, grace):
+        # write_atomic leaves a .tmp.<pid> scratch only when every
+        # rename retry failed while a reader held the destination open;
+        # remove the aged leftovers so a crashed write cannot litter
+        # the root forever.
+        for path in self.tmp_files():
+            try:
+                if path.stat().st_mtime > now - grace:
+                    continue
+                path.unlink()
+            except OSError:
+                continue
 
     def read_endpoint(self):
         try:

@@ -50,10 +50,22 @@ export { BrokerOps } from "./pi-teams/broker-ops.ts";
 export { SpawnService } from "./pi-teams/spawn.ts";
 
 export default async function (pi: ExtensionAPI) {
+	// A reload builds a second TeamAgent in this process while the
+	// first one's hold may still be registered: the duplicate showed
+	// up as two ids for one session (same owner pid). Hand over: the
+	// fresh instance inherits the live identity, and the previous one
+	// stops holding without a resurrect.
+	const holder = globalThis as unknown as {
+		__piTeamsAgent?: TeamAgent;
+	};
+	const previous = holder.__piTeamsAgent;
+	if (previous) previous.handover();
 	const app = new TeamAgent(
 		new ProcessRunner(),
 		(message) => deliverToAgent(pi, message),
 	);
+	if (previous) app.inheritIdentity(previous);
+	holder.__piTeamsAgent = app;
 
 	pi.registerEntryRenderer("pi-teams-log", (entry, options, theme) => {
 		const data = entry.data as {
