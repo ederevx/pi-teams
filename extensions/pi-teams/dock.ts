@@ -30,7 +30,12 @@ export async function openTeammatesDock(
 			import("@earendil-works/pi-coding-agent"),
 		]);
 	const now = Date.now() / 1000;
-	const items = agents.map((agent) => ({
+	// Most recently active first: the freshest teammate leads the
+	// dock instead of broker registration order.
+	const sorted = [...agents].sort(
+		(a, b) => lastStamp(b) - lastStamp(a),
+	);
+	const items = sorted.map((agent) => ({
 		value: agent.id,
 		label: agent.name && agent.name !== agent.id
 			? `${agent.name} — ${agent.id}`
@@ -97,6 +102,13 @@ function describeAgent(agent: AgentInfo): string {
  *  last busy/work contact); `last_seen` answers when no work was ever
  *  published. Both are broker-clock epoch seconds from the same
  *  snapshot, so the comparison is clock-consistent. */
+/** The activity stamp used for presence and ordering: `last_work`
+ *  when the broker ever recorded work, else `last_seen`, else -1 so
+ *  never-seen agents sort last. */
+function lastStamp(agent: AgentInfo): number {
+	return agent.last_work ?? agent.last_seen ?? -1;
+}
+
 function presenceText(agent: AgentInfo, now: number): string {
 	const state = agent.online ? "online" : "offline";
 	return `${state}, active ${lastActiveText(agent, now)}`;
@@ -106,7 +118,7 @@ function presenceText(agent: AgentInfo, now: number): string {
  *  broker never published a contact for it. Callers pass the same
  *  snapshot clock the stamps come from. */
 function lastActiveText(agent: AgentInfo, now: number): string {
-	const stamp = agent.last_work ?? agent.last_seen;
+	const stamp = lastStamp(agent);
 	return stamp === undefined ? "never" : `${relative(now - stamp)} ago`;
 }
 
@@ -122,10 +134,14 @@ function relative(seconds: number): string {
 	return `${Math.floor(hours / 24)}d`;
 }
 
-/** The non-TUI fallback: the same listing as plain text. */
+/** The non-TUI fallback: the same listing as plain text, newest
+ *  first. */
 function notifyList(agents: AgentInfo[], ctx: ExtensionContext): void {
 	const now = Date.now() / 1000;
-	const lines = agents.map((agent) =>
+	const sorted = [...agents].sort(
+		(a, b) => lastStamp(b) - lastStamp(a),
+	);
+	const lines = sorted.map((agent) =>
 		`${agent.id}\t${agent.role}\t` +
 		`${agent.online ? "online" : "offline"}` +
 		(agent.parent ? `\tchild of ${agent.parent}` : "") +
