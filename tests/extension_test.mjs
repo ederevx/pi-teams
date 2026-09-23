@@ -1220,3 +1220,36 @@ test("owning a registered teammate grants membership after reload", async () => 
 	assert.equal(await holder.agent.isTeammate(), true);
 });
 
+test("main identity derives from the session stem", () => {
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const agent = new TeamAgent(makeRunner().runner, () => {});
+	try {
+	assert.equal(agent.identitySuffix(), "");
+	agent.rememberSession(join(sessionDir,
+		"2026-09-23T03-29-41-877Z_01a0cc4f-dff4.jsonl"));
+	// The suffix keeps the session stem's safe characters, capped at 32.
+	assert.equal(agent.identitySuffix(), "2026-09-23T03-29-41-877Z-01a0cc4");
+	assert.equal(agent.registryName(),
+		"2026-09-23T03-29-41-877Z_01a0cc4f-dff4");
+	// A session-stem id is stable across re-holds; a random one minted
+	// a fresh registry identity per process load.
+	assert.equal(agent.ensureId(), agent.ensureId());
+	assert.ok(agent.id.startsWith(`${agent.host}:pi-`));
+	} finally {
+		if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	}
+});
+
+test("reload handover keeps identity and surrenders the old hold", () => {
+	const first = new TeamAgent(makeRunner().runner, () => {});
+	first.id = "rog:pi-1-stem";
+	first.sendToken = "st-handover";
+	const second = new TeamAgent(makeRunner().runner, () => {});
+	second.inheritIdentity(first);
+	assert.equal(second.id, "rog:pi-1-stem");
+	assert.equal(second.sendToken, "st-handover");
+	first.handover();
+	assert.equal(first.surrendered, true);
+});
+

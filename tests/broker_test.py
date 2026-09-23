@@ -117,13 +117,18 @@ class BrokerProtocolTests(unittest.TestCase):
         reply = self.checker.ls()
         return {a["id"]: a for a in reply["agents"]}
 
-    def _agent(self, agent_id, role="cli", parent=None):
+    def _agent(self, agent_id, role="cli", parent=None, owner_pid=None,
+               session=None):
         client = TeamClient(self.root)
         client.id = agent_id
         client.name = agent_id
         client.role = role
         client.parent = parent
         client.send_token = "st-%s" % agent_id
+        if owner_pid:
+            client.owner_pid = owner_pid
+        if session:
+            client.session = session
         reply = client.register()
         self.assertIn(reply.get("op"), ("ack", "error"), reply)
         return client
@@ -1349,6 +1354,61 @@ class BrokerProtocolTests(unittest.TestCase):
         reply = probe.ls()
         probe.close()
         return {a["id"] for a in reply["agents"]}
+
+    def test_register_same_owner_session_replaces_stale(self):
+        # A hold restart or reload re-registers one live session; the
+        # same owner pid and session file qualify the old entry as a
+        # stale duplicate of the registering connection, which wins.
+        session = os.path.join(self.sessions_root, "dup.jsonl")
+        self._write_session(session, marker=False)
+        first = self._agent("rog:pi-1-aaaa", owner_pid="777", session=session)
+        second = self._agent("rog:pi-1-bbbb", owner_pid="777", session=session)
+        self.assertEqual(
+            self._ids_via(self.root),
+            {"checker", "rog:pi-1-bbbb"})
+        second.close()
+        first.close()
+
+    def test_register_same_pid_different_session_kept(self):
+        # A pid reused by an unrelated session must not be deduped: the
+        # stale-owner rule only fires when the session file matches.
+        first = self._agent("rog:pi-1-cccc", owner_pid="888",
+                            session=os.path.join(self.sessions_root,
+                                                 "a.jsonl"))
+        second = self._agent("rog:pi-1-dddd", owner_pid="888",
+                             session=os.path.join(self.sessions_root,
+                                                  "b.jsonl"))
+        self.assertEqual(
+            self._ids_via(self.root),
+            {"checker", "rog:pi-1-cccc", "rog:pi-1-dddd"})
+        second.close()
+        first.close()
+
+    def test_tmp_files_swept(self):
+        aged = self.broker.root.base / "registry.json.tmp.999"
+        aged.write_text("scratch", encoding="utf-8")
+        old = time.time() - 3600
+        os.utime(str(aged), (old, old))
+        fresh = self.broker.root.base / "peers.json.tmp.998"
+        fresh.write_text("scratch", encoding="utf-8")
+        self.broker._sweep()
+        self.assertFalse(aged.exists())
+        self.assertTrue(fresh.exists())
+
+    def test_write_atomic_cleans_tmp_on_give_up(self):
+        # When every rename retry fails (a reader holding the
+        # destination open the whole window), the scratch file must not
+        # survive the give-up.
+        import unittest.mock
+        from team_root import TeamRoot
+        root = TeamRoot(make_root())
+        try:
+            with unittest.mock.patch("os.replace",
+                                     side_effect=PermissionError):
+                root.write_atomic("endpoint", "data")
+            self.assertEqual(list(root.base.glob("*.tmp.*")), [])
+        finally:
+            shutil.rmtree(root.base, ignore_errors=True)
 
 
 if __name__ == "__main__":
