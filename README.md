@@ -74,20 +74,23 @@ coordinate natively instead of through the shared tree.
   extension only starts a broker when none is published.
 - **Attach an existing session**: any running pi session that is not
   already a teammate can become one without spawning a new process.
-  `team_attach` (or `/team attach <parent> [name]`) asks the target
-  agent to re-register under a fork id of the requester, so it reports
+  The `team_attach` tool asks the target agent to re-register under a
+  fork id of the requester, so it reports
   to the requester and the broker GCs it with the parent. An agent
   belongs to one team: a target that already has a parent is refused,
   and a parent with no parent of its own may be attached and become a
-  teammate too. `/team detach` returns the session to a plain main agent
-  so it is no longer reaped. The session file is preserved, so an
-  attached session stays in `/resume`.
+  teammate too. The `team_detach` tool returns an attached session to
+  a plain main agent so it is no longer reaped. The session file is
+  preserved, so an attached session stays in `/resume`.
 - **Extension** (`extensions/pi-teams.ts`, a thin entry that composes
   the responsibility modules under `extensions/pi-teams/`): registers
   the running pi,
   keeps its endpoint open through a held connection, injects a compact
-  teammates note before the first agent run, and answers
-  `/team ls|status|send|attach|detach|kill`. The hold
+  teammates note before the first agent run, and exposes one command:
+  `/team-ls` opens the teammates dock, a settings-style listing of
+  every live agent with last-active times. Every other ability —
+  send, attach, detach, kill — is a tool call (`team_send`,
+  `team_attach`, `team_detach`, `team_kill`), not a command. The hold
   and forked pi are
   launched with Node's `child_process`, not `pi.exec`: `pi.exec` opens
   a child's stdin to `/dev/null` and drops the `env` option, which
@@ -132,15 +135,16 @@ coordinate natively instead of through the shared tree.
   traffic from the teammate - not only a final report - resets the
   stall clock.
 - **Tools**: the extension exposes `team_ls`, `team_send`,
-  `team_spawn`, `team_wait`, `team_attach`, and `team_peer` as agent
-  tools. Sending and waiting are member-only, and a teammate may only
-  message its own team - to reach an outsider it asks its parent to
-  attach that agent; a root is unrestricted. Listing, spawning,
-  attaching, and peer linking stay open, so a session can join a team
-  and link peers without a shell or raw `ssh`.
+  `team_spawn`, `team_wait`, `team_attach`, `team_detach`, `team_kill`,
+  and `team_peer` as agent tools. Sending and waiting are member-only,
+  and a teammate may only message its own team - to reach an outsider
+  it asks its parent to attach that agent; a root is unrestricted.
+  Listing, spawning, attaching, detaching, killing, and peer linking
+  are tool calls, never commands; the only command is `/team-ls`,
+  which opens the read-only teammates dock.
 - **Awareness**: at session start the extension tells the agent which
-  teammates are live, their endpoints, and that `/team send <id> ...`
-  is the direct channel. Inbound relayed messages are surfaced to the
+  teammates are live, their endpoints, and that `team_send` is the
+  direct channel. Inbound relayed messages are surfaced to the
   agent as `pi-teams` custom messages, so a teammate can report a
   result back and the parent sees it without polling. Every sent and
   received message also appends a one-line `[pi-teams]` log entry with
@@ -166,10 +170,10 @@ and messages cross both ways.
   back through the federation. `team_wait` waits for it by id.
 - **Bidirectional messaging**: every agent id carries a host label
   (`<host>:pi-...`, `<host>:fork-...`); a message to a peer-hosted id is
-  relayed across the peer link (the `team_send` tool or `/team send`),
+  relayed across the peer link through the `team_send` tool,
   and `team_ls` lists the federated agents. An undeliverable target
-  reports back. Local `/team send`, `team_wait`, and reports are
-  unchanged. A `/team kill` of a peer-hosted id is routed to its host.
+  reports back. Local sends, `team_wait`, and reports are
+  unchanged. A `team_kill` of a peer-hosted id is routed to its host.
 - **Lifetime**: a teammate spawned for a remote parent is kept alive
   until the peer link drops, then reaped on its own host by
   connection-based GC. Removing a peer closes its ssh tunnel, and a

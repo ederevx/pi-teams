@@ -14,6 +14,10 @@ export interface AgentInfo {
 	online: boolean;
 	origin?: string;
 	remote?: boolean;
+	/** Broker pass-through liveness fields (epoch seconds). `last_work`
+	 *  is the last busy/work contact; `last_seen` any traffic. */
+	"last_work"?: number;
+	"last_seen"?: number;
 }
 
 /** Resolves a host label to its live agents. Every broker prefixes its
