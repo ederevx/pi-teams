@@ -41,6 +41,10 @@ class TeamClient:
         self.owner_pid = os.environ.get("TEAM_OWNER_PID")
         self.busy_file = os.environ.get("TEAM_BUSY_FILE")
         self.attached = os.environ.get("TEAM_ATTACHED") == "1"
+        # The send token this client's agent already owns: the hold is
+        # launched with it, so gated ops stay pre-authorized and an old
+        # broker (no gating) just ignores the extra field.
+        self.send_token = os.environ.get("TEAM_SEND_TOKEN")
         self._conn = None
         self._readbuf = b""
         # Guards _conn replacement and the watcher handles so close() and
@@ -73,11 +77,12 @@ class TeamClient:
             "owner_pid": self.owner_pid,
             "busy_file": self.busy_file,
             "attached": bool(self.attached),
+            "send_token": self.send_token or "",
         }
 
     def set_identity(self, agent_id=None, name=None, role=None, parent=None,
                      session=None, owner_pid=None, busy_file=None,
-                     attached=None):
+                     attached=None, send_token=None):
         # Explicit identity from CLI arguments (pi.exec cannot pass env
         # on Windows, so the extension hands identity over as args).
         if agent_id:
@@ -94,6 +99,8 @@ class TeamClient:
             self.owner_pid = owner_pid
         if busy_file:
             self.busy_file = busy_file
+        if send_token:
+            self.send_token = send_token
         if attached is not None:
             self.attached = bool(attached)
 
@@ -208,7 +215,7 @@ class TeamClient:
         return self.request(
             "send", expected=("ack", "error"), to=to,
             **{"from": self.ensure_id()}, kind=kind, payload=payload,
-            ts=time.time(),
+            send_token=self.send_token or "", ts=time.time(),
         )
 
     def ls(self):

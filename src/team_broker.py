@@ -25,6 +25,7 @@ import time
 
 from finish_query import FinishQueries
 from peer_link import PeerLink
+from send_gate import SendGate
 from peer_transport import PeerTransport
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from team_root import (
@@ -120,6 +121,9 @@ class TeamBroker:
         self.last_active = time.time()
         self._registry = {}
         self._clients = {}
+        # Member gating: one send token per registration, checked on
+        # the ops that can speak for an agent (see send_gate.py).
+        self._send_gate = SendGate()
         self._peers = {}
         self._peers_by_conn = {}
         self._remote = {}
@@ -323,12 +327,27 @@ class TeamBroker:
             if kind in ("finish-yes", "finish-no"):
                 self._handle_finish_answer(agent_id, kind, conn)
                 return agent_id
-            self.dispatch(msg, agent_id, conn)
-            self._touch(agent_id, work=True)
+            # The asserted sender is the envelope's from: a transient
+            # client (the extension's own team.py runs) presents its
+            # agent's token without holding a connection.
+            if not self._send_gate.check(
+                    str(msg.get("from") or agent_id or ""),
+                    msg.get("send_token")):
+                self._reply(conn, op="error", error="send-token",
+                            detail=SendGate.refused_reason())
+            else:
+                self.dispatch(msg, agent_id, conn)
+                self._touch(agent_id, work=True)
         elif op == "broadcast":
-            self._broadcast(msg.get("kind"), msg.get("payload"),
-                            exclude=agent_id)
-            self._touch(agent_id, work=True)
+            if not self._send_gate.check(
+                    str(msg.get("from") or agent_id or ""),
+                    msg.get("send_token")):
+                self._reply(conn, op="error", error="send-token",
+                            detail=SendGate.refused_reason())
+            else:
+                self._broadcast(msg.get("kind"), msg.get("payload"),
+                                exclude=agent_id)
+                self._touch(agent_id, work=True)
         elif op == "ls":
             self._reply(conn, op="registry", agents=self._snapshot_all(),
                         peers=self.peer_list())
@@ -400,6 +419,7 @@ class TeamBroker:
         with self._lock:
             self._clients[agent_id] = conn
             self._registry[agent_id] = entry
+            self._send_gate.issue(agent_id, msg.get("send_token"))
         self._persist_and_notify()
         self._reply(conn, op="ack", id=agent_id)
         return agent_id
@@ -438,6 +458,7 @@ class TeamBroker:
         with self._lock:
             entry = self._registry.pop(agent_id, None)
             self._clients.pop(agent_id, None)
+            self._send_gate.drop(agent_id)
         self._finish_queries.close(agent_id)
         self.root.remove_busy_file(entry)
         self._remove_session_file(entry)
@@ -452,6 +473,7 @@ class TeamBroker:
                 self._clients.pop(agent_id, None)
             entry = self._registry.pop(agent_id, None)
             had_entry = entry is not None
+            self._send_gate.drop(agent_id)
         if had_entry:
             self.root.remove_busy_file(entry)
             self._persist_and_notify()
@@ -508,6 +530,7 @@ class TeamBroker:
             entry = self._registry.get(agent_id)
             conn = self._clients.pop(agent_id, None)
             self._registry.pop(agent_id, None)
+            self._send_gate.drop(agent_id)
         self._finish_queries.close(agent_id)
         if conn is not None:
             self._write(conn, self._envelope(
@@ -692,6 +715,7 @@ class TeamBroker:
         with self._lock:
             conn = self._clients.pop(agent_id, None)
             entry = self._registry.pop(agent_id, None)
+            self._send_gate.drop(agent_id)
         self._finish_queries.close(agent_id)
         if conn is not None:
             try:

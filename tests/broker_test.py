@@ -123,6 +123,7 @@ class BrokerProtocolTests(unittest.TestCase):
         client.name = agent_id
         client.role = role
         client.parent = parent
+        client.send_token = "st-%s" % agent_id
         reply = client.register()
         self.assertIn(reply.get("op"), ("ack", "error"), reply)
         return client
@@ -132,6 +133,7 @@ class BrokerProtocolTests(unittest.TestCase):
         client.id = agent_id
         client.name = agent_id
         client.busy_file = busy_path
+        client.send_token = "st-%s" % agent_id
         with open(busy_path, "w") as fh:
             fh.write("1")
         reply = client.register()
@@ -154,6 +156,7 @@ class BrokerProtocolTests(unittest.TestCase):
         client.role = "fork"
         client.parent = "checker"
         client.session = path
+        client.send_token = "st-1"
         client.register()
         client.deregister()
         self.assertFalse(os.path.exists(path))
@@ -165,6 +168,7 @@ class BrokerProtocolTests(unittest.TestCase):
         client.id = "alpha:main-a"
         client.role = "main"
         client.session = path
+        client.send_token = "st-2"
         client.register()
         client.deregister()
         self.assertTrue(os.path.exists(path),
@@ -180,6 +184,7 @@ class BrokerProtocolTests(unittest.TestCase):
         client.role = "fork"
         client.parent = "alpha:caller"
         client.session = path
+        client.send_token = "st-3"
         client.register()
         client.deregister()
         self.assertTrue(os.path.exists(path),
@@ -212,6 +217,7 @@ class BrokerProtocolTests(unittest.TestCase):
         client.role = "fork"
         client.parent = "checker"
         client.session = path
+        client.send_token = "st-4"
         client.register()
         old = time.time() - 3600
         os.utime(path, (old, old))
@@ -329,13 +335,80 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertEqual(reply.get("error"), "undeliverable")
         alpha.close()
 
-    def test_unregistered_sender_gets_ack(self):
+    def test_unregistered_sender_is_refused(self):
+        # The send gate: an op that asserts a registered identity (or
+        # any identity at all) must present that agent's send token, so
+        # a raw CLI invocation cannot speak for an agent.
         beta = self._agent("beta")
         alpha = TeamClient(self.root)
         alpha.id = "alpha"
         reply = alpha.send_msg("beta", "text", "hi")
-        self.assertEqual(reply.get("op"), "ack", reply)
+        self.assertEqual(reply.get("op"), "error", reply)
+        self.assertEqual(reply.get("error"), "send-token")
+        self.assertIn("send-token", reply.get("detail", ""))
         alpha.close()
+        beta.close()
+
+    def test_registered_sender_without_token_is_refused(self):
+        # Registration without a credential (a bare CLI register) buys
+        # no messaging rights either.
+        beta = self._agent("beta")
+        alpha = TeamClient(self.root)
+        alpha.id = "alpha-plain"
+        alpha.register()
+        reply = alpha.send_msg("beta", "text", "hi")
+        self.assertEqual(reply.get("op"), "error", reply)
+        self.assertEqual(reply.get("error"), "send-token")
+        alpha.close()
+        beta.close()
+
+    def test_wrong_send_token_is_refused(self):
+        # A transient client asserting another agent's identity with a
+        # bogus token - the raw-CLI spoof the gate exists for.
+        beta = self._agent("beta")
+        intruder = TeamClient(self.root)
+        intruder.id = "intruder"
+        intruder.send_token = "st-not-alpha"
+        intruder.parent = None
+        # Assert alpha's identity without registering it: the broker
+        # must match the presented token against alpha's credential.
+        reply = intruder.request(
+            "send", expected=("ack", "error"), to="beta",
+            **{"from": "alpha"}, kind="text", payload="hi",
+            send_token="st-not-alpha", ts=0,
+        )
+        self.assertEqual(reply.get("op"), "error", reply)
+        self.assertEqual(reply.get("error"), "send-token")
+        intruder.close()
+        beta.close()
+
+    def test_send_token_reregistration_replaces_the_credential(self):
+        # A fresh hold for the same agent re-issues; only the new
+        # secret is valid, including from transient senders.
+        beta = self._agent("beta")
+        alpha = TeamClient(self.root)
+        alpha.id = "alpha"
+        alpha.name = "alpha"
+        alpha.send_token = "st-old"
+        alpha.register()
+        alpha.close()
+        alpha = TeamClient(self.root)
+        alpha.id = "alpha"
+        alpha.name = "alpha"
+        alpha.send_token = "st-new"
+        alpha.register()
+        self.assertEqual(alpha.send_msg("beta", "text", "hi").get("op"),
+                         "ack")
+        # A transient sender still holding the stale secret is refused.
+        stale = TeamClient(self.root)
+        stale.id = "stale"
+        reply = stale.request(
+            "send", expected=("ack", "error"), to="beta",
+            **{"from": "alpha"}, kind="text", payload="hi",
+            send_token="st-old", ts=0,
+        )
+        self.assertEqual(reply.get("op"), "error", reply)
+        stale.close()
         beta.close()
 
     def test_deregister(self):
@@ -365,6 +438,7 @@ class BrokerProtocolTests(unittest.TestCase):
             wait_endpoint(root)
             ghost = TeamClient(root, heartbeat=None)
             ghost.id = "ghost"
+            ghost.send_token = "st-5"
             ghost.register()
             self.assertTrue(
                 wait_until(lambda: "ghost" not in self._ids_via(root)),
@@ -415,6 +489,7 @@ class BrokerProtocolTests(unittest.TestCase):
             parent = TeamClient(root, heartbeat=None)
             parent.id = "parent-q"
             parent.role = "main"
+            parent.send_token = "st-6"
             parent.register()
             fork = TeamClient(root, heartbeat=None)
             fork.id = "fork-query"
@@ -422,6 +497,7 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.role = "fork"
             fork.parent = "parent-q"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-7"
             fork.register()
             # Past the fork-idle window the query is sent and the fork
             # stays registered well past the fork-idle grace.
@@ -469,12 +545,14 @@ class BrokerProtocolTests(unittest.TestCase):
             parent = TeamClient(root, heartbeat=None)
             parent.id = "parent-y2"
             parent.role = "main"
+            parent.send_token = "st-8"
             parent.register()
             fork = TeamClient(root, heartbeat=None)
             fork.id = "fork-yes"
             fork.role = "fork"
             fork.parent = "parent-y2"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-9"
             fork.register()
             self.assertTrue(
                 wait_until(lambda: "fork-yes" in self._ids_via(root)),
@@ -512,12 +590,14 @@ class BrokerProtocolTests(unittest.TestCase):
             parent = TeamClient(root, heartbeat=None)
             parent.id = "parent-n"
             parent.role = "main"
+            parent.send_token = "st-10"
             parent.register()
             fork = TeamClient(root, heartbeat=None)
             fork.id = "fork-no"
             fork.role = "fork"
             fork.parent = "parent-n"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-11"
             fork.register()
             time.sleep(0.5)
             # The agent answers that it is done: no grace is awaited.
@@ -553,6 +633,7 @@ class BrokerProtocolTests(unittest.TestCase):
             parent = TeamClient(root, heartbeat=None)
             parent.id = "parent-x"
             parent.role = "main"
+            parent.send_token = "st-12"
             parent.register()
             fork = TeamClient(root, heartbeat=None)
             fork.id = "fork-gc"
@@ -593,12 +674,14 @@ class BrokerProtocolTests(unittest.TestCase):
             parent = TeamClient(root, heartbeat=None)
             parent.id = "parent-y"
             parent.role = "main"
+            parent.send_token = "st-13"
             parent.register()
             fork = TeamClient(root, heartbeat=None)
             fork.id = "fork-busy"
             fork.role = "fork"
             fork.parent = "parent-y"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-14"
             fork.register()
             stop_pings = threading.Event()
 
@@ -645,6 +728,7 @@ class BrokerProtocolTests(unittest.TestCase):
             parent = TeamClient(root, heartbeat=0.2)
             parent.id = "parent-w"
             parent.role = "main"
+            parent.send_token = "st-15"
             parent.register()
             fork = TeamClient(root, heartbeat=0.2)
             fork.id = "fork-wait"
@@ -652,6 +736,7 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.parent = "parent-w"
             fork.owner_pid = str(dummy.pid)
             fork.busy_file = busy
+            fork.send_token = "st-16"
             fork.register()
             # Waiting is not work, but it is not idle either: the fork
             # must outlive several fork-idle windows while it waits.
@@ -698,15 +783,19 @@ class BrokerProtocolTests(unittest.TestCase):
             beta_rx = TeamClient(root_b, heartbeat=None)
             beta_rx.id = "beta:main"
             beta_rx.role = "main"
+            beta_rx.send_token = "st-17"
             beta_rx.register()
             alpha_caller = TeamClient(root_a, heartbeat=None)
             alpha_caller.id = "alpha:caller"
+            alpha_caller.send_token = "st-18"
             alpha_caller.register()
             beta_tx = TeamClient(root_b, heartbeat=None)
             beta_tx.id = "beta:sender"
+            beta_tx.send_token = "st-19"
             beta_tx.register()
             alpha_tx = TeamClient(root_a, heartbeat=None)
             alpha_tx.id = "alpha:tx"
+            alpha_tx.send_token = "st-20"
             alpha_tx.register()
 
             endpoint_b = broker_b.root.read_endpoint()
@@ -770,6 +859,7 @@ class BrokerProtocolTests(unittest.TestCase):
             caller = TeamClient(root_a, heartbeat=0.2)
             caller.id = "alpha:caller"
             caller.role = "main"
+            caller.send_token = "st-21"
             caller.register()
             endpoint_b = broker_b.root.read_endpoint()
             broker_a.link_peer("beta", endpoint_b)
@@ -782,6 +872,7 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.role = "fork"
             fork.parent = "alpha:caller"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-22"
             fork.register()
             time.sleep(1.0)
             self.assertIsNone(dummy.poll(),
@@ -816,6 +907,7 @@ class BrokerProtocolTests(unittest.TestCase):
             caller = TeamClient(root_a, heartbeat=0.2)
             caller.id = "alpha:caller"
             caller.role = "main"
+            caller.send_token = "st-23"
             caller.register()
             endpoint_a = broker_a.root.read_endpoint()
             broker_a.link_peer("beta", broker_b.root.read_endpoint())
@@ -828,6 +920,7 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.role = "fork"
             fork.parent = "alpha:caller"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-24"
             fork.register()
             time.sleep(1.0)
             # Drop the live link, then restore it inside the grace: a
@@ -862,6 +955,7 @@ class BrokerProtocolTests(unittest.TestCase):
             caller = TeamClient(root_a, heartbeat=0.2)
             caller.id = "alpha:caller"
             caller.role = "main"
+            caller.send_token = "st-25"
             caller.register()
             broker_a.link_peer("beta", broker_b.root.read_endpoint())
             self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
@@ -873,6 +967,7 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.role = "fork"
             fork.parent = "alpha:caller"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-26"
             fork.register()
             # A stale link dropping must not reap the live link's forks.
             stale = PeerLink(broker_b, "alpha", conn=None)
@@ -885,6 +980,7 @@ class BrokerProtocolTests(unittest.TestCase):
             # finally drops, and its forks are reaped.
             probe = TeamClient(root_b, heartbeat=None)
             probe.id = "beta:probe"
+            probe.send_token = "st-27"
             probe.register()
             broker_b._peer_pending["rid-x"] = (
                 probe._conn, broker_b._peers["alpha"], time.time())
@@ -918,6 +1014,7 @@ class BrokerProtocolTests(unittest.TestCase):
             caller = TeamClient(root_a, heartbeat=0.2)
             caller.id = "alpha:caller"
             caller.role = "main"
+            caller.send_token = "st-28"
             caller.register()
             broker_a.link_peer("beta", broker_b.root.read_endpoint())
             self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
@@ -929,6 +1026,7 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.role = "fork"
             fork.parent = "alpha:caller"
             fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-29"
             fork.register()
             time.sleep(1.0)
             self.assertIsNone(dummy.poll(),
@@ -1060,6 +1158,7 @@ class BrokerProtocolTests(unittest.TestCase):
             victim = TeamClient(root_b, heartbeat=None)
             victim.id = "beta:victim"
             victim.role = "cli"
+            victim.send_token = "st-30"
             victim.register()
             self.assertTrue(wait_until(
                 lambda: "beta:victim" in self._ids_via(root_b)))
@@ -1067,6 +1166,7 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
             caller = TeamClient(root_a, heartbeat=None)
             caller.id = "alpha:caller"
+            caller.send_token = "st-31"
             caller.register()
             reply = caller.terminate("beta:victim", "requested")
             self.assertEqual(reply.get("op"), "ack", reply)
