@@ -7,17 +7,16 @@
 
 import type { TeamMessage } from "./protocol.ts";
 
-/** Owns the active team_wait waiters and the results that arrived just
- *  before a wait began. A result is consumed exactly once: by the waiters
- *  already registered for its sender, or buffered for the next wait and
- *  delivered as an ordinary message. */
+/** Owns the active team_wait waiters and results that arrived just
+ *  before a wait began. A result is consumed exactly once: by a
+ *  registered waiter, or buffered for the next wait. */
 export class ResultInbox {
 	private readonly waiters =
 		new Map<string, Set<(message: TeamMessage | null) => void>>();
 	private readonly buffered = new Map<string, TeamMessage>();
 
-	/** Hands a result for one sender to its waiters, or buffers it when
-	 *  none is registered. Returns true when a waiter consumed it. */
+	/** Hands a result to its sender's waiters, or buffers it. Returns
+	 *  true when a waiter consumed it. */
 	deliver(message: TeamMessage): boolean {
 		const waiting = this.waiters.get(message.from);
 		if (!waiting || waiting.size === 0) {
@@ -29,16 +28,15 @@ export class ResultInbox {
 		return true;
 	}
 
-	/** Takes a result that arrived before this wait started, so it is
-	 *  returned at once instead of being missed. */
+	/** Takes a result that arrived before this wait started. */
 	take(agentId: string): TeamMessage | undefined {
 		const message = this.buffered.get(agentId);
 		if (message) this.buffered.delete(agentId);
 		return message;
 	}
 
-	/** Registers one waiter for an agent; the returned function removes
-	 *  it without consuming a result. */
+	/** Registers one waiter; the returned function removes it without
+	 *  consuming a result. */
 	watch(
 		agentId: string,
 		settle: (message: TeamMessage | null) => void,

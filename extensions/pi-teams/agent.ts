@@ -5,7 +5,7 @@
  * cleanup. Identity is read from the environment once, then owned here.
  */
 
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { hostname } from "node:os";
 import { connect as netConnect } from "node:net";
 import { basename, dirname, join } from "node:path";
@@ -15,7 +15,9 @@ import {
 	stateRoot,
 	teamBin,
 	teamdBin,
+	writeStateFile,
 } from "./paths.ts";
+import { WaitController } from "./wait.ts";
 import type { ProcessHost, SpawnedProcess } from "./process-runner.ts";
 import {
 	resolvePython,
@@ -31,17 +33,13 @@ import {
 } from "./spawn.ts";
 import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
-import { TeammateRole } from "./roles.ts";
 import {
-	DEFAULT_STALL_SECONDS,
-	DEFAULT_WAIT_SECONDS,
-	STEER_NUDGE_TEXT,
-	WAIT_POLL_MS,
 	mintSendToken,
 	requestId,
 	type DeliverFn,
 	type TeamMessage,
 } from "./protocol.ts";
+import { TEAM_ROLE_PROMPT } from "./roles.ts";
 
 export class TeamAgent {
 	private readonly runner: ProcessHost;
@@ -75,12 +73,8 @@ export class TeamAgent {
 	private readonly pending = new PendingRequests();
 	private readonly spawns: SpawnService;
 	private readonly inbox = new ResultInbox();
-	private readonly teammateRole = new TeammateRole();
-	// Notified on every contact from a teammate the active wait is
-	// blocked on, so its stall watchdog counts any traffic, not only
-	// results, as a sign of life. Owned by the agent; the wait
-	// registers and always removes its hook.
-	private activityHook: ((from: string) => void) | null = null;
+	// The active-wait owner (wait poll, stall nudge, contact hook).
+	private readonly waits: WaitController;
 	readonly host: string;
 	private sessionFile = "";
 	private sessionDir = "";
@@ -100,10 +94,9 @@ export class TeamAgent {
 		this.python = resolvePython();
 		this.windowless = windowlessFactory(this.python);
 		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
-		// A main's id is minted at first hold, once the session file is
-		// known: the identity then derives from the session stem and
-		// survives hold restarts and reloads. TEAM_ID pins a fork's id
-		// from spawn.
+		// A main's id is minted at first hold (once the session file is
+		// known) and derives from the session stem, surviving restarts
+		// and reloads; TEAM_ID pins a fork's id from spawn.
 		this.id = process.env.TEAM_ID || "";
 		this.role = process.env.TEAM_ID ? "fork" : "main";
 		this.parent = process.env.TEAM_PARENT_ID || "";
@@ -117,24 +110,26 @@ export class TeamAgent {
 		this.spawns = new SpawnService(
 			this.host, this.directory, this.brokerOps, this.pending,
 			(name, task, options) => this.spawnTask(name, task, options));
+		this.waits = new WaitController(
+			this.inbox,
+			(to, kind, text) => this.send(to, kind, text),
+			() => this.closed,
+		);
 	}
 
-	/** A fresh agent id of one kind. The host label makes the id
-	 *  globally unique so peers can route by its prefix; the kind is
-	 *  the id's role in the registry (`pi` main, `fork` teammate). */
-	private makeId(kind: string): string {
+	/** A fresh agent id: host label (peers route by its prefix), kind
+	 *  (`pi` main, `fork` teammate), and a suffix - session stem when
+	 *  stability matters, random token otherwise. */
+	private makeId(kind: string, suffix?: string): string {
 		return `${this.host}:${kind}-${process.pid}-` +
-			Math.random().toString(16).slice(2, 10);
+			(suffix || Math.random().toString(16).slice(2, 10));
 	}
 
 	private makeMainId(): string {
-		// The session stem suffix keeps one registry identity across
-		// hold restarts and reloads, where a random suffix minted a new
-		// identity per process load and let one session register twice
-		// under two ids. The stem is unique per session.
-		const suffix = this.identitySuffix() ||
-			Math.random().toString(16).slice(2, 10);
-		return `${this.host}:pi-${process.pid}-${suffix}`;
+		// The stem keeps one identity across hold restarts and reloads
+		// (a random suffix minted one per process load and let a
+		// session register twice); it is unique per session.
+		return this.makeId("pi", this.identitySuffix() || undefined);
 	}
 
 	/** Mints the main id once, at first hold. */
@@ -143,38 +138,36 @@ export class TeamAgent {
 		return this.id;
 	}
 
-	/** A session-stable id suffix: the pi session stem. */
+	/** The pi session stem: one stable identity token per session. */
+	private sessionStem(): string {
+		return this.sessionFile
+			? basename(this.sessionFile).replace(/\.jsonl$/i, "")
+			: "";
+	}
+
+	/** A session-stable id suffix: the sanitized session stem. */
 	private identitySuffix(): string {
-		if (!this.sessionFile) return "";
-		const stem = basename(this.sessionFile).replace(/\.jsonl$/i, "");
-		return stem.replace(/[^A-Za-z0-9]/g, "-").slice(0, 32);
+		return this.sessionStem().replace(/[^A-Za-z0-9]/g, "-").slice(0, 32);
 	}
 
+	/** One launch path for every spawn shape (hidden hold, detached
+	 *  teammate, persistent broker): a failed start never crashes the
+	 *  session; the next agent action retries. */
 	private launch(
+		kind: "hidden" | "detached" | "persistent",
 		file: string,
 		args: string[],
 		options: Record<string, unknown>,
 	): SpawnedProcess | null {
-		return this.guard(this.runner.spawnHidden(file, args, options));
-	}
-
-	private launchDetached(
-		file: string,
-		args: string[],
-		options: Record<string, unknown>,
-	): SpawnedProcess | null {
-		return this.guard(this.runner.spawnDetached(file, args, options));
-	}
-
-	private launchPersistent(
-		file: string,
-		args: string[],
-		options: Record<string, unknown>,
-	): SpawnedProcess | null {
-		return this.guard(this.runner.spawnPersistent(file, args, options));
-	}
-
-	private guard(child: SpawnedProcess | null): SpawnedProcess | null {
+		const spawn = kind === "persistent"
+			? (f: string, a: string[], o: Record<string, unknown>) =>
+				this.runner.spawnPersistent(f, a, o)
+			: kind === "detached"
+			? (f: string, a: string[], o: Record<string, unknown>) =>
+				this.runner.spawnDetached(f, a, o)
+			: (f: string, a: string[], o: Record<string, unknown>) =>
+				this.runner.spawnHidden(f, a, o);
+		const child = spawn(file, args, options);
 		child?.on("error", () => {
 			// A failed broker/hold/pi start must not crash the session;
 			// the next agent action retries.
@@ -183,20 +176,16 @@ export class TeamAgent {
 	}
 
 	ensureBroker(): void {
-		// The broker owns its own restart policy: once its on-disk source
-		// changes it exits after an idle window, and the next start adopts
-		// the new code. The extension only starts one when none is
-		// published, so a reload never kills live work.
+		// The broker owns its restart policy (it exits once idle after
+		// a source change and the next start adopts the new code), so
+		// a reload never kills live work. Start one only when nothing
+		// is published; a published endpoint is probed (a stale one
+		// once blocked every hold).
 		const endpointPath = join(stateRoot, "endpoint");
 		if (!existsSync(endpointPath)) {
 			this.startBroker();
 			return;
 		}
-		// The endpoint file's existence alone never proved a broker
-		// lives behind it: a dead broker left a stale endpoint that
-		// blocked every hold. Probe the published port once; only a
-		// refused connection proves the endpoint stale, a timeout
-		// stays conservative.
 		void this.verifyEndpoint(endpointPath);
 	}
 
@@ -240,7 +229,8 @@ export class TeamAgent {
 		// Windows a windowless interpreter keeps that persistence from
 		// flashing a console.
 		const interpreter = this.windowless.resolve();
-		const child = this.launchPersistent(
+		const child = this.launch(
+			"persistent",
 			interpreter,
 			[teamdBin, "--root", stateRoot, "start"],
 			{ stdio: "ignore" },
@@ -262,6 +252,7 @@ export class TeamAgent {
 		// endpoint instead of leaving an orphan pinging forever. Its
 		// stdout carries inbound messages for the agent.
 		const proc = this.launch(
+			"hidden",
 			this.python,
 			[teamBin, "--root", stateRoot, "hold"],
 			{ env, stdio: ["pipe", "pipe", "ignore"] },
@@ -280,20 +271,17 @@ export class TeamAgent {
 	 *  keep their assigned shell names. */
 	private registryName(): string {
 		if (this.attachedName) return this.attachedName;
-		const stem = this.sessionFile
-			? basename(this.sessionFile).replace(/\.jsonl$/i, "")
-			: "";
+		const stem = this.sessionStem();
 		if (this.role !== "fork" && stem) return stem.slice(0, 48);
 		if (process.env.TEAM_NAME) return process.env.TEAM_NAME;
 		if (stem) return stem.slice(0, 48);
 		return `pi@${this.cwd || process.cwd()}`;
 	}
 
-	/** A hold client that dies on its own (a broker restart or the
-	 *  idle exit after a source change) leaves the session deaf until
-	 *  the next session event: relaunch it with a bounded backoff. An
-	 *  intentional stop clears holdProc before killing, so only an
-	 *  unexpected death reaches here. */
+	/** A hold that died on its own (broker restart, post-reload idle
+	 *  exit) leaves the session deaf until the next session event:
+	 *  relaunch with bounded backoff. An intentional stop clears
+	 *  holdProc before killing, so only unexpected deaths arrive. */
 	private holdDied(proc: SpawnedProcess): void {
 		if (this.holdProc !== proc) return;
 		this.holdProc = null;
@@ -309,9 +297,7 @@ export class TeamAgent {
 			this.ensureBroker();
 			this.hold(this.cwd, this.attachedHold);
 		}, delay);
-		if (typeof timer === "object" && timer && "unref" in timer) {
-			timer.unref();
-		}
+		timer.unref?.();
 	}
 
 	/** The hold's environment: this agent's identity plus the busy file
@@ -391,11 +377,7 @@ export class TeamAgent {
 			// through the CLI; a still-working agent would have
 			// answered busy from its heartbeat instead of surfacing
 			// here.
-			void this.runner.run(
-				this.python,
-				[teamBin, "--root", stateRoot, "finish", "--done"],
-				{ timeout: 5000 },
-			);
+			void this.brokerOps.finish();
 			return;
 		}
 		if (message.kind === "attach") {
@@ -407,7 +389,7 @@ export class TeamAgent {
 		}
 		// Any inbound contact counts as the sender being alive for the
 		// active wait's stall watchdog; results are handled below.
-		if (this.activityHook && message.from) this.activityHook(message.from);
+		if (message.from) this.waits.onContact(message.from);
 		// A result first goes to an active team_wait, which consumes it as
 		// the tool result; when none is waiting it is buffered and still
 		// delivered as an ordinary message, so no report is ever lost.
@@ -437,24 +419,27 @@ export class TeamAgent {
 		this.setState(busy ? "busy" : "idle");
 	}
 
-	/** Publishes the agent's run-state for the broker: busy keeps a fork
-	 *  alive, idle does not, and waiting is not-working while an in-flight
-	 *  team_wait keeps the fork exempt from idle GC. */
+	/** Publishes the agent's run-state (busy keeps a fork alive, idle
+	 *  does not, waiting is blocked in a team_wait). The write is
+	 *  atomic: the hold's heartbeat must never see it torn. */
 	setState(state: "busy" | "idle" | "waiting"): void {
 		const value = state === "busy" ? "1" : state === "waiting" ? "2" : "0";
 		try {
-			writeFileSync(this.busyFile(), value);
+			writeStateFile(`${this.stateFileName()}.busy`, value);
 		} catch {
 			// best effort: without the flag the fork is GC'd like an idle one
 		}
 	}
 
-	/** This agent's state file. The id carries a host label, whose colon
-	 *  is illegal in a Windows filename, so the id is sanitized. */
-	private busyFile(): string {
+	/** This agent's state file name. The id carries a host label, whose
+	 *  colon is illegal in a Windows filename, so the id is sanitized. */
+	private stateFileName(): string {
 		this.ensureId();
-		const safe = this.id.replace(/[^A-Za-z0-9._-]/g, "-");
-		return join(stateRoot, `${safe}.busy`);
+		return this.id.replace(/[^A-Za-z0-9._-]/g, "-");
+	}
+
+	private busyFile(): string {
+		return join(stateRoot, `${this.stateFileName()}.busy`);
 	}
 
 	async snapshot(): Promise<AgentInfo[]> {
@@ -787,7 +772,7 @@ export class TeamAgent {
 			"--mode", "rpc",
 			...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
 			"--name", session,
-			"--append-system-prompt", this.teammateRole.systemPrompt,
+			"--append-system-prompt", TEAM_ROLE_PROMPT,
 			...(options.provider ? ["--provider", options.provider] : []),
 			...(options.model ? ["--model", options.model] : []),
 			...(options.thinking ? ["--thinking", options.thinking] : []),
@@ -842,7 +827,8 @@ export class TeamAgent {
 		// The extension holds the teammate's RPC stdin open: the teammate
 		// stays alive for messages and exits when this pi goes away (the
 		// pipe closes) or the broker GC signals it.
-		const child = this.launchDetached(
+		const child = this.launch(
+			"detached",
 			invocation.command,
 			[...invocation.args, ...args],
 			{ env, stdio: ["pipe", "ignore", "ignore"] },
@@ -927,10 +913,6 @@ export class TeamAgent {
 		return this.brokerOps.peers();
 	}
 
-	sessionDirLabel(): string {
-		return this.sessionDir || "the default session store";
-	}
-
 	/** Tells the parent which session this fork came up as, so the parent
 	 *  can name it without polling the broker. */
 	async announceSession(sessionFile: string | null | undefined): Promise<void> {
@@ -943,123 +925,18 @@ export class TeamAgent {
 		}
 	}
 
-	/** One inactivity watchdog for an active wait: a teammate that has
-	 *  produced no work contact (report or control traffic) for the
-	 *  stall bound looks hung, so it is nudged once with a steering
-	 *  message telling it to continue or report. Nudges are recorded
-	 *  per id so a silent teammate is never nagged in a loop. */
-	private nudgeStalled(
-		pending: string[],
-		stallMs: number,
-		lastActivity: number,
-		nudged: Set<string>,
-	): void {
-		if (stallMs <= 0) return;
-		if (Date.now() - lastActivity < stallMs) return;
-		for (const id of pending) {
-			if (nudged.has(id)) continue;
-			nudged.add(id);
-			void this.send(id, "text", STEER_NUDGE_TEXT)
-				.catch(() => {
-					// An undeliverable nudge is not a wait failure: the
-					// bound or GC still ends the stale teammate.
-				});
-		}
-	}
-
-	/** Actively waits for teammates' results under the call's stop
-	 *  conditions: the first result arrives, the bound elapses, the run
-	 *  aborts (Escape), a user message is queued, or the session
-	 *  deregisters. The first result ends the wait at once; the other
-	 *  ids keep running and their later reports stay in the inbox. The
-	 *  poll awaits between checks so the TUI stays responsive and the
-	 *  wait stays steerable, and onTick fires each poll for progress
-	 *  display. While the wait runs, an inactivity watchdog watches
-	 *  every inbox contact and auto-sends a steering nudge to a
-	 *  teammate that looks hung; each teammate is nudged at most once
-	 *  per wait. Returns one entry per id, null when that teammate did
-	 *  not report before the wait ended. */
+	/** Delegates to the wait owner: one active wait with its stall
+	 *  watchdog and liveness hook, never a leaked timer. */
 	async waitForResults(
 		agentIds: string[],
 		timeoutMs: number,
 		signal: AbortSignal | undefined,
 		shouldYield: () => boolean,
 		onTick?: () => void,
-		stallMs = DEFAULT_STALL_SECONDS * 1000,
+		stallMs?: number,
 	): Promise<Array<TeamMessage | null>> {
-		const results = new Map<string, TeamMessage>();
-		const pending: string[] = [];
-		for (const id of agentIds) {
-			const buffered = this.inbox.take(id);
-			if (buffered) results.set(id, buffered);
-			else pending.push(id);
-		}
-		// A buffered report already satisfies the first-result trigger,
-		// so return it now instead of holding the wait open.
-		const canWait = results.size === 0 && pending.length > 0
-			&& !this.closed && !signal?.aborted && !shouldYield();
-		if (canWait) {
-			await new Promise<void>((resolve) => {
-				const unwatchers: Array<() => void> = [];
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				let poll: ReturnType<typeof setInterval> | undefined;
-				let settled = false;
-				// The watchdog clock starts when the wait does and every
-				// teammate contact pushes it forward, so only true silence
-				// reaches the stall bound.
-				let lastActivity = Date.now();
-				const nudged = new Set<string>();
-				const watching = new Set(pending);
-				const onActivity = (from: string): void => {
-					if (watching.has(from)) lastActivity = Date.now();
-				};
-				this.activityHook = onActivity;
-				const finish = (): void => {
-					if (settled) return;
-					settled = true;
-					this.activityHook = null;
-					if (timer) clearTimeout(timer);
-					if (poll) clearInterval(poll);
-					signal?.removeEventListener("abort", onAbort);
-					for (const unwatch of unwatchers) unwatch();
-					resolve();
-				};
-				const onAbort = (): void => finish();
-				for (const id of pending) {
-					const unwatch = this.inbox.watch(id, (message) => {
-						lastActivity = Date.now();
-						if (!message) {
-							finish();
-							return;
-						}
-						results.set(id, message);
-						// The first result ends the wait; the unwatchers
-						// below free the other ids' watchers, and their
-						// later reports stay buffered in the inbox.
-						finish();
-					});
-					unwatchers.push(unwatch);
-				}
-				// Every resource is created before the first stop check,
-				// so a wait that ends at once still releases all of them.
-				const effective = timeoutMs > 0
-					? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
-				timer = setTimeout(finish, effective);
-				poll = setInterval(() => {
-					this.nudgeStalled(
-						pending, stallMs, lastActivity, nudged);
-					onTick?.();
-					if (this.closed || signal?.aborted || shouldYield()) {
-						finish();
-					}
-				}, WAIT_POLL_MS);
-				if (signal) {
-					signal.addEventListener("abort", onAbort, { once: true });
-					if (signal.aborted) finish();
-				}
-			});
-		}
-		return agentIds.map((id) => results.get(id) ?? null);
+		return this.waits.waitForResults(
+			agentIds, timeoutMs, signal, shouldYield, onTick, stallMs);
 	}
 
 	private cancelWaits(): void {
@@ -1115,25 +992,5 @@ export class TeamAgent {
 		// tools, and it can be absent or stale in a fresh session.
 		this.sessionFile = sessionFile || "";
 		this.sessionDir = this.sessionFile ? dirname(this.sessionFile) : "";
-	}
-
-	announce(agents: AgentInfo[]): { customType: string; content: string; display: boolean } | null {
-	const lines = agents
-		.slice(0, 8)
-		.map((a) =>
-			`- ${a.id} ${a.name} (${a.role}, ${a.online ? "online" : "offline"}` +
-			(a.session ? `, session ${basename(a.session)}` : "") +
-			`)`);
-	const content =
-		`## pi-teams teammates (broker: ${stateRoot})\n` +
-		`${lines.join("\n") || "- none live yet"}\n` +
-		`Spawn a teammate with team_spawn (task, name); message, wait, ` +
-		`attach, detach, and terminate are tool calls only (team_send, ` +
-		`team_wait, team_attach, team_detach, team_kill). A teammate ` +
-		`may only message its own team, so ask your parent to attach an ` +
-		`outsider first, and an agent belongs to one team. Peer hosts: ` +
-		`team_peer add <ssh-host>, then team_spawn host=<label>. The ` +
-		`/team-ls command opens the teammates dock.`;
-	return { customType: "pi-teams", content, display: false };
 	}
 }

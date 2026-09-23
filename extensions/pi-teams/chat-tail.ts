@@ -1,8 +1,7 @@
 /**
- * Tail the pi chat history: locate the newest session transcript
- * (.jsonl) under the pi agent sessions directory and return its last
- * lines verbatim. One responsibility - showing the agent its own
- * conversation - owned by the ChatTail class.
+ * Tail the pi chat history: the newest session transcript (.jsonl)
+ * under the pi sessions directory, last lines verbatim. One
+ * responsibility - showing the agent its own conversation.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -44,7 +43,7 @@ export class ChatTail {
 					out.push({ path, mtime: statSync(path).mtime });
 				}
 			} catch {
-				// unreadable entry: skip it and continue scanning
+				// unreadable entry: skip it
 			}
 		}
 	}
@@ -52,9 +51,7 @@ export class ChatTail {
 	/** Absolute path of the most recently modified transcript, or null. */
 	newestPath(): string | null {
 		const found = this.collect();
-		return found.length > 0
-			? found[found.length - 1].path
-			: null;
+		return found.at(-1)?.path ?? null;
 	}
 
 	/** Up to `lines` trailing lines of the newest transcript. */

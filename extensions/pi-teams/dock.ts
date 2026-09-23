@@ -1,10 +1,8 @@
 /**
  * The teammates dock: a settings-style overlay listing every live
- * pi-teams agent. It uses a SelectList with the select-list theme so
- * the layout matches the host's pickers, and each row shows the
- * agent's role, last-active age, and how long since it was seen. The dock is read-only by
- * design: it shows the team, while acting on a teammate stays a tool
- * call (team_send, team_attach, team_kill).
+ * pi-teams agent (role, last-active age) on a SelectList themed like
+ * the host's pickers. Read-only by design: acting on a teammate stays
+ * a tool call (team_send, team_attach, team_kill).
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -30,11 +28,7 @@ export async function openTeammatesDock(
 			import("@earendil-works/pi-coding-agent"),
 		]);
 	const now = Date.now() / 1000;
-	// Most recently active first: the freshest teammate leads the
-	// dock instead of broker registration order.
-	const sorted = [...agents].sort(
-		(a, b) => lastStamp(b) - lastStamp(a),
-	);
+	const sorted = newestFirst(agents);
 	const items = sorted.map((agent) => ({
 		value: agent.id,
 		label: agent.name && agent.name !== agent.id
@@ -86,10 +80,9 @@ export async function openTeammatesDock(
 	});
 }
 
-/** Describes an agent for its dock row: role, host, parent. The
- *  session file is deliberately omitted: it is the longest field,
- *  so in a narrow window its truncation would push the timestamp
- *  out of the visible row. */
+/** Describes an agent for its dock row: role, host, parent. The long
+ *  session field is omitted so its truncation cannot push the
+ *  timestamp out of a narrow row. */
 function describeAgent(agent: AgentInfo): string {
 	const parts = [agent.role];
 	if (agent.remote) parts.push(`peer ${agent.origin ?? "remote"}`);
@@ -134,13 +127,16 @@ function relative(seconds: number): string {
 	return `${Math.floor(hours / 24)}d`;
 }
 
+/** Most recently active first: the freshest teammate leads. */
+function newestFirst(agents: AgentInfo[]): AgentInfo[] {
+	return [...agents].sort((a, b) => lastStamp(b) - lastStamp(a));
+}
+
 /** The non-TUI fallback: the same listing as plain text, newest
  *  first. */
 function notifyList(agents: AgentInfo[], ctx: ExtensionContext): void {
 	const now = Date.now() / 1000;
-	const sorted = [...agents].sort(
-		(a, b) => lastStamp(b) - lastStamp(a),
-	);
+	const sorted = newestFirst(agents);
 	const lines = sorted.map((agent) =>
 		`${agent.id}\t${agent.role}\t` +
 		`${agent.online ? "online" : "offline"}` +
