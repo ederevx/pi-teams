@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.12 - 2026-09-22
+
+- `/team-ls` dock: fix the last-active display, which passed the
+  absolute epoch stamp to the relative-time formatter and showed
+  absurd ages ("2000d"); it now shows the real elapsed time and
+  "never" for agents without a published contact. Also fixed a crash
+  in the non-TUI fallback listing (reference to an undefined
+  `lastActiveText`) and dropped the dead tool hint from the dock
+  header.
+
 ## v0.4.11 - 2026-09-22
 
 - The broker asks an idle fork whether it is done before reaping it: a
