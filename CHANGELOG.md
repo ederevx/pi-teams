@@ -4,6 +4,24 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.17 - 2026-09-23
+
+- Broker-side member gating: message ops now require a send token, so
+  a raw `team.py send --id <agent>` from any shell can no longer speak
+  for a registered agent. The extension mints one token per session,
+  hands it to its hold and each spawned teammate's environment, and
+  presents it on every transient send; the broker refuses senders
+  whose token does not match the asserted identity with a
+  `send-token` error. Finish answers and read-only diagnostics
+  (`team ls`, `team peer list`) stay open. New `src/send_gate.py`
+  owns the credential store and the one allow/refuse decision.
+- Cross-host `team_spawn` falls back to the next live main on a peer
+  host instead of stranding the request behind the first-ordered main
+  when that session stops answering: each candidate gets its own
+  answer window (PI_TEAMS_SPAWN_WINDOW, default 15s), and the failure
+  message now separates a host with no registered agents from one
+  whose agents went unanswered.
+
 ## v0.4.12 - 2026-09-22
 
 - `/team-ls` dock: fix the last-active display, which passed the
