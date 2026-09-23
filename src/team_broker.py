@@ -31,13 +31,13 @@ from finish_query import FinishQueries
 from peer_link import PeerLink
 from send_gate import SendGate
 from peer_transport import PeerTransport
+from state_gc import StateGc
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from team_root import (
     DEFAULT_ROOT,
     ENDPOINT_NAME,
     PID_NAME,
     REGISTRY_NAME,
-    TEAMMATE_MARKER,
     TeamRoot,
 )
 
@@ -72,6 +72,11 @@ class TeamBroker:
             busy_grace if busy_grace is not None
             else os.environ.get("PI_TEAMS_BUSY_GRACE", "120")
         )
+        # write_atomic leaves a .tmp.<pid> scratch only when every
+        # rename retry failed; sweep those aged leftovers on this
+        # cadence so one crashed write cannot litter the root.
+        self.tmp_sweep_interval = 3600.0
+        self._last_tmp_sweep = 0.0
         # Before an idle fork is reaped it is asked whether it is done:
         # a query goes to its client, which answers at once when the
         # teammate is busy or surfaces the question to its agent, and
@@ -148,6 +153,9 @@ class TeamBroker:
         self.mirror = RegistryMirror(
             self.root, self._registry, self.idle_timeout)
         self._lock = threading.RLock()
+        self.state_gc = StateGc(
+            self.root, self._registry, self._lock,
+            self.sessions_root, self.session_grace, self.busy_grace)
         self._running = False
         self._server = None
 
@@ -428,14 +436,48 @@ class TeamBroker:
             "waiting": False,
         }
         with self._lock:
+            stale = [
+                (old_id, self._registry[old_id])
+                for old_id in self._stale_same_owner(agent_id, entry)
+            ]
+            for old_id, _ in stale:
+                self._registry.pop(old_id, None)
+                self._clients.pop(old_id, None)
+                self._send_gate.drop(old_id)
+                self.delivery.mark_dropped(old_id)
             self._clients[agent_id] = conn
             self._registry[agent_id] = entry
             self._send_gate.issue(agent_id, msg.get("send_token"))
+        for old_id, old_entry in stale:
+            self._finish_queries.close(old_id)
+            self.root.remove_busy_file(old_entry)
+            self.state_gc.remove_session_file(old_entry)
         self._persist_and_notify()
         self._reply(conn, op="ack", id=agent_id)
         self.delivery.replay(
             agent_id, lambda envelope: self._write(conn, envelope))
         return agent_id
+
+    def _stale_same_owner(self, agent_id, entry):
+        # One registration per live session: a hold restart or reload
+        # that re-registers under a fresh id but with the same owner
+        # pid and session file replaces the stale entry instead of
+        # leaving a second identity for the same session. Only a
+        # same-session duplicate qualifies, so a pid reused by an
+        # unrelated session never collides here. The registering
+        # connection wins; a reloaded-away instance stops re-registering
+        # because its replacement handed its identity over.
+        stale = []
+        if not (entry.get("owner_pid") and entry.get("session")):
+            return stale
+        for other_id, other in self._registry.items():
+            if other_id == agent_id:
+                continue
+            if other.get("owner_pid") and other.get("session") \
+                    and str(other["owner_pid"]) == str(entry["owner_pid"]) \
+                    and other["session"] == entry["session"]:
+                stale.append(other_id)
+        return stale
 
     def _snapshot(self):
         now = time.time()
@@ -475,7 +517,7 @@ class TeamBroker:
             self._send_gate.drop(agent_id)
         self._finish_queries.close(agent_id)
         self.root.remove_busy_file(entry)
-        self._remove_session_file(entry)
+        self.state_gc.remove_session_file(entry)
         self._persist_and_notify()
 
     def _drop_conn(self, agent_id):
@@ -573,7 +615,7 @@ class TeamBroker:
             except OSError:
                 pass
         self.root.remove_busy_file(entry)
-        self._remove_session_file(entry)
+        self.state_gc.remove_session_file(entry)
         self._kill_owner(entry or {}, why)
 
     def _terminate(self, agent_id, why):
@@ -659,10 +701,13 @@ class TeamBroker:
         now = time.time()
         self._expire_peer_relays()
         self._reap_expired_peers(now)
-        self._gc_orphan_busy_files(now)
+        self.state_gc.gc_orphan_busy_files(now)
+        if now - self._last_tmp_sweep >= self.tmp_sweep_interval:
+            self._last_tmp_sweep = now
+            self.root.gc_tmp_files(now, self.busy_grace)
         if now - self._last_session_sweep >= self._session_sweep_interval:
             self._last_session_sweep = now
-            self._gc_orphan_session_files(now)
+            self.state_gc.gc_orphan_session_files(now)
         self.delivery.prune(now)
         self._maybe_restart(now)
         doomed_fork, doomed_idle = self._classify(now)
@@ -759,90 +804,9 @@ class TeamBroker:
             except OSError:
                 pass
         self.root.remove_busy_file(entry)
-        self._remove_session_file(entry)
+        self.state_gc.remove_session_file(entry)
 
     # -- busy-file GC ------------------------------------------------
-
-    def _gc_orphan_busy_files(self, now):
-        # A busy file is published by the extension, not the broker. One
-        # whose agent is no longer registered and has not been touched for
-        # the grace window belongs to an old session; remove it. A
-        # registered agent (even a busy fork with an old mtime) keeps its
-        # file.
-        files = self.root.busy_files()
-        with self._lock:
-            live = {
-                str(pathlib.Path(entry["busy_file"]).resolve())
-                for entry in self._registry.values()
-                if entry.get("busy_file")
-            }
-        for path in files:
-            try:
-                if str(path.resolve()) in live:
-                    continue
-                if path.stat().st_mtime > now - self.busy_grace:
-                    continue
-            except OSError:
-                continue
-            self.root.unlink_under(str(path), self.root.base)
-
-    def _gc_orphan_session_files(self, now):
-        # Every teammate is a pi session that shows up in /resume. Remove
-        # teammate-marked session files whose agent is not live and whose
-        # mtime is older than the grace. A user's own session is never
-        # marked, and a live fork's file is skipped regardless of mtime.
-        # NOTE: this globs the whole sessions tree every interval; if that
-        # tree ever grows past a bounded size the glob itself should become
-        # incremental, but changing it risks the mtime-grace semantics.
-        try:
-            files = list(self.sessions_root.glob("**/*.jsonl"))
-        except OSError:
-            return
-        with self._lock:
-            live = {
-                str(pathlib.Path(entry["session"]).resolve())
-                for entry in self._registry.values()
-                if entry.get("session")
-            }
-        for path in files:
-            try:
-                if str(path.resolve()) in live:
-                    continue
-                if path.stat().st_mtime > now - self.session_grace:
-                    continue
-            except OSError:
-                continue
-            if self._is_teammate_session(path):
-                self.root.unlink_under(str(path), self.sessions_root)
-
-    def _remove_session_file(self, entry):
-        if (entry or {}).get("role") != "fork":
-            return
-        path = (entry or {}).get("session")
-        # Only a spawned teammate's transcript is broker-owned and safe to
-        # remove. An attached session carries no spawn marker and must
-        # stay in /resume after the fork is reaped.
-        if path and self._is_teammate_session(path):
-            self.root.unlink_under(path, self.sessions_root)
-
-    def _is_teammate_session(self, path):
-        # The marker sits in the first user turn; scan only the head so a
-        # large transcript is never fully read during a sweep. The scan
-        # is byte-based on purpose: the locale text codec differs per
-        # platform (cp1252 on Windows), and a non-ASCII session file
-        # decoded through the wrong codec would raise and kill the whole
-        # sweep thread.
-        marker = TEAMMATE_MARKER.encode("utf-8")
-        try:
-            with open(path, "rb") as fh:
-                for index, line in enumerate(fh):
-                    if marker in line:
-                        return True
-                    if index >= 50:
-                        break
-        except OSError:
-            return False
-        return False
 
     # -- peer federation ---------------------------------------------
 

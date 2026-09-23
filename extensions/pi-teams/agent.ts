@@ -63,6 +63,7 @@ export class TeamAgent {
 	private attachedHold = false;
 	private teamOwner = false;
 	private closed = false;
+	private surrendered = false;
 	private cwd = "";
 	private announced = false;
 	private holdProc: SpawnedProcess | null = null;
@@ -99,7 +100,11 @@ export class TeamAgent {
 		this.python = resolvePython();
 		this.windowless = windowlessFactory(this.python);
 		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
-		this.id = process.env.TEAM_ID || this.makeMainId();
+		// A main's id is minted at first hold, once the session file is
+		// known: the identity then derives from the session stem and
+		// survives hold restarts and reloads. TEAM_ID pins a fork's id
+		// from spawn.
+		this.id = process.env.TEAM_ID || "";
 		this.role = process.env.TEAM_ID ? "fork" : "main";
 		this.parent = process.env.TEAM_PARENT_ID || "";
 		// One send token per session: the hold registers with it, the
@@ -123,7 +128,26 @@ export class TeamAgent {
 	}
 
 	private makeMainId(): string {
-		return this.makeId("pi");
+		// The session stem suffix keeps one registry identity across
+		// hold restarts and reloads, where a random suffix minted a new
+		// identity per process load and let one session register twice
+		// under two ids. The stem is unique per session.
+		const suffix = this.identitySuffix() ||
+			Math.random().toString(16).slice(2, 10);
+		return `${this.host}:pi-${process.pid}-${suffix}`;
+	}
+
+	/** Mints the main id once, at first hold. */
+	private ensureId(): string {
+		if (!this.id) this.id = this.makeMainId();
+		return this.id;
+	}
+
+	/** A session-stable id suffix: the pi session stem. */
+	private identitySuffix(): string {
+		if (!this.sessionFile) return "";
+		const stem = basename(this.sessionFile).replace(/\.jsonl$/i, "");
+		return stem.replace(/[^A-Za-z0-9]/g, "-").slice(0, 32);
 	}
 
 	private launch(
@@ -228,8 +252,8 @@ export class TeamAgent {
 		if (cwd) this.cwd = cwd;
 		this.attachedHold = attached;
 		this.stopHold();
-		const name = this.attachedName || process.env.TEAM_NAME
-			|| `pi@${this.cwd || process.cwd()}`;
+		this.ensureId();
+		const name = this.registryName();
 		const busyFile = this.busyFile();
 		const env = this.holdEnv(name, this.role, this.parent, busyFile,
 			attached);
@@ -250,6 +274,21 @@ export class TeamAgent {
 		if (proc?.stdout) this.forwardMessages(proc.stdout);
 	}
 
+	/** Registry display name: the pi session stem when the session
+	 *  file is known, so re-held and resumed sessions keep one name and
+	 *  mains no longer collide as pi@cwd; attached and spawned forks
+	 *  keep their assigned shell names. */
+	private registryName(): string {
+		if (this.attachedName) return this.attachedName;
+		const stem = this.sessionFile
+			? basename(this.sessionFile).replace(/\.jsonl$/i, "")
+			: "";
+		if (this.role !== "fork" && stem) return stem.slice(0, 48);
+		if (process.env.TEAM_NAME) return process.env.TEAM_NAME;
+		if (stem) return stem.slice(0, 48);
+		return `pi@${this.cwd || process.cwd()}`;
+	}
+
 	/** A hold client that dies on its own (a broker restart or the
 	 *  idle exit after a source change) leaves the session deaf until
 	 *  the next session event: relaunch it with a bounded backoff. An
@@ -258,7 +297,7 @@ export class TeamAgent {
 	private holdDied(proc: SpawnedProcess): void {
 		if (this.holdProc !== proc) return;
 		this.holdProc = null;
-		if (this.closed) return;
+		if (this.closed || this.surrendered) return;
 		// A hold that ran a while resets the backoff: this death is a
 		// new failure, not a repeat of the previous one.
 		if (Date.now() - this.holdStartedAt > 60000) this.holdRestarts = 0;
@@ -413,6 +452,7 @@ export class TeamAgent {
 	/** This agent's state file. The id carries a host label, whose colon
 	 *  is illegal in a Windows filename, so the id is sanitized. */
 	private busyFile(): string {
+		this.ensureId();
 		const safe = this.id.replace(/[^A-Za-z0-9._-]/g, "-");
 		return join(stateRoot, `${safe}.busy`);
 	}
@@ -1031,10 +1071,32 @@ export class TeamAgent {
 	}
 
 	deregister(): void {
+		// A surrendered instance handed its identity to a reload's
+		// replacement: touching state or teammates here would tear down
+		// the registration the fresh instance now owns.
+		if (this.surrendered) return;
 		this.cancelWaits();
 		this.stopHold();
 		this.stopTeammates();
 		this.clearState();
+	}
+
+	/** Reload handover, replacement side: continue the previous
+	 *  instance's id and send token so the registry entry and parked
+	 *  mail survive the swap; a fresh identity would orphan both. */
+	inheritIdentity(previous: TeamAgent): void {
+		if (previous.id) this.id = previous.id;
+		if (previous.sendToken) this.sendToken = previous.sendToken;
+		this.brokerOps.sendToken = this.sendToken;
+	}
+
+	/** Reload handover, replaced side: stop this instance's hold and
+	 *  waits without deregistering; holdDied must not resurrect it
+	 *  into a duplicate registration. */
+	handover(): void {
+		this.surrendered = true;
+		this.cancelWaits();
+		this.stopHold();
 	}
 
 	/** Removes this agent's state file so stale busy flags do not
