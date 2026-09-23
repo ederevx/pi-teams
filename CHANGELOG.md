@@ -4,6 +4,27 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.19 - 2026-09-23
+
+- Session-stable main identity: a main mints its id once from the pi
+  session stem, so hold restarts and extension reloads keep one
+  registry identity instead of re-registering under a fresh random
+  suffix; registry display names derive from the same stem, ending the
+  shared `pi@<cwd>` collision. A reload's fresh instance inherits the
+  previous id and send token, and the replaced instance surrenders its
+  hold without deregistering.
+- Duplicate-registration guard: a registration carrying the same
+  owner pid and session file as a live entry replaces that stale
+  duplicate; a matching pid with a different session file is kept.
+- `write_atomic` scratch cleanup: a rename that never succeeds (a
+  reader holding the destination open) unlinks its `*.tmp.<pid>`
+  scratch, and the broker sweeps aged `.tmp` leftovers; the orphan
+  busy-file and session-file sweeps move to the new `src/state_gc.py`.
+- Install hardening: package-only guard both directions in
+  `postinstall.mjs` and `scripts/install.sh`, with the manual copies
+  listed in `scripts/manual-copies.mjs` and covered by
+  `tests/install_test.py`.
+
 ## v0.4.18 - 2026-09-23
 
 - Park-and-forward delivery: a send to a local target whose connection
