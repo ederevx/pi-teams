@@ -60,6 +60,12 @@ export async function openTeammatesDock(
 		);
 		list.onCancel = () => done(undefined);
 		container.addChild(list);
+		container.addChild(new (class {
+			render(): string[] {
+				return [theme.fg("muted", "Esc to cancel")];
+			}
+			invalidate(): void {}
+		})());
 		return {
 			render(width: number): string[] {
 				return container.render(width);
@@ -105,9 +111,11 @@ function lastActiveText(agent: AgentInfo, now: number): string {
 	return stamp === undefined ? "never" : `${relative(now - stamp)} ago`;
 }
 
-/** Human text for a duration in seconds: 42s, 7m, 3h, 2d. */
+/** Human text for a duration in seconds: 42.0s, 7m, 3h, 2d.
+ *  Sub-minute durations keep one decimal so the tick's motion is
+ *  visible; larger units stay whole. */
 function relative(seconds: number): string {
-	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 60) return `${seconds.toFixed(1)}s`;
 	const minutes = Math.floor(seconds / 60);
 	if (minutes < 60) return `${minutes}m`;
 	const hours = Math.floor(minutes / 60);
