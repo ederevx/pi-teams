@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """teamd - the pi-teams broker entry point.
 
-Composes the broker from its responsibility modules and offers the two
-CLI commands: `start` runs the broker, `stop` asks the running broker to
-shut down over its published endpoint. All broker logic lives in
-TeamBroker; all root/path logic lives in TeamRoot.
+Composes the broker from its responsibility modules and offers two CLI
+commands: `start` runs the broker, `stop` asks the running one to shut
+down over its endpoint. Broker logic lives in TeamBroker, root/path
+logic in TeamRoot.
 """
 
 import argparse
-import json
 import socket
 import sys
 
 from peer_link import PeerLink
 from team_broker import TeamBroker
 from team_root import DEFAULT_ROOT, TEAMMATE_MARKER, TeamRoot
+from wire import dump_line
 
 # Existing importers name teamd for these; keep re-exporting them so the
 # entry point stays the stable surface even though ownership moved.
@@ -32,10 +32,9 @@ class BrokerCli:
         sock.settimeout(2)
         try:
             sock.connect((endpoint["host"], endpoint["port"]))
-            sock.sendall((
-                json.dumps({"op": "hello", "token": endpoint["token"]}) + "\n"
-            ).encode())
-            sock.sendall((json.dumps({"op": "shutdown"}) + "\n").encode())
+            sock.sendall(dump_line(
+                {"op": "hello", "token": endpoint["token"]}))
+            sock.sendall(dump_line({"op": "shutdown"}))
         except OSError as exc:
             print("teamd: %s" % exc)
             raise SystemExit(1)

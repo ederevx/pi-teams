@@ -1,10 +1,10 @@
 """One broker's SSH tunnel to a peer broker.
 
-The broker owns the whole SSH transport: this class reads the peer
-broker's loopback endpoint over a non-interactive ssh session, forwards
-that port to a local loopback port, and owns the ssh process for its
-whole life. Nothing outside this class knows SSH is involved, so the
-rest of the broker links and relays peers without a transport branch.
+The broker owns the whole SSH transport: this class reads the peer's
+loopback endpoint over non-interactive ssh, forwards that port to a
+local loopback port, and owns the ssh process for its whole life.
+Nothing outside knows SSH is involved, so the broker links and relays
+peers without a transport branch.
 """
 
 import json
@@ -35,7 +35,7 @@ class PeerTunnel:
     registers the resulting loopback endpoint.
 
     The injected seams (ssh_bin, popen, which) keep the ssh process
-    testable; the coordinator test injects a whole tunnel instead.
+    testable; the coordinator test injects a whole tunnel.
     """
 
     def __init__(self, label, ssh, ssh_bin=None, remote_state=None,
@@ -76,8 +76,8 @@ class PeerTunnel:
                 "name": self.host,
             }
         # ExitOnForwardFailure makes ssh leave at once when it cannot
-        # bind the forwarded port; surface that as a start failure
-        # instead of a link that silently never connects.
+        # bind the forwarded port; surface that as a start failure,
+        # not a link that silently never connects.
         self._sleep(0.2)
         if proc.poll() is not None:
             detail = self._drain_stderr(proc)
@@ -118,6 +118,8 @@ class PeerTunnel:
                 self.setup_command())
 
     def _read_endpoint(self):
+        # BatchMode: never prompt for a password; unreachable means
+        # unusable, and setup guidance goes back to the user.
         try:
             result = subprocess.run(
                 [self._ssh_bin, "-o", "BatchMode=yes",
@@ -168,8 +170,7 @@ class PeerTunnel:
         )
 
     def _drain_stderr(self, proc):
-        # Bounded: ssh logs at most a few lines at ERROR level; keep the
-        # tail so a start failure can be classified without unbounded
+        # Bounded tail: classify a start failure without unbounded
         # memory if ssh ever chatters.
         chunks = []
         stream = getattr(proc, "stderr", None)

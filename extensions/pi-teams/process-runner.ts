@@ -1,8 +1,7 @@
 /**
- * Owns every OS child-process launch for the extension. Each spawn sets
- * windowsHide so no console window flashes on Windows; the option is a
- * documented no-op on Linux and macOS, so the same code behaves
- * identically everywhere.
+ * Owns every OS child-process launch for the extension. Each spawn
+ * sets windowsHide (a documented no-op on Linux/macOS), so no console
+ * window flashes on Windows.
  */
 
 import { spawn as nodeSpawn } from "node:child_process";

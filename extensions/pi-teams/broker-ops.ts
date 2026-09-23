@@ -1,13 +1,12 @@
 /**
- * The single broker-op client. Every request/response call to the
- * python client (team.py) goes through here, so no other module owns
- * broker argv and no module branches on local vs peer transport: the
- * broker routes a request to whichever host owns the target.
+ * The single broker-op client: every request/response call to team.py
+ * goes through here, so no other module owns broker argv or branches
+ * on local vs peer transport (the broker routes to the target's host).
  */
 
 import type { AgentInfo } from "./directory.ts";
 import { stateRoot, teamBin } from "./paths.ts";
-import type { ProcessHost } from "./process-runner.ts";
+import type { ExecResult, ProcessHost } from "./process-runner.ts";
 
 /** A linked peer host as reported by the broker's peer list. */
 export interface PeerInfo {
@@ -85,8 +84,14 @@ export class BrokerOps {
 		await this.run(["terminate", agentId], 25000);
 	}
 
-	/** Links a peer host. The broker owns the ssh tunnel; a failure
-	 *  carries the one-line setup a password-only host needs. */
+	/** Answers a finish query on this agent's behalf (done): the CLI
+	 *  answers for an idle agent that cannot answer by heartbeat. */
+	async finish(): Promise<ExecResult> {
+		return this.run(["finish", "--done"], 5000);
+	}
+
+	/** Links a peer host; the broker owns the ssh tunnel, and a
+	 *  failure carries the one-line setup a password-only host needs. */
 	async peerAdd(label: string, ssh: string): Promise<PeerInfo> {
 		const result = await this.run(
 			["peer", "add", "--label", label, "--ssh", ssh], 40000);

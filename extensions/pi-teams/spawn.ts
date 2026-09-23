@@ -76,9 +76,8 @@ export class SpawnService {
 	): Promise<TeammateRef | null> {
 		const candidates = await this.directory.mainAgents(host);
 		if (candidates.length === 0) return null;
-		// One request window per candidate: a timeout or a spawn-error
-		// only fails that target, so the next live main is tried instead
-		// of stranding the spawn behind one unresponsive session.
+		// One request window per candidate: a timeout or spawn-error
+		// fails only that target, so the next live main is tried.
 		for (const target of candidates) {
 			const id = requestId("spawn");
 			const wait = this.pending.register(id, spawnWindowMs());

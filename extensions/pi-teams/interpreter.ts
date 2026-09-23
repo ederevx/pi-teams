@@ -6,9 +6,8 @@
 
 import { spawnSync } from "node:child_process";
 
-/** Resolves a Python interpreter without a platform branch: an explicit
- *  PYTHON wins, otherwise the first of python3/python/py that answers
- *  (py is the launcher on Windows). */
+/** Explicit PYTHON wins, else the first of python3/python/py that
+ *  answers (py is the Windows launcher). */
 export function resolvePython(): string {
 	if (process.env.PYTHON) return process.env.PYTHON;
 	for (const candidate of ["python3", "python", "py"]) {
@@ -67,11 +66,9 @@ export interface InterpreterResolver {
 	resolve(): string;
 }
 
-/**
- * Maps a Python interpreter to its GUI-subsystem twin on Windows, so a
- * detached broker has no console to flash. Off Windows, and when no twin
- * exists, the interpreter is returned unchanged.
- */
+/** Maps a Python interpreter to its GUI-subsystem twin on Windows so a
+ *  detached broker has no console to flash; unchanged off Windows or
+ *  when no twin exists. */
 export class WindowlessPython implements InterpreterResolver {
 	private readonly interpreter: string;
 	private readonly probe: InterpreterProbe;

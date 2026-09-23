@@ -1,17 +1,12 @@
 /**
- * Request/response ownership for operations that ask another agent to
- * act (spawn and attach). One registry correlates a request id with its
- * waiter and timeout, so a cancelled or timed-out request can never leak
- * a timer and no two replies can double-resolve the same waiter.
+ * Request/response ownership for spawn and attach: one registry per
+ * request id (waiter + timeout), so a cancelled or timed-out request
+ * never leaks a timer and no two replies double-resolve a waiter.
  */
 
 import type { TeamMessage, TeammateRef } from "./protocol.ts";
 
-/**
- * Owns the in-flight spawn/attach requests. All waiter state and timers
- * live here, so the rest of the extension only registers a request and
- * settles it from the reply.
- */
+/** All in-flight waiter state and timers live here. */
 export class PendingRequests {
 	private readonly waiters =
 		new Map<string, (ref: TeammateRef | null) => void>();
