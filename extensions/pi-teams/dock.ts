@@ -81,15 +81,14 @@ export async function openTeammatesDock(
 	});
 }
 
-/** Describes an agent for its dock row: role, host, parent, session. */
+/** Describes an agent for its dock row: role, host, parent. The
+ *  session file is deliberately omitted: it is the longest field,
+ *  so in a narrow window its truncation would push the timestamp
+ *  out of the visible row. */
 function describeAgent(agent: AgentInfo): string {
 	const parts = [agent.role];
 	if (agent.remote) parts.push(`peer ${agent.origin ?? "remote"}`);
 	if (agent.parent) parts.push(`child of ${agent.parent}`);
-	if (agent.session) {
-		const slash = agent.session.lastIndexOf("/");
-		parts.push(`session ${agent.session.slice(slash + 1)}`);
-	}
 	return parts.join(" · ");
 }
 
