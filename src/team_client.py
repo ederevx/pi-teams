@@ -379,10 +379,11 @@ class TeamClient:
                     return
                 if msg.get("kind") == "finish?":
                     # A busy or waiting agent is still working and
-                    # answers at once; an idle one is blocked in pi, so
-                    # the question is surfaced for its next turn.
+                    # answers "finish-yes" (spared) at once; an idle
+                    # one is blocked in pi, so the question is surfaced
+                    # for its next turn.
                     if self._state() in ("busy", "waiting"):
-                        self._answer(True)
+                        self._answer(False)
                     else:
                         self._emit(msg)
                     continue
