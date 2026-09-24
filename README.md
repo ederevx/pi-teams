@@ -45,9 +45,10 @@ natively, without a shared filesystem as the channel.
   (`TEAM_SEND_TOKEN`, minted by the extension for its hold and each
   teammate), so a raw `team.py send` from a shell cannot speak for an
   agent — it is refused with `send-token`. Read-only diagnostics stay
-  open (`team ls`, `team peer list`). The one command is `/team-ls`: a
-  settings-style dock of live agents with last-active times. It is
-  read-only — acting on a teammate is a tool call.
+  open (`team ls`, `team peer list`). The commands are `/team-ls`, a
+  settings-style, read-only dock of live agents with last-active
+  times, and `/team-settings`, which edits the `piTeams` namespace
+  described under Settings. Acting on a teammate stays a tool call.
 
 ### Spawn model
 
@@ -197,6 +198,15 @@ disk sweep).
 
 A missing, unreadable, or malformed settings file, or a `piTeams`
 value that is not an object, is tolerated: the defaults above apply.
+
+`/team-settings` edits these values in place: every row shows its
+effective value, and a row whose environment variable is set is marked
+`(env-pinned)`. A change is written to the `piTeams` namespace of
+`<agent-dir>/settings.json`, preserving every other key and the file
+mode through a temp-file-and-rename write; the edit is never applied to
+a corrupt file, which is reported instead. pi reloads extensions when
+that file changes, so extension-owned values take effect then, while
+broker-owned values apply on the next broker restart.
 
 ## Validation
 

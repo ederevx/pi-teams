@@ -21,6 +21,7 @@ import {
 } from "./pi-teams/messages.ts";
 import { sessionsRoot } from "./pi-teams/paths.ts";
 import { ProcessRunner } from "./pi-teams/process-runner.ts";
+import { TeamSettingsPresenter } from "./pi-teams/settings-presenter.ts";
 import {
 	DEFAULT_STALL_SECONDS,
 	DEFAULT_WAIT_SECONDS,
@@ -467,6 +468,22 @@ export default async function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const agents = await app.snapshot();
 			await openTeammatesDock(agents, ctx);
+		},
+	});
+
+	// -- settings editor ------------------------------------------------
+	// Every piTeams value as an editable row; a change is written to the
+	// agent-directory settings.json, which pi reloads extensions from.
+	const settingsPresenter = new TeamSettingsPresenter();
+	pi.registerCommand("team-settings", {
+		description: "Edit pi-teams settings",
+		handler: async (_args, ctx) => {
+			try {
+				await settingsPresenter.present(
+					ctx.ui, ctx.mode, settingsPresenter.changeHandler(ctx.ui));
+			} catch {
+				console.error("pi-teams: could not render settings");
+			}
 		},
 	});
 

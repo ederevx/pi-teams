@@ -27,11 +27,40 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "src"))
 
 
+def ensure_pi_modules():
+    """Symlink the pi TUI packages into the repo's gitignored
+    node_modules so the extension tests can resolve the settings view's
+    imports, mirroring the sibling repositories. Derived from the global
+    pi install; a no-op when the links already resolve."""
+    node = shutil.which("node")
+    if not node:
+        return
+    agent = (pathlib.Path(node).resolve().parent.parent / "lib"
+             / "node_modules" / "@earendil-works" / "pi-coding-agent")
+    if not agent.exists():
+        return
+    nested = agent / "node_modules" / "@earendil-works"
+    target = ROOT / "node_modules" / "@earendil-works"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for name, dest in (("pi-coding-agent", agent),
+                           ("pi-tui", nested / "pi-tui"),
+                           ("pi-ai", nested / "pi-ai"),
+                           ("typebox", agent / "node_modules" / "typebox")):
+            link = target / name
+            if not link.exists() and dest.exists():
+                link.symlink_to(dest)
+    except OSError:
+        # Symlinks need privileges on Windows; the run still proceeds.
+        pass
+
+
 def run_step(argv):
     return subprocess.run(argv, cwd=str(ROOT)).returncode
 
 
 def main():
+    ensure_pi_modules()
     node = shutil.which("node") or "node"
     steps = [
         [sys.executable, "tests/readme_lint.py"],

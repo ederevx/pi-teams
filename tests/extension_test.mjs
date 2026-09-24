@@ -20,11 +20,14 @@
 
 import assert from "node:assert/strict";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	readdirSync,
 	rmSync,
+	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -56,6 +59,12 @@ const { TeamAgent, ProcessRunner, PendingRequests,
 	await import("../extensions/pi-teams.ts");
 const { PackageSettings } =
 	await import("../extensions/pi-teams/settings.ts");
+const { TeamSettingsPresenter } =
+	await import("../extensions/pi-teams/settings-presenter.ts");
+const { SettingsStore } =
+	await import("../extensions/pi-teams/settings-store.ts");
+const { TeamSettingsView } =
+	await import("../extensions/pi-teams/settings-view.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -1402,3 +1411,161 @@ test("sessionsRoot keeps the legacy PI_SESSIONS_ROOT fallback", () => {
 		PI_SESSIONS_ROOT: "/legacy",
 	}, dir).sessionsRoot(), "/new");
 });
+
+
+// -- /team-settings --------------------------------------------------
+
+const ROW_ORDER = "spawnWindowMs,waitSeconds,stallSeconds,binDir,ssh," +
+	"remoteState,sessionsRoot,host,stateDir,forkIdleSeconds," +
+	"busyGraceSeconds,gcWarnGraceSeconds,restartGraceSeconds," +
+	"peerGraceSeconds,sessionGraceSeconds," +
+	"sessionSweepIntervalSeconds,peerSetup";
+
+const VIEW_THEME = {
+	fg: (_color, text) => text,
+	bold: (text) => text,
+};
+
+/** A ui stub: records notifications and captures the custom view the
+ *  presenter builds, without a terminal. */
+function recordingUi() {
+	const notes = [];
+	let view;
+	let calls = 0;
+	const ui = {
+		notify: (message, type) => notes.push({ message, type }),
+		custom: async (factory) => {
+			calls += 1;
+			view = factory({ requestRender: () => {} }, VIEW_THEME, {}, () => {});
+			return undefined;
+		},
+	};
+	return { ui, notes, view: () => view, calls: () => calls };
+}
+
+test("team-settings rows keep the piTeams order and effective values", () => {
+	const dir = join(scratch, "settings-rows");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "settings.json"), JSON.stringify({
+		piTeams: { waitSeconds: 42, ssh: "custom-ssh" },
+	}));
+	const settings = new PackageSettings({}, dir);
+	const presenter = new TeamSettingsPresenter(settings, new SettingsStore(), {});
+	const rows = presenter.rows();
+	assert.equal(rows.map((row) => row.id).join(","), ROW_ORDER);
+	assert.equal(rows.length, 17);
+	assert.equal(rows[1].value, "42");
+	assert.equal(rows[4].value, "custom-ssh");
+	assert.equal(rows[1].title, "Wait timeout");
+	assert.equal(rows[16].value, "");
+	for (const row of rows) {
+		assert.equal(typeof row.submenu, "function");
+	}
+});
+
+test("team-settings marks an env-pinned row and lists rows off-TUI", async () => {
+	const dir = join(scratch, "settings-pinned");
+	const env = { PI_TEAMS_WAIT: "5" };
+	const presenter = new TeamSettingsPresenter(
+		new PackageSettings(env, dir), new SettingsStore(), env);
+	const rows = presenter.rows();
+	assert.equal(rows[1].value, "5");
+	assert.equal(rows[1].title, "Wait timeout (env-pinned)");
+	assert.equal(rows[0].title, "Spawn window");
+
+	let printed = "";
+	const original = console.error;
+	console.error = (line) => { printed += String(line); };
+	let customCalls = 0;
+	try {
+		await presenter.present(
+			{ custom: () => { customCalls += 1; } },
+			"print",
+			() => { throw new Error("no change expected"); });
+	} finally {
+		console.error = original;
+	}
+	assert.equal(customCalls, 0, "non-TUI modes never open the view");
+	assert.match(printed, /pi-teams-settings:/);
+	assert.match(printed, /Spawn window: .*current: 15000/);
+	assert.match(printed, /Peer setup command: .*current: \(empty\)/);
+});
+
+test("team-settings opens the custom view and renders every row", async () => {
+	const dir = join(scratch, "settings-tui");
+	const presenter = new TeamSettingsPresenter(
+		new PackageSettings({}, dir), new SettingsStore(), {});
+	const recorder = recordingUi();
+	await presenter.present(recorder.ui, "tui", () => {});
+	assert.equal(recorder.calls(), 1);
+	const view = recorder.view();
+	assert.ok(view instanceof TeamSettingsView);
+	const lines = view.render(120).join("\n");
+	assert.match(lines, /Spawn window/);
+	assert.match(lines, /Wait timeout/);
+	assert.match(lines, /Peer setup command/);
+});
+
+test("team-settings writes piTeams atomically, keeping keys and mode", () => {
+	const dir = mkdtempSync(join(scratch, "settings-store-"));
+	const file = join(dir, "settings.json");
+	writeFileSync(file, JSON.stringify({
+		theme: "dark",
+		packages: ["git:x"],
+		piTeams: { ssh: "old-ssh" },
+	}, null, 2) + "\n");
+	chmodSync(file, 0o640);
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		const presenter = new TeamSettingsPresenter(
+			new PackageSettings({}, dir), new SettingsStore(), {});
+		const recorder = recordingUi();
+		presenter.apply("waitSeconds", "42", recorder.ui);
+		const saved = JSON.parse(readFileSync(file, "utf8"));
+		assert.equal(saved.piTeams.waitSeconds, 42);
+		assert.equal(saved.piTeams.ssh, "old-ssh");
+		assert.equal(saved.theme, "dark");
+		assert.deepEqual(saved.packages, ["git:x"]);
+		assert.equal(statSync(file).mode & 0o777, 0o640);
+		assert.deepEqual(
+			readdirSync(dir).filter((name) => name.startsWith("settings.json.tmp")),
+			[]);
+		assert.match(recorder.notes.at(-1).message, /^Saved Wait timeout\./);
+		assert.equal(recorder.notes.at(-1).type, "info");
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
+	}
+});
+
+test("team-settings refuses a corrupt file and rejects bad numbers", () => {
+	const dir = mkdtempSync(join(scratch, "settings-corrupt-"));
+	const file = join(dir, "settings.json");
+	writeFileSync(file, "{not json");
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		const presenter = new TeamSettingsPresenter(
+			new PackageSettings({}, dir), new SettingsStore(), {});
+		const recorder = recordingUi();
+		presenter.apply("waitSeconds", "42", recorder.ui);
+		assert.equal(readFileSync(file, "utf8"), "{not json");
+		assert.equal(recorder.notes.at(-1).type, "error");
+		assert.match(recorder.notes.at(-1).message, /Could not save Wait timeout/);
+
+		const clean = mkdtempSync(join(scratch, "settings-invalid-"));
+		process.env.PI_CODING_AGENT_DIR = clean;
+		const strict = new TeamSettingsPresenter(
+			new PackageSettings({}, clean), new SettingsStore(), {});
+		const notes = recordingUi();
+		strict.apply("waitSeconds", "not-a-number", notes.ui);
+		assert.equal(notes.notes.at(-1).type, "error");
+		assert.match(notes.notes.at(-1).message, /number at or above 0/);
+		assert.equal(existsSync(join(clean, "settings.json")), false);
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
+	}
+});
+
