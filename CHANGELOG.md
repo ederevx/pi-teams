@@ -4,6 +4,19 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.21 - 2026-09-23
+
+- Finish queries actually ask: the extension no longer auto-answers
+  the broker's "are you done?" on the agent's behalf - the query is
+  steered to the agent, which answers via `team finish [--done]`, and
+  the broker relays the real why (idle-gc / parent-gone).
+- Polarity fix: a busy or waiting hold answering the query reported
+  "finish-no" (done), letting the broker reap a working fork at once;
+  it now answers "finish-yes" (working).
+- Parent-gone forks with a live connection are asked before reaping;
+  a working answer spares them for the next cycle, silence or a done
+  answer proceeds.
+
 ## v0.4.20 - 2026-09-23
 
 - Recycled-pid lock safety: broker-lock liveness records validate the
