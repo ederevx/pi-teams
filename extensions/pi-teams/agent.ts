@@ -373,11 +373,10 @@ export class TeamAgent {
 		}
 		if (message.kind === "finish?") {
 			// The broker asks whether this agent is done before reaping
-			// it as idle. The state was published idle, so answer done
-			// through the CLI; a still-working agent would have
-			// answered busy from its heartbeat instead of surfacing
-			// here.
-			void this.brokerOps.finish();
+			// it. The question is surfaced to the agent, which answers
+			// itself through the CLI; only the CLI answer reaps or
+			// spares the session here.
+			this.deliver(this.finishQuestion(message));
 			return;
 		}
 		if (message.kind === "attach") {
@@ -397,6 +396,25 @@ export class TeamAgent {
 			if (this.inbox.deliver(message)) return;
 		}
 		this.deliver(message);
+	}
+
+	/** Rewrites the broker's finish query into the instruction the
+	 *  agent must act on: answer through the CLI, or be reaped. The
+	 *  broker's why (idle-gc or parent-gone) rides along. */
+	private finishQuestion(message: TeamMessage): TeamMessage {
+		const why = typeof (message.payload as { why?: unknown })?.why === "string"
+			? (message.payload as { why: string }).why
+			: "idle-gc";
+		return {
+			...message,
+			payload:
+				`The broker is about to reap this session (why: ${why}). ` +
+				"You must answer yourself with the team CLI: run " +
+				"`team finish --done` if you are finished (the session is " +
+				"then reaped cleanly) or `team finish` if you are still " +
+				"working (the session stays alive). Silence past the " +
+				"grace window also ends the session.",
+		};
 	}
 
 	stopHold(): void {

@@ -726,6 +726,77 @@ class BrokerProtocolTests(unittest.TestCase):
             dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_parent_gone_fork_is_asked_and_answered(self):
+        # A parent-gone fork with a live connection is asked like an
+        # idle one: its own agent answers, not its gone parent. A
+        # working answer spares it (re-doomed and re-asked next
+        # cycle); a done answer reaps it at once.
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
+                            fork_idle=IDLE_ROOMY, sweep_interval=0.1,
+                            gc_ping_grace=3.0)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import os, time; time.sleep(60)"]
+        )
+        try:
+            wait_endpoint(root)
+            parent = TeamClient(root, heartbeat=None)
+            parent.id = "parent-pg"
+            parent.role = "main"
+            parent.send_token = "st-13"
+            parent.register()
+            fork = TeamClient(root, heartbeat=None)
+            fork.id = "fork-pg"
+            fork.name = "fork-pg"
+            fork.role = "fork"
+            fork.parent = "parent-pg"
+            fork.owner_pid = str(dummy.pid)
+            fork.send_token = "st-14"
+            fork.register()
+            self.assertTrue(
+                wait_until(lambda: "fork-pg" in self._ids_via(root)),
+            )
+            # The parent's connection drops: the fork is doomed as
+            # parent-gone but asked, since its own agent can answer.
+            parent.close()
+            self.assertTrue(
+                wait_until(
+                    lambda: "fork-pg" in broker._finish_queries.ids(),
+                    timeout=3),
+                "parent-gone fork was never asked whether it is done",
+            )
+            # The fork's agent answers that it is still working:
+            # spared past the grace and re-asked on the next sweep.
+            fork.send_msg("*", "finish-yes", {"id": "fork-pg"})
+            time.sleep(1.2)
+            self.assertIn("fork-pg", self._ids_via(root),
+                          "working answer did not spare the fork")
+            self.assertIsNone(dummy.poll(),
+                              "spared fork's owner was signalled")
+            self.assertTrue(
+                wait_until(
+                    lambda: "fork-pg" in broker._finish_queries.ids(),
+                    timeout=3),
+                "spared fork was not re-asked on the next cycle",
+            )
+            # The done answer reaps at once, without awaiting grace.
+            fork.send_msg("*", "finish-no", {"id": "fork-pg"})
+            self.assertTrue(
+                wait_until(lambda: dummy.poll() is not None, timeout=5),
+                "finish-no did not reap the parent-gone fork",
+            )
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            try:
+                dummy.kill()
+            except OSError:
+                pass
+            dummy.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_fork_idle_gc_kills_owner(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
@@ -868,13 +939,14 @@ class BrokerProtocolTests(unittest.TestCase):
             dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def _start_broker(self, root, host, tunnel_factory=None):
+    def _start_broker(self, root, host, tunnel_factory=None,
+                      gc_ping_grace=None):
         sessions = os.path.join(root, "sessions")
         os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             sweep_interval=0.1, host=host,
                             peer_grace=0.3, sessions_root=sessions,
-                            session_grace=0.3,
+                            session_grace=0.3, gc_ping_grace=gc_ping_grace,
                             tunnel_factory=tunnel_factory)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
@@ -1114,7 +1186,11 @@ class BrokerProtocolTests(unittest.TestCase):
         root_a = make_root()
         root_b = make_root()
         broker_a, thread_a = self._start_broker(root_a, "alpha")
-        broker_b, thread_b = self._start_broker(root_b, "beta")
+        # A parent-gone fork with a live connection is asked first; a
+        # short grace keeps this reap-timing test quick while still
+        # exercising the silence-past-grace path.
+        broker_b, thread_b = self._start_broker(root_b, "beta",
+                                                gc_ping_grace=0.5)
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import os, time; time.sleep(60)"])
         try:
