@@ -371,12 +371,12 @@ export class TeamAgent {
 			this.pending.settle(message, "attach-ack");
 			return;
 		}
-		if (message.kind === "finish?") {
-			// The broker asks whether this agent is done before reaping
-			// it. The question is surfaced to the agent, which answers
-			// itself through the CLI; only the CLI answer reaps or
-			// spares the session here.
-			this.deliver(this.finishQuestion(message));
+		if (message.kind === "idle-warning") {
+			// The broker left a warning file and will reap this session
+			// at its next idle-GC poll unless the file is deleted. The
+			// warning is surfaced to the agent with the delete
+			// instruction; the hold deletes it itself while busy.
+			this.deliver(this.idleWarning(message));
 			return;
 		}
 		if (message.kind === "attach") {
@@ -398,22 +398,28 @@ export class TeamAgent {
 		this.deliver(message);
 	}
 
-	/** Rewrites the broker's finish query into the instruction the
-	 *  agent must act on: answer through the CLI, or be reaped. The
-	 *  broker's why (idle-gc or parent-gone) rides along. */
-	private finishQuestion(message: TeamMessage): TeamMessage {
-		const why = typeof (message.payload as { why?: unknown })?.why === "string"
-			? (message.payload as { why: string }).why
-			: "idle-gc";
+	/** Rewrites the broker's idle warning into the instruction the agent
+	 *  must act on: delete the warning file, or be reaped at the next
+	 *  idle-GC poll. The broker's why (idle-gc or parent-gone) and the
+	 *  file path ride along. */
+	private idleWarning(message: TeamMessage): TeamMessage {
+		const payload = (message.payload ?? {}) as {
+			why?: unknown; file?: unknown; grace?: unknown;
+		};
+		const why = typeof payload.why === "string" ? payload.why : "idle-gc";
+		const file = typeof payload.file === "string" ? payload.file : "";
+		const grace = typeof payload.grace === "number"
+			? Math.round(payload.grace)
+			: 60;
 		return {
 			...message,
 			payload:
-				`The broker is about to reap this session (why: ${why}). ` +
-				"You must answer yourself with the team CLI: run " +
-				"`team finish --done` if you are finished (the session is " +
-				"then reaped cleanly) or `team finish` if you are still " +
-				"working (the session stays alive). Silence past the " +
-				"grace window also ends the session.",
+				`The broker will reap this session at its next idle-GC ` +
+				`poll (why: ${why}). To stay alive, delete the warning ` +
+				`file it left you now:\n  ${file}\n` +
+				`Leaving it in place for more than ${grace}s is treated ` +
+				`as consent and the session is reaped. Deleting the file ` +
+				`tells the broker you are still working.`,
 		};
 	}
 
