@@ -518,6 +518,27 @@ test("requireSameTeam is team-scoped for a teammate", async () => {
 	agent.stopHold();
 });
 
+test("a finish query is surfaced to the agent, not auto-answered", async () => {
+	const delivered = [];
+	const { calls, runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, (m) => delivered.push(m));
+	agent.deliverMessage(JSON.stringify({
+		op: "message", id: "f1", from: "*", to: "parent-1",
+		kind: "finish?", payload: { id: "parent-1", why: "parent-gone" },
+		ts: 1,
+	}));
+	// The question steers a turn; no CLI finish runs on the agent's
+	// behalf, so only the agent's own answer reaps or spares it.
+	assert.equal(calls.length, 0, "finish query was answered automatically");
+	assert.equal(delivered.length, 1);
+	const text = String(delivered[0].payload);
+	assert.match(text, /parent-gone/);
+	assert.match(text, /team finish --done/);
+	assert.match(text, /team finish`/);
+	assert.match(text, /grace window/);
+});
+
 test("deliverMessage filters a redelivered envelope id", async () => {
 	const delivered = [];
 	const { runner } = makeRunner(() =>

@@ -1,6 +1,7 @@
 """Fork lifecycle tests: a fork goes away with its parent's connection."""
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -169,6 +170,40 @@ class ForkLifecycleTests(unittest.TestCase):
             child.kill()
             child.wait(timeout=5)
 
+    def test_hold_answers_working_with_finish_yes(self):
+        # The hold's answer polarity: a busy or waiting agent is still
+        # working, so it must answer "finish-yes" (spared); answering
+        # "finish-no" would reap a working fork at once. An idle hold
+        # never answers; it surfaces the query for the agent's turn.
+        for value, state in (("1", "busy"), ("2", "waiting"),
+                             ("0", "idle")):
+            busy = os.path.join(self.root, "%s.busy" % state)
+            with open(busy, "w") as fh:
+                fh.write(value)
+            client = TeamClient(self.root, heartbeat=None)
+            client.id = "fork-hold"
+            client.busy_file = busy
+            sent = []
+            client.send_msg = (
+                lambda to, kind, payload, _s=sent: _s.append(kind))
+            client.register = lambda: None
+            client._watch_stdin = lambda: threading.Event()
+            client._emit = lambda msg: None
+            replies = iter([
+                {"kind": "finish?", "payload": {"why": "idle-gc"}},
+                {"kind": "terminate"},
+            ])
+            client._read_line = lambda: next(replies)
+            client.hold()
+            if state == "idle":
+                self.assertEqual(
+                    sent, [], "idle hold answered instead of surfacing")
+            else:
+                self.assertEqual(
+                    sent, ["finish-yes"],
+                    "%s hold must answer finish-yes, got %r" % (state, sent),
+                )
+
     def test_fork_lives_while_parent_connected(self):
         parent = self._parent("parent-1")
         child = self._spawn_fork("fork-1", "parent-1")
@@ -186,17 +221,30 @@ class ForkLifecycleTests(unittest.TestCase):
             parent.close()
 
     def test_fork_dies_when_parent_connection_closes(self):
-        parent = self._parent("parent-2")
-        child = self._spawn_fork("fork-2", "parent-2")
-        self.assertTrue(
-            wait_until(lambda: "fork-2" in self._ids(), timeout=3),
-            "fork never registered",
-        )
-        parent.close()
-        self.assertTrue(
-            wait_until(lambda: child.poll() is not None, timeout=6),
-            "fork still alive after its parent went away",
-        )
+        # The parent-gone fork is asked first (finish-query courtesy);
+        # its hold answers nothing, so the reap lands once the grace
+        # on silence expires. A short grace keeps the test quick.
+        stop_broker(self.root, self.proc)
+        os.environ["PI_TEAMS_GC_PING_GRACE"] = "0.5"
+        try:
+            self.proc = start_broker(self.root, idle_timeout=15.0)
+            parent = self._parent("parent-2")
+            child = self._spawn_fork("fork-2", "parent-2")
+            try:
+                self.assertTrue(
+                    wait_until(lambda: "fork-2" in self._ids(), timeout=3),
+                    "fork never registered",
+                )
+                parent.close()
+                self.assertTrue(
+                    wait_until(lambda: child.poll() is not None, timeout=8),
+                    "fork still alive after its parent went away",
+                )
+            finally:
+                child.kill()
+                child.wait(timeout=5)
+        finally:
+            os.environ.pop("PI_TEAMS_GC_PING_GRACE", None)
 
     def test_explicit_terminate(self):
         parent = self._parent("parent-3")
