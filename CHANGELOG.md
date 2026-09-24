@@ -4,6 +4,19 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.22 - 2026-09-24
+
+- File-based idle-GC warning: before reaping a work-idle or
+  parent-gone fork the broker leaves a timestamped `<id>.warn` file
+  under the team root and steers the teammate to delete it. Deleting
+  the file is the working answer and resets the idle clock; leaving
+  it past `PI_TEAMS_GC_WARN_GRACE` (default 60s, legacy
+  `PI_TEAMS_GC_PING_GRACE` still read) reaps the fork. A busy or
+  waiting hold deletes the file itself, and fresh work clears it.
+- Removed the `team finish` CLI and the `finish?` / `finish-yes` /
+  `finish-no` protocol; `FinishQueries` is replaced by `IdleWarnings`,
+  and orphan warning files are swept with the busy files.
+
 ## v0.4.21 - 2026-09-23
 
 - Finish queries actually ask: the extension no longer auto-answers
