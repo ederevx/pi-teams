@@ -15,6 +15,8 @@ import subprocess
 import threading
 import time
 
+from settings import PackageSettings
+
 DEFAULT_REMOTE_STATE = "$HOME/.local/state/pi-teams"
 
 
@@ -40,13 +42,14 @@ class PeerTunnel:
 
     def __init__(self, label, ssh, ssh_bin=None, remote_state=None,
                  on_exit=None, popen=subprocess.Popen, which=shutil.which,
-                 sleep=time.sleep):
+                 sleep=time.sleep, settings=None):
         self.label = label
         self.ssh = ssh
         self.host = ""
-        self._ssh_bin = ssh_bin or os.environ.get("PI_TEAMS_SSH") or "ssh"
+        self.settings = settings or PackageSettings()
+        self._ssh_bin = ssh_bin or self.settings.ssh()
         self._remote_state = (
-            remote_state or os.environ.get("PI_TEAMS_REMOTE_STATE")
+            remote_state or self.settings.remote_state()
             or DEFAULT_REMOTE_STATE
         )
         self._on_exit = on_exit
@@ -198,7 +201,7 @@ class PeerTunnel:
         return ""
 
     def _setup_script(self):
-        explicit = os.environ.get("PI_TEAMS_PEER_SETUP")
+        explicit = self.settings.peer_setup()
         if explicit:
             return explicit
         here = os.path.dirname(os.path.abspath(__file__))

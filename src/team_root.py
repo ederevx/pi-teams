@@ -13,7 +13,9 @@ import re
 import secrets
 import time
 
-DEFAULT_ROOT = os.path.join(os.path.expanduser("~"), ".local", "state", "pi-teams")
+from settings import PackageSettings
+
+DEFAULT_ROOT = PackageSettings().state_dir()
 ENDPOINT_NAME = "endpoint"
 REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"

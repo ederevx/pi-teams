@@ -30,8 +30,8 @@ from peer_transport import PeerTransport
 from state_gc import StateGc
 from wire import LineStream, dump_line
 from peer_tunnel import PeerTunnel, PeerUnreachable
+from settings import PackageSettings
 from team_root import (
-    DEFAULT_ROOT,
     ENDPOINT_NAME,
     REGISTRY_NAME,
     TeamRoot,
@@ -44,27 +44,30 @@ class TeamBroker:
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
                  fork_idle=None, busy_grace=None, sessions_root=None,
                  session_grace=None, restart_grace=None, peer_grace=None,
-                 gc_warn_grace=None, host=None, tunnel_factory=None):
-        self.root = TeamRoot(root or DEFAULT_ROOT)
+                 gc_warn_grace=None, host=None, settings=None,
+                 tunnel_factory=None):
+        # Settings own every configurable flag; an injected value (the
+        # tests) or an explicit environment variable beats them.
+        self.settings = settings or PackageSettings()
+        self.root = TeamRoot(root or self.settings.state_dir())
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
         # Globally unique ids need a per-host label; peers route by the
         # host prefix of a target id.
-        self.host = host or os.environ.get("PI_TEAMS_HOST") \
-            or socket.gethostname().split(".")[0]
+        self.host = host or self.settings.host()
         # A spawned teammate (role "fork") idle this long is GCed:
         # connection closed, owner signalled, entry dropped. A busy
         # teammate's heartbeats keep it alive.
         self.fork_idle = float(
             fork_idle if fork_idle is not None
-            else os.environ.get("PI_TEAMS_FORK_IDLE", "300")
+            else self.settings.fork_idle()
         )
         # A .busy file whose agent is unregistered and whose mtime is
         # past this grace belongs to an old session (reload, crash, or
         # reaped fork); registered agents keep theirs however old.
         self.busy_grace = float(
             busy_grace if busy_grace is not None
-            else os.environ.get("PI_TEAMS_BUSY_GRACE", "120")
+            else self.settings.busy_grace()
         )
         # write_atomic leaves a .tmp.<pid> scratch only when every
         # rename retry failed; sweep those aged leftovers on this
@@ -77,27 +80,21 @@ class TeamBroker:
         # consent; zero disables the warning and reaps immediately.
         self.gc_warn_grace = float(
             gc_warn_grace if gc_warn_grace is not None
-            else os.environ.get(
-                "PI_TEAMS_GC_WARN_GRACE",
-                os.environ.get("PI_TEAMS_GC_PING_GRACE", "60"))
+            else self.settings.gc_warn_grace()
         )
         self._idle_warnings = IdleWarnings(self.root, self.gc_warn_grace)
         # A teammate-marked pi session file whose agent is not live
         # and idle past this grace is swept (see state_gc); keeps old
         # forks out of pi's /resume list.
-        agent_dir = os.environ.get("PI_CODING_AGENT_DIR") or os.path.join(
-            os.path.expanduser("~"), ".pi", "agent")
         self.sessions_root = pathlib.Path(
-            sessions_root or os.environ.get("PI_TEAMS_SESSIONS_ROOT")
-            or os.path.join(agent_dir, "sessions")
+            sessions_root or self.settings.sessions_root()
         )
         self.session_grace = float(
             session_grace if session_grace is not None
-            else os.environ.get("PI_TEAMS_SESSION_GRACE", "3600")
+            else self.settings.session_grace()
         )
         self._session_sweep_interval = float(
-            os.environ.get("PI_TEAMS_SESSION_SWEEP_INTERVAL", "300")
-        )
+            self.settings.session_sweep_interval())
         self._last_session_sweep = 0.0
         self.token = secrets.token_hex(16)
         # Stamp the running source (the installed file's hash) so a
@@ -108,14 +105,14 @@ class TeamBroker:
         # code without killing live work.
         self.restart_grace = float(
             restart_grace if restart_grace is not None
-            else os.environ.get("PI_TEAMS_RESTART_GRACE", "60")
+            else self.settings.restart_grace()
         )
         # A dropped peer link (ssh flap, tunnel replacement) gets this
         # long to reconnect before its remote-parented forks are
         # reaped, so a brief partition does not kill live forks.
         self.peer_grace = float(
             peer_grace if peer_grace is not None
-            else os.environ.get("PI_TEAMS_PEER_GRACE", "15")
+            else self.settings.peer_grace()
         )
         self.last_active = time.time()
         self._registry = {}

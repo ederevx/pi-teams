@@ -6,23 +6,17 @@
  */
 
 import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const home = homedir();
+import { settings } from "./settings.ts";
 
-export const stateRoot =
-	process.env.TEAM_ROOT ||
-	join(process.env.XDG_STATE_HOME || join(home, ".local", "state"),
-		"pi-teams");
-export const binDir =
-	process.env.PI_TEAMS_BIN || join(home, ".local", "bin");
+export const stateRoot = settings.stateDir();
+export const binDir = settings.binDir();
 
 /** Where pi writes session transcripts (.jsonl), one directory per
  *  working directory; team_tail reads the newest. */
-export const sessionsRoot =
-	process.env.PI_SESSIONS_ROOT || join(home, ".pi", "agent", "sessions");
+export const sessionsRoot = settings.sessionsRoot();
 
 /** The bundled broker/client (sibling src/ with teamd.py, team.py)
  *  when loaded from a pi package; PI_TEAMS_BIN wins for manual
@@ -38,7 +32,10 @@ function bundledSrcDir(): string {
 	return "";
 }
 
-const bundled = process.env.PI_TEAMS_BIN ? "" : bundledSrcDir();
+// An explicitly configured bin dir means a manual install that owns
+// its binaries; otherwise the package's bundled src is used.
+const bundled = settings.isConfigured("PI_TEAMS_BIN", "binDir")
+	? "" : bundledSrcDir();
 export const teamdBin = bundled ? join(bundled, "teamd.py") : join(binDir, "teamd");
 export const teamBin = bundled ? join(bundled, "team.py") : join(binDir, "team");
 
