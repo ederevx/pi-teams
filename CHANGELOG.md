@@ -4,6 +4,18 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.24 - 2026-09-24
+
+- Fix `team_wait` throwing "logTeamMessage is not defined" when a
+  teammate reported: the entry only re-exported the function instead
+  of importing it.
+- Harden the idle warning: a failed or unreadable warning write is no
+  longer mistaken for an answered warning, a stale `.warn` from an
+  earlier broker generation is replaced with a fresh one, the
+  busy-hold delete is confined to the client's own state root and only
+  honors the broker's own warning, and a sweep error can no longer stop
+  all GC. Removed the dead Python wait/stall/spawn-window accessors.
+
 ## v0.4.23 - 2026-09-24
 
 - Configuration moves to the pi settings file: every flag is read from
