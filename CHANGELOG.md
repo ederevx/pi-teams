@@ -4,6 +4,18 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.25 - 2026-09-24
+
+- Add `/team-settings`: a settings-style dock showing every `piTeams`
+  value with the precedence `PackageSettings` uses, marking a row
+  whose environment variable is pinned, validating each edit before
+  saving, and writing the namespace through a temp-file-and-rename
+  write that preserves every other key and the file mode. A corrupt
+  settings file is reported, never overwritten.
+- Fix `team_wait` throwing "formatReport is not defined" when a
+  teammate reported: the entry used the formatter without importing
+  it.
+
 ## v0.4.24 - 2026-09-24
 
 - Fix `team_wait` throwing "logTeamMessage is not defined" when a
