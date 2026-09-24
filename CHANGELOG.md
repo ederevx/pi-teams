@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.26 - 2026-09-24
+
+- An idle-GC warning now preempts the teammate: the running turn is
+  aborted so a tool blocked on it (for example `team_wait`) returns,
+  and the warning then opens its own turn so the agent deletes the
+  warning file and stays alive. Ordinary reports and text still
+  arrive as steering messages and never abort a teammate.
+
 ## v0.4.25 - 2026-09-24
 
 - Add `/team-settings`: a settings-style dock showing every `piTeams`
