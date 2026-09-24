@@ -157,6 +157,44 @@ Usage: `team_peer add B`, then `team_spawn host="B"` and
 `team_wait(id)`. Only loopback is forwarded; the SSH session provides
 confidentiality, integrity, and host authentication.
 
+## Settings
+
+pi-teams reads its flags from the `piTeams` object in the pi
+agent-directory settings file, `<agent-dir>/settings.json`, where
+`<agent-dir>` is `$PI_CODING_AGENT_DIR` or `~/.pi/agent`. Project
+`.pi/settings.json` is not read. Every value resolves in this order:
+
+1. an explicit, non-empty environment variable;
+2. the `piTeams` value when present and valid;
+3. the built-in default.
+
+An injected constructor argument (used by tests) beats all three.
+`stallSeconds` and `gcWarnGraceSeconds` treat `0` as a real value, not
+"unset": 0 disables the stall nudge and reaps an idle fork at once.
+
+| Key | Default | Environment override |
+| --- | --- | --- |
+| `host` | short hostname | `PI_TEAMS_HOST` |
+| `stateDir` | `$XDG_STATE_HOME` or `~/.local/state`, then `/pi-teams` | `TEAM_ROOT` |
+| `binDir` | `~/.local/bin` | `PI_TEAMS_BIN` |
+| `sessionsRoot` | `<agent-dir>/sessions` | `PI_TEAMS_SESSIONS_ROOT`; legacy `PI_SESSIONS_ROOT` |
+| `forkIdleSeconds` | `300` | `PI_TEAMS_FORK_IDLE` |
+| `busyGraceSeconds` | `120` | `PI_TEAMS_BUSY_GRACE` |
+| `gcWarnGraceSeconds` | `60` | `PI_TEAMS_GC_WARN_GRACE`; legacy `PI_TEAMS_GC_PING_GRACE` |
+| `restartGraceSeconds` | `60` | `PI_TEAMS_RESTART_GRACE` |
+| `peerGraceSeconds` | `15` | `PI_TEAMS_PEER_GRACE` |
+| `sessionGraceSeconds` | `3600` | `PI_TEAMS_SESSION_GRACE` |
+| `sessionSweepIntervalSeconds` | `300` | `PI_TEAMS_SESSION_SWEEP_INTERVAL` |
+| `spawnWindowMs` | `15000` | `PI_TEAMS_SPAWN_WINDOW` |
+| `waitSeconds` | `300` | `PI_TEAMS_WAIT` |
+| `stallSeconds` | `90` | `PI_TEAMS_STALL` |
+| `ssh` | `ssh` | `PI_TEAMS_SSH` |
+| `remoteState` | `$HOME/.local/state/pi-teams` | `PI_TEAMS_REMOTE_STATE` |
+| `peerSetup` | bundled `peer-ssh-setup.sh` | `PI_TEAMS_PEER_SETUP` |
+
+A missing, unreadable, or malformed settings file, or a `piTeams`
+value that is not an object, is tolerated: the defaults above apply.
+
 ## Validation
 
 ```
@@ -176,6 +214,9 @@ never the system `/tmp`. It chains:
   context, the wait/steer/stall watchdog, inbox and pending-request
   ownership, member gating and same-team scoping, attach/notify
   flows, and peer-add failure guidance.
+- **Settings tests** (`settings_test.py`, plus the extension
+  settings cases) — settings values honored, env overrides, defaults,
+  zero semantics, and tolerance of a missing or invalid file.
 - **Broker protocol tests** (`broker_test.py`, `fork_test.py`,
   `attach_test.py`, `setup_script_test.py`) — handshake and token
   rejection, registry and relay, idle sweep and the idle-warning
