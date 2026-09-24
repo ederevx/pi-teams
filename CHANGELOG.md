@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.29 - 2026-09-24
+
+- Wake an active `team_wait` when a direct message arrives, so a
+  `team_send` from a teammate is steered to the agent instead of
+  sitting behind the blocked tool until the wait bound. Reports still
+  end the wait and are consumed once, and a notice still only resets
+  the stall clock.
+
 ## v0.4.28 - 2026-09-24
 
 - Make the broker's idle-restart policy cover every package source
