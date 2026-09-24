@@ -38,6 +38,20 @@ class StateGc:
             }
         self._sweep(files, live, now, self.busy_grace, self.root.base)
 
+    def gc_orphan_warning_files(self, now):
+        # An idle warning is broker-published; one whose agent is no
+        # longer registered and that is older than the grace is left
+        # over from a crashed broker and is removed here. A live
+        # warning is protected by its registered owner.
+        files = self.root.warning_files()
+        with self.lock:
+            live = {
+                str(self.root.warning_path(entry["id"]).resolve())
+                for entry in self.registry.values()
+                if entry.get("id")
+            }
+        self._sweep(files, live, now, self.busy_grace, self.root.base)
+
     def gc_orphan_session_files(self, now):
         # Every teammate is a pi session in /resume; remove
         # teammate-marked files neither live nor touched within the
