@@ -111,10 +111,6 @@ class PackageSettings:
                 or os.path.join(os.path.expanduser("~"), ".local", "state"),
                 "pi-teams")
 
-    def bin_dir(self):
-        return self.resolve("PI_TEAMS_BIN", "binDir", None, "path") \
-            or os.path.join(os.path.expanduser("~"), ".local", "bin")
-
     def sessions_root(self):
         # PI_SESSIONS_ROOT stays a legacy fallback for the extension's
         # old variable name.
@@ -154,18 +150,6 @@ class PackageSettings:
         return self.resolve(
             "PI_TEAMS_SESSION_SWEEP_INTERVAL",
             "sessionSweepIntervalSeconds", 300, "number")
-
-    def spawn_window_ms(self):
-        return self.resolve(
-            "PI_TEAMS_SPAWN_WINDOW", "spawnWindowMs", 15000, "number")
-
-    def wait_seconds(self):
-        return self.resolve(
-            "PI_TEAMS_WAIT", "waitSeconds", 300, "number")
-
-    def stall_seconds(self):
-        return self.resolve(
-            "PI_TEAMS_STALL", "stallSeconds", 90, "number")
 
     def ssh(self):
         return self.resolve("PI_TEAMS_SSH", "ssh", "ssh", "text")

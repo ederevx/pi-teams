@@ -171,6 +171,9 @@ agent-directory settings file, `<agent-dir>/settings.json`, where
 An injected constructor argument (used by tests) beats all three.
 `stallSeconds` and `gcWarnGraceSeconds` treat `0` as a real value, not
 "unset": 0 disables the stall nudge and reaps an idle fork at once.
+`forkIdleSeconds: 0` disables fork-idle GC entirely, while
+`sessionSweepIntervalSeconds` must stay positive (it drives the whole
+disk sweep).
 
 | Key | Default | Environment override |
 | --- | --- | --- |

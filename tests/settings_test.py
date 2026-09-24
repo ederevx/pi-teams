@@ -44,9 +44,6 @@ class DefaultTests(SettingsCase):
             s.state_dir(),
             os.path.join(os.path.expanduser("~"), ".local", "state",
                          "pi-teams"))
-        self.assertEqual(
-            s.bin_dir(), os.path.join(os.path.expanduser("~"), ".local",
-                                      "bin"))
         self.assertEqual(s.sessions_root(), str(self.agent / "sessions"))
         self.assertEqual(s.fork_idle(), 300)
         self.assertEqual(s.busy_grace(), 120)
@@ -55,9 +52,6 @@ class DefaultTests(SettingsCase):
         self.assertEqual(s.peer_grace(), 15)
         self.assertEqual(s.session_grace(), 3600)
         self.assertEqual(s.session_sweep_interval(), 300)
-        self.assertEqual(s.spawn_window_ms(), 15000)
-        self.assertEqual(s.wait_seconds(), 300)
-        self.assertEqual(s.stall_seconds(), 90)
         self.assertEqual(s.ssh(), "ssh")
         self.assertIsNone(s.remote_state())
         self.assertIsNone(s.peer_setup())
@@ -91,7 +85,6 @@ class SettingsValueTests(SettingsCase):
         s = self.settings()
         self.assertEqual(s.host(), "file-host")
         self.assertEqual(s.state_dir(), "/file/state")
-        self.assertEqual(s.bin_dir(), "/file/bin")
         self.assertEqual(s.sessions_root(), "/file/sessions")
         self.assertEqual(s.fork_idle(), 11)
         self.assertEqual(s.busy_grace(), 22)
@@ -100,9 +93,6 @@ class SettingsValueTests(SettingsCase):
         self.assertEqual(s.peer_grace(), 55)
         self.assertEqual(s.session_grace(), 66)
         self.assertEqual(s.session_sweep_interval(), 77)
-        self.assertEqual(s.spawn_window_ms(), 88)
-        self.assertEqual(s.wait_seconds(), 99)
-        self.assertEqual(s.stall_seconds(), 101)
         self.assertEqual(s.ssh(), "file-ssh")
         self.assertEqual(s.remote_state(), "/file/remote")
         self.assertEqual(s.peer_setup(), "/file/setup")
@@ -154,12 +144,6 @@ class ToleranceTests(SettingsCase):
 
 
 class ZeroSemanticsTests(SettingsCase):
-    def test_stall_zero_from_settings_and_env(self):
-        self.write_settings({"piTeams": {"stallSeconds": 0}})
-        self.assertEqual(self.settings().stall_seconds(), 0)
-        self.assertEqual(
-            self.settings({"PI_TEAMS_STALL": "0"}).stall_seconds(), 0)
-
     def test_gc_warn_zero_from_settings_and_env(self):
         self.write_settings({"piTeams": {"gcWarnGraceSeconds": 0}})
         self.assertEqual(self.settings().gc_warn_grace(), 0)

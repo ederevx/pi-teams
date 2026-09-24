@@ -31,8 +31,18 @@ class IdleWarnings:
     def path(self, agent_id):
         return self.root.warning_path(agent_id)
 
+    def exists(self, agent_id):
+        # Whether the warning file is present at all: a known id whose
+        # file is gone was answered, a corrupt file is present and gets
+        # replaced by the next warn.
+        try:
+            return self.path(agent_id).exists()
+        except OSError:
+            return False
+
     def record(self, agent_id):
-        # The on-disk warning, or None once the teammate deleted it.
+        # The on-disk warning, or None once the teammate deleted it (or
+        # the file is unreadable).
         return self.root.read_warning(agent_id)
 
     @property
@@ -40,12 +50,20 @@ class IdleWarnings:
         return set(self._known)
 
     def warn(self, agent_id, why, now=None):
-        # Writes the timestamped warning file and remembers the id.
+        # Writes the timestamped warning file and remembers the id only
+        # when the write actually landed: a failed write must not look
+        # like an answered warning on the next sweep. Returns whether
+        # the file is in place.
         ts = self._now(now)
-        self.root.write_warning(
-            agent_id, {"id": agent_id, "why": why, "ts": ts})
-        self._known.add(agent_id)
-        return ts
+        try:
+            written = bool(
+                self.root.write_warning(
+                    agent_id, {"id": agent_id, "why": why, "ts": ts}))
+        except OSError:
+            written = False
+        if written:
+            self._known.add(agent_id)
+        return written
 
     def is_open(self, agent_id, now=None):
         # A present, young warning spares the agent from this sweep.
