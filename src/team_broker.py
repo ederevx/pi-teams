@@ -684,8 +684,9 @@ class TeamBroker:
             return
         # An idle fork is asked whether it is done before reaping;
         # only silence (or a done answer) past the grace proceeds. A
-        # parent-gone fork is not asked: a continue answer would have
-        # no one to return to.
+        # parent-gone fork with a live connection is asked too: its own
+        # agent answers, and a working answer spares it until the next
+        # sweep re-dooms and re-asks it.
         asked = self._ask_idle_forks(doomed_fork, now)
         for agent_id, why in doomed_fork:
             if agent_id in asked:
@@ -697,15 +698,16 @@ class TeamBroker:
         self._persist_and_notify()
 
     def _ask_idle_forks(self, doomed_fork, now):
-        # Sends a finish query to each work-idle fork and marks it
-        # outstanding; returns the ids spared this sweep (answer
-        # window open). Parent-gone forks are never asked.
+        # Sends a finish query to each doomed fork that still holds a
+        # live connection and marks it outstanding; returns the ids
+        # spared this sweep (answer window open). A parent-gone fork is
+        # asked like an idle one: the answer comes from the fork's own
+        # agent, not from its gone parent.
         asked = set()
         if not self._finish_queries.enabled:
             return asked
         for agent_id, why in doomed_fork:
-            if why != "idle-gc" or \
-                    agent_id in self._finish_queries.ids():
+            if agent_id in self._finish_queries.ids():
                 continue
             entry = self._registry.get(agent_id)
             if entry is None:
@@ -714,7 +716,7 @@ class TeamBroker:
             if conn is None:
                 continue
             self._write(conn, self._envelope(
-                "*", "finish?", {"id": agent_id, "why": "idle-gc"}))
+                "*", "finish?", {"id": agent_id, "why": why}))
             self._finish_queries.open(agent_id, now)
         for agent_id in self._finish_queries.ids():
             if self._finish_queries.is_open(agent_id, now):
