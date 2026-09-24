@@ -33,6 +33,7 @@ import {
 } from "./spawn.ts";
 import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
+import { InterruptGate } from "./interrupt.ts";
 import {
 	mintSendToken,
 	requestId,
@@ -44,6 +45,9 @@ import { TEAM_ROLE_PROMPT } from "./roles.ts";
 export class TeamAgent {
 	private readonly runner: ProcessHost;
 	private readonly deliver: DeliverFn;
+	// Preempts a running turn for an urgent control message and holds
+	// it until the settle, so a blocked tool cannot swallow it.
+	private readonly interrupts: InterruptGate;
 	private readonly python: string;
 	private readonly windowless: InterpreterResolver;
 	id: string = "";
@@ -91,6 +95,7 @@ export class TeamAgent {
 	) {
 		this.runner = runner;
 		this.deliver = deliver;
+		this.interrupts = new InterruptGate(deliver);
 		this.python = resolvePython();
 		this.windowless = windowlessFactory(this.python);
 		this.host = settings.host();
@@ -374,9 +379,10 @@ export class TeamAgent {
 		if (message.kind === "idle-warning") {
 			// The broker left a warning file and will reap this session
 			// at its next idle-GC poll unless the file is deleted. The
-			// warning is surfaced to the agent with the delete
-			// instruction; the hold deletes it itself while busy.
-			this.deliver(this.idleWarning(message));
+			// warning preempts a running turn so a blocked tool returns
+			// and the delete instruction is actually read; an idle
+			// session has nothing to preempt and gets it at once.
+			this.interrupts.request(this.idleWarning(message));
 			return;
 		}
 		if (message.kind === "attach") {
@@ -421,6 +427,18 @@ export class TeamAgent {
 				`as consent and the session is reaped. Deleting the file ` +
 				`tells the broker you are still working.`,
 		};
+	}
+
+	/** Binds the session abort/idle probes an idle warning preempts
+	 *  with; captured once per session from the ExtensionContext. */
+	bindInterrupt(abort: () => void, isIdle: () => boolean): void {
+		this.interrupts.bind(abort, isIdle);
+	}
+
+	/** Opens the next turn for warnings held across an abort; called
+	 *  from the agent_settled event so the agent answers the warning. */
+	surfaceInterrupts(): void {
+		this.interrupts.settle();
 	}
 
 	stopHold(): void {

@@ -87,14 +87,16 @@ signalled, never main agents.
 - **Idle GC**: with no work contact for `PI_TEAMS_FORK_IDLE`
   (default 300s), the broker warns before it kills. It leaves the
   teammate a timestamped warning file under the team root
-  (`<id>.warn`) and steers it to delete the file. The fork is spared
-  while `PI_TEAMS_GC_WARN_GRACE` (default 60s; 0 reaps immediately)
-  is open; deleting the file is the working answer and resets the
-  idle clock, while leaving it past the grace reaps the fork. A
-  busy or waiting hold deletes the file itself. A parent-gone fork
-  is warned the same way and reaped when the warning goes
-  unanswered. (`PI_TEAMS_GC_PING_GRACE` is still read as a legacy
-  fallback.)
+  (`<id>.warn`) and steers it to delete the file. A running
+  teammate is interrupted at once — its turn aborted so a tool
+  blocked on it returns — and the warning then opens its own turn.
+  The fork is spared while `PI_TEAMS_GC_WARN_GRACE` (default 60s; 0
+  reaps immediately) is open; deleting the file is the working
+  answer and resets the idle clock, while leaving it past the grace
+  reaps the fork. A busy or waiting hold deletes the file itself. A
+  parent-gone fork is warned the same way and reaped when the
+  warning goes unanswered. (`PI_TEAMS_GC_PING_GRACE` is still read
+  as a legacy fallback.)
 - **Work keeps forks alive**: pi's lifecycle publishes busy state
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends

@@ -437,6 +437,10 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		app.ensureBroker();
+		// The runner binds abort/isIdle once per session; the idle
+		// warning needs both to preempt a blocked turn and then open
+		// the fresh turn that answers the reap warning.
+		app.bindInterrupt(() => ctx.abort(), () => ctx.isIdle());
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		app.rememberSession(sessionFile);
 		app.hold(ctx.cwd);
@@ -449,6 +453,9 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async () => {
 		app.setBusy(false);
+		// A warning held across the abort opens its own turn here, so
+		// the agent sees it and deletes the file before the grace ends.
+		app.surfaceInterrupts();
 	});
 
 	pi.on("before_agent_start", async (event, _ctx) => {
