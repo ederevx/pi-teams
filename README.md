@@ -68,16 +68,20 @@ natively, without a shared filesystem as the channel.
 ### team_wait and the hang watchdog
 
 - The wait ends on the first report; other ids keep running and their
-  later reports arrive as ordinary messages. Escape or a queued user
-  message ends it early; the bound is `timeout`, `PI_TEAMS_WAIT`, or
-  300s. A report not consumed still arrives as a message.
+  later reports arrive as ordinary messages. A direct message that
+  arrives while waiting also ends it: the message is then steered to
+  the agent instead of sitting behind the blocked tool. Escape and a
+  queued user message end it early too; the bound is `timeout`,
+  `PI_TEAMS_WAIT`, or 300s. A report not consumed still arrives as a
+  message.
 - While waiting, the agent publishes `waiting`, which exempts a fork
   from idle GC.
 - A teammate silent past the stall bound (`stall` parameter,
   `PI_TEAMS_STALL`, default 90s; 0 disables) looks hung: the wait
-  itself sends it a continue-or-report steer once per teammate. Any
-  traffic from the teammate — not only a final report — resets the
-  stall clock, so a working teammate is never nudged.
+  itself sends it a continue-or-report steer once per teammate. A
+  notice from the teammate (its session announcement) resets the stall
+  clock without waking the wait, so a just-announced teammate is not
+  nudged.
 
 ### Fork lifetime and GC
 

@@ -186,8 +186,9 @@ export default async function (pi: ExtensionAPI) {
 			"Wait for teammates to report; returns on the first report " +
 			"(details lists remaining ids, which keep running and " +
 			"report as messages). While waiting the agent stays " +
-			"interruptible, yields early on a queued message, and the " +
-			"call shows live elapsed/pending status. A teammate silent " +
+			"interruptible, yields early on a queued or direct " +
+			"message, and the call shows live elapsed/pending status. " +
+			"A teammate silent " +
 			`past the stall bound is nudged once (PI_TEAMS_STALL or ` +
 			`${DEFAULT_STALL_SECONDS}s; 0 disables). Requires team ` +
 			"membership; ids come from team_spawn or team_attach.",
@@ -253,7 +254,7 @@ export default async function (pi: ExtensionAPI) {
 				// the wait itself sends the continue-or-report steer, once
 				// per teammate, instead of blocking silently forever.
 				const stallMs = stallSeconds(params.stall) * 1000;
-				const results = await app.waitForResults(
+				const { results, interruptedBy } = await app.waitForResults(
 					targetIds, bound * 1000, signal,
 					() => ctx.hasPendingMessages(), updateStatus, stallMs);
 				const reports = results.filter(
@@ -266,14 +267,22 @@ export default async function (pi: ExtensionAPI) {
 				const remaining = targetIds.filter((_id, index) =>
 					results[index] === null);
 				if (reports.length === 0) {
+					// A direct message wakes the wait so it can steer the
+					// agent; the message itself follows as a steering
+					// message, so the tool result only names the wake.
+					const text = interruptedBy
+						? `pi-teams: wait for ${targetIds.join(", ")} ` +
+							`yielded to a ${interruptedBy.kind} from ` +
+							`${interruptedBy.from}; the message follows. ` +
+							`Still waiting on ${remaining.join(", ")}; ` +
+							`re-call team_wait with those ids to block again.`
+						: `pi-teams: no result from ` +
+							`${targetIds.join(", ")} within ${bound}s; ` +
+							`still running, and each will report as a message.`;
 					return {
-						content: [{
-							type: "text",
-							text: `pi-teams: no result from ` +
-								`${targetIds.join(", ")} within ${bound}s; ` +
-								`still running, and each will report as a message.`,
-						}],
-						details: { ids: targetIds, reports: [], remaining },
+						content: [{ type: "text", text }],
+						details: { ids: targetIds, reports: [], remaining,
+							interruptedBy },
 					};
 				}
 				const text = reports.map(formatReport).join("\n\n") +
@@ -283,7 +292,8 @@ export default async function (pi: ExtensionAPI) {
 						: "");
 				return {
 					content: [{ type: "text", text }],
-					details: { ids: targetIds, reports, remaining },
+					details: { ids: targetIds, reports, remaining,
+						interruptedBy },
 				};
 			} finally {
 				app.setBusy(true);

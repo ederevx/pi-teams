@@ -1,7 +1,7 @@
 /**
  * Active team_wait ownership: the result poll, the once-per-wait stall
- * nudge, and the contact hook. All wait timers and watchers live here,
- * so an ended wait can never leak them.
+ * nudge, the contact hook, and the direct-message wake. All wait timers
+ * and watchers live here, so an ended wait can never leak them.
  */
 
 import type { TeamMessage } from "./protocol.ts";
@@ -18,6 +18,14 @@ type SendFn = (
 	to: string, kind: string, text: string,
 ) => Promise<unknown>;
 
+/** One wait's outcome: the reports aligned to the requested ids (null
+ *  when an id never reported) and the direct message that ended the
+ *  wait early, if any. */
+export interface WaitOutcome {
+	results: Array<TeamMessage | null>;
+	interruptedBy: TeamMessage | null;
+}
+
 /** One agent's active team_wait polls and their stall watchdog. */
 export class WaitController {
 	private readonly inbox: ResultInbox;
@@ -26,6 +34,9 @@ export class WaitController {
 	/** Contact from a blocked-on teammate (any traffic counts as
 	 *  life); registered per wait, always removed. */
 	private activityHook: ((from: string) => void) | null = null;
+	/** A direct message that ends the active wait so it cannot sit
+	 *  behind the blocked tool; registered per wait, always removed. */
+	private messageHook: ((message: TeamMessage) => void) | null = null;
 
 	constructor(
 		inbox: ResultInbox,
@@ -40,6 +51,13 @@ export class WaitController {
 	/** Feeds one teammate contact into the watchdog clock. */
 	onContact(from: string): void {
 		if (this.activityHook) this.activityHook(from);
+	}
+
+	/** Ends the active wait when a direct message arrives, so the
+	 *  message is steered now instead of waiting behind the blocked
+	 *  tool. */
+	onMessage(message: TeamMessage): void {
+		if (this.messageHook) this.messageHook(message);
 	}
 
 	/** Nudges each pending teammate past the stall bound (once per
@@ -62,10 +80,11 @@ export class WaitController {
 		}
 	}
 
-	/** Waits for teammates' results: returns on the first result, the
-	 *  bound, an abort, a queued user message, or deregistration; the
-	 *  other ids keep running and report later. All timers and
-	 *  watchers release before resolve; null when unreported. */
+	/** Waits for teammates' results: returns on the first result, a
+	 *  direct message that wakes the wait, the bound, an abort, a
+	 *  queued user message, or deregistration; the other ids keep
+	 *  running and report later. All timers and watchers release before
+	 *  resolve; a null report means the id never reported. */
 	async waitForResults(
 		agentIds: string[],
 		timeoutMs: number,
@@ -73,7 +92,7 @@ export class WaitController {
 		shouldYield: () => boolean,
 		onTick?: () => void,
 		stallMs = DEFAULT_STALL_SECONDS * 1000,
-	): Promise<Array<TeamMessage | null>> {
+	): Promise<WaitOutcome> {
 		const results = new Map<string, TeamMessage>();
 		const pending: string[] = [];
 		for (const id of agentIds) {
@@ -81,6 +100,7 @@ export class WaitController {
 			if (buffered) results.set(id, buffered);
 			else pending.push(id);
 		}
+		let interruptedBy: TeamMessage | null = null;
 		// A buffered report already satisfies the first-result trigger.
 		const canWait = results.size === 0 && pending.length > 0
 			&& !this.isClosed() && !signal?.aborted && !shouldYield();
@@ -98,11 +118,11 @@ export class WaitController {
 				const onActivity = (from: string): void => {
 					if (watching.has(from)) lastActivity = Date.now();
 				};
-				this.activityHook = onActivity;
 				const finish = (): void => {
 					if (settled) return;
 					settled = true;
 					this.activityHook = null;
+					this.messageHook = null;
 					if (timer) clearTimeout(timer);
 					if (poll) clearInterval(poll);
 					signal?.removeEventListener("abort", onAbort);
@@ -110,6 +130,12 @@ export class WaitController {
 					resolve();
 				};
 				const onAbort = (): void => finish();
+				const onMessage = (message: TeamMessage): void => {
+					interruptedBy = message;
+					finish();
+				};
+				this.activityHook = onActivity;
+				this.messageHook = onMessage;
 				for (const id of pending) {
 					const unwatch = this.inbox.watch(id, (message) => {
 						lastActivity = Date.now();
@@ -143,6 +169,9 @@ export class WaitController {
 				}
 			});
 		}
-		return agentIds.map((id) => results.get(id) ?? null);
+		return {
+			results: agentIds.map((id) => results.get(id) ?? null),
+			interruptedBy,
+		};
 	}
 }
