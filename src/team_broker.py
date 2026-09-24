@@ -144,12 +144,18 @@ class TeamBroker:
         self._server = None
 
     def _source_version(self):
-        # Hash the running file: the stamp reflects the installed code.
+        # Hash every package source file, not just this one: the
+        # broker's liveness windows come from settings.py, and a change
+        # there must trigger the same idle-restart adoption as a change
+        # to this module.
+        digest = hashlib.sha256()
         try:
-            with open(__file__, "rb") as fh:
-                return hashlib.sha256(fh.read()).hexdigest()[:16]
+            for path in sorted(pathlib.Path(__file__).parent.glob("*.py")):
+                with open(path, "rb") as fh:
+                    digest.update(fh.read())
         except OSError:
             return ""
+        return digest.hexdigest()[:16]
 
     # -- broker lock -------------------------------------------------
 
