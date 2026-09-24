@@ -518,25 +518,29 @@ test("requireSameTeam is team-scoped for a teammate", async () => {
 	agent.stopHold();
 });
 
-test("a finish query is surfaced to the agent, not auto-answered", async () => {
+test("an idle warning steers the agent to delete its file", async () => {
 	const delivered = [];
 	const { calls, runner } = makeRunner(() =>
 		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
 	const agent = new TeamAgent(runner, (m) => delivered.push(m));
 	agent.deliverMessage(JSON.stringify({
 		op: "message", id: "f1", from: "*", to: "parent-1",
-		kind: "finish?", payload: { id: "parent-1", why: "parent-gone" },
+		kind: "idle-warning",
+		payload: {
+			id: "parent-1", why: "parent-gone",
+			file: "/state/pi-teams/parent-1.warn", grace: 60,
+		},
 		ts: 1,
 	}));
-	// The question steers a turn; no CLI finish runs on the agent's
-	// behalf, so only the agent's own answer reaps or spares it.
-	assert.equal(calls.length, 0, "finish query was answered automatically");
+	// The warning steers a turn; no CLI finish or delete runs on the
+	// agent's behalf, so only the agent deleting the file spares it.
+	assert.equal(calls.length, 0, "idle warning was answered automatically");
 	assert.equal(delivered.length, 1);
 	const text = String(delivered[0].payload);
 	assert.match(text, /parent-gone/);
-	assert.match(text, /team finish --done/);
-	assert.match(text, /team finish`/);
-	assert.match(text, /grace window/);
+	assert.match(text, /\/state\/pi-teams\/parent-1\.warn/);
+	assert.match(text, /delete/i);
+	assert.match(text, /60s/);
 });
 
 test("deliverMessage filters a redelivered envelope id", async () => {

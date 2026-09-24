@@ -2,7 +2,7 @@
 """team - the pi-teams client entry point.
 
 Composes the client from TeamClient and exposes the CLI: register, ls,
-send, follow, hold, terminate, finish, deregister, and peer add/remove.
+send, follow, hold, terminate, deregister, and peer add/remove.
 Teammates are spawned only by the extension's structured team_spawn
 tool, never by an arbitrary client command. The CLI takes no routing
 logic of its own; it only parses arguments and drives TeamClient.
@@ -70,9 +70,6 @@ class ClientCli:
         p_term = sub.add_parser("terminate")
         p_term.add_argument("to")
         p_term.add_argument("why", nargs="?", default="requested")
-        p_finish = sub.add_parser("finish")
-        p_finish.add_argument("--done", action="store_true",
-                              help="answer that this agent is finished")
         p_peer = sub.add_parser("peer")
         peer_sub = p_peer.add_subparsers(dest="action")
         p_peer_add = peer_sub.add_parser("add")
@@ -105,8 +102,6 @@ class ClientCli:
             )))
         elif args.command == "terminate":
             print(json.dumps(client.terminate(args.to, args.why)))
-        elif args.command == "finish":
-            print(json.dumps(client.answer_finish(args.done)))
         elif args.command == "peer":
             if args.action == "add":
                 label = args.label or args.ssh

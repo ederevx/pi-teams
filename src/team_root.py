@@ -9,6 +9,7 @@ layout); no runtime state, no threads.
 import json
 import os
 import pathlib
+import re
 import secrets
 import time
 
@@ -18,6 +19,7 @@ REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"
 PEERS_NAME = "peers.json"
 BUSY_SUFFIX = ".busy"
+WARNING_SUFFIX = ".warn"
 # The extension's spawn prompt marks a forked teammate session; the
 # broker tells teammate sessions from a user's own by it. Keep in sync
 # with taskPrompt() in extensions/pi-teams.ts.
@@ -123,6 +125,41 @@ class TeamRoot:
         path = (entry or {}).get("busy_file")
         if path:
             self.unlink_under(path, self.base)
+
+    # -- idle warning files ------------------------------------------
+
+    def warning_path(self, agent_id):
+        return self.base / (self.safe_component(agent_id) + WARNING_SUFFIX)
+
+    def warning_files(self):
+        # A failed scan yields nothing to sweep rather than failing the
+        # whole liveness pass.
+        try:
+            return list(self.base.glob("*" + WARNING_SUFFIX))
+        except OSError:
+            return []
+
+    def write_warning(self, agent_id, record):
+        self.write_atomic(self.safe_component(agent_id) + WARNING_SUFFIX,
+                          json.dumps(record) + "\n", mode=0o600)
+
+    def read_warning(self, agent_id):
+        try:
+            data = json.loads(
+                self.warning_path(agent_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def remove_warning(self, agent_id):
+        self.unlink_under(self.warning_path(agent_id), self.base)
+
+    @staticmethod
+    def safe_component(agent_id):
+        # A host-qualified id carries a colon, illegal in a Windows
+        # filename; the extension sanitizes busy-file names the same
+        # way, so both live side by side under one root.
+        return re.sub(r"[^A-Za-z0-9._-]", "-", str(agent_id or "agent"))
 
     def unlink_under(self, path, root):
         # Guard a delete to the root that owns the file; a path outside it

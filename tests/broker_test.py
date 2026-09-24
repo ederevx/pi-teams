@@ -580,12 +580,12 @@ class BrokerProtocolTests(unittest.TestCase):
         thread.join(timeout=3)
         shutil.rmtree(root, ignore_errors=True)
 
-    def test_idle_fork_is_asked_before_reap_and_spared(self):
-        # The courtesy query: an idle fork is asked whether it is done
-        # and survives while its answer window is open.
+    def test_idle_fork_is_warned_before_reap_and_spared(self):
+        # The courtesy warning: an idle fork gets a timestamped warning
+        # file and survives while that file is young.
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_ping_grace=1.5)
+                            sweep_interval=0.1, gc_warn_grace=1.5)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -606,20 +606,24 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.owner_pid = str(dummy.pid)
             fork.send_token = "st-7"
             fork.register()
-            # Past the fork-idle window the query is sent and the fork
-            # stays registered well past the fork-idle grace.
+            # Past the fork-idle window the warning file is left and the
+            # fork stays registered well past the fork-idle grace.
             self.assertTrue(
                 wait_until(
-                    lambda: "fork-query" in broker._finish_queries.ids(),
+                    lambda: "fork-query" in broker._idle_warnings.known_ids,
                     timeout=3),
-                "idle fork was never asked whether it is done",
+                "idle fork was never warned with a warning file",
+            )
+            self.assertTrue(
+                broker._idle_warnings.path("fork-query").exists(),
+                "idle warning file was not written",
             )
             time.sleep(1.0)
             self.assertIn("fork-query", self._ids_via(root),
-                          "queried fork was reaped inside its grace")
+                          "warned fork was reaped inside its grace")
             self.assertIsNone(dummy.poll(),
-                              "queried fork's owner was signalled early")
-            # Silence past the grace proceeds to the reap.
+                              "warned fork's owner was signalled early")
+            # Leaving the file past the grace proceeds to the reap.
             self.assertTrue(
                 wait_until(lambda: dummy.poll() is not None, timeout=8),
                 "idle fork's owner was never garbage-collected",
@@ -638,10 +642,10 @@ class BrokerProtocolTests(unittest.TestCase):
             dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_finish_yes_resets_the_idle_clock(self):
+    def test_deleting_warning_resets_the_idle_clock(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_ping_grace=1.0)
+                            sweep_interval=0.1, gc_warn_grace=1.0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -664,15 +668,20 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertTrue(
                 wait_until(lambda: "fork-yes" in self._ids_via(root)),
             )
-            time.sleep(0.6)
-            # The agent answers that it is still working: the query
-            # closes and the fork gets a fresh idle window.
-            fork.send_msg("*", "finish-yes", {"id": "fork-yes"})
+            self.assertTrue(
+                wait_until(
+                    lambda: "fork-yes" in broker._idle_warnings.known_ids,
+                    timeout=3),
+                "idle fork was never warned",
+            )
+            # The teammate deletes the warning file: still working, so
+            # the broker resets the idle clock.
+            os.unlink(str(broker._idle_warnings.path("fork-yes")))
             time.sleep(0.3)
             self.assertIn("fork-yes", self._ids_via(root),
-                          "finish-yes did not spare the fork")
+                          "deleted warning did not spare the fork")
             self.assertIsNone(dummy.poll(),
-                              "finish-yes still led to a signal")
+                              "deleted warning still led to a signal")
         finally:
             broker.stop()
             thread.join(timeout=3)
@@ -683,10 +692,10 @@ class BrokerProtocolTests(unittest.TestCase):
             dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_finish_no_reaps_at_once(self):
+    def test_warning_file_carries_timestamp_and_why(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_ping_grace=5.0)
+                            sweep_interval=0.1, gc_warn_grace=5.0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -706,16 +715,21 @@ class BrokerProtocolTests(unittest.TestCase):
             fork.owner_pid = str(dummy.pid)
             fork.send_token = "st-11"
             fork.register()
-            time.sleep(0.5)
-            # The agent answers that it is done: no grace is awaited.
-            fork.send_msg("*", "finish-no", {"id": "fork-no"})
             self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=5),
-                "finish-no did not reap the finished fork",
+                wait_until(
+                    lambda: "fork-no" in broker._idle_warnings.known_ids,
+                    timeout=3),
+                "idle fork was never warned",
             )
-            self.assertTrue(
-                wait_until(lambda: "fork-no" not in self._ids_via(root)),
-            )
+            record = broker._idle_warnings.record("fork-no")
+            self.assertIsInstance(record, dict)
+            self.assertEqual(record.get("id"), "fork-no")
+            self.assertEqual(record.get("why"), "idle-gc")
+            self.assertIsInstance(record.get("ts"), (int, float))
+            # The file is young, so the fork is spared for now.
+            self.assertIn("fork-no", self._ids_via(root))
+            self.assertIsNone(dummy.poll(),
+                              "young warning still led to a signal")
         finally:
             broker.stop()
             thread.join(timeout=3)
@@ -726,15 +740,15 @@ class BrokerProtocolTests(unittest.TestCase):
             dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_parent_gone_fork_is_asked_and_answered(self):
-        # A parent-gone fork with a live connection is asked like an
-        # idle one: its own agent answers, not its gone parent. A
-        # working answer spares it (re-doomed and re-asked next
-        # cycle); a done answer reaps it at once.
+    def test_parent_gone_fork_is_warned_and_answered(self):
+        # A parent-gone fork with a live connection is warned like an
+        # idle one: its own agent deletes the warning, not its gone
+        # parent. A deleted file spares it and it is re-warned on the
+        # next cycle; leaving the file past the grace reaps it.
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             fork_idle=IDLE_ROOMY, sweep_interval=0.1,
-                            gc_ping_grace=3.0)
+                            gc_warn_grace=1.5)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -759,33 +773,33 @@ class BrokerProtocolTests(unittest.TestCase):
                 wait_until(lambda: "fork-pg" in self._ids_via(root)),
             )
             # The parent's connection drops: the fork is doomed as
-            # parent-gone but asked, since its own agent can answer.
+            # parent-gone and warned, since its own agent can answer.
             parent.close()
             self.assertTrue(
                 wait_until(
-                    lambda: "fork-pg" in broker._finish_queries.ids(),
+                    lambda: "fork-pg" in broker._idle_warnings.known_ids,
                     timeout=3),
-                "parent-gone fork was never asked whether it is done",
+                "parent-gone fork was never warned",
             )
-            # The fork's agent answers that it is still working:
-            # spared past the grace and re-asked on the next sweep.
-            fork.send_msg("*", "finish-yes", {"id": "fork-pg"})
-            time.sleep(1.2)
-            self.assertIn("fork-pg", self._ids_via(root),
-                          "working answer did not spare the fork")
-            self.assertIsNone(dummy.poll(),
-                              "spared fork's owner was signalled")
+            reason = (broker._idle_warnings.record("fork-pg") or {}).get("why")
+            self.assertEqual(reason, "parent-gone")
+            # The fork's agent deletes the warning: spared, then
+            # warned again on the next cycle while the parent is gone.
+            os.unlink(str(broker._idle_warnings.path("fork-pg")))
             self.assertTrue(
                 wait_until(
-                    lambda: "fork-pg" in broker._finish_queries.ids(),
+                    lambda: "fork-pg" in broker._idle_warnings.known_ids,
                     timeout=3),
-                "spared fork was not re-asked on the next cycle",
+                "spared fork was not re-warned on the next cycle",
             )
-            # The done answer reaps at once, without awaiting grace.
-            fork.send_msg("*", "finish-no", {"id": "fork-pg"})
+            self.assertIn("fork-pg", self._ids_via(root),
+                          "re-warned fork was not spared")
+            self.assertIsNone(dummy.poll(),
+                              "spared fork's owner was signalled")
+            # Leaving the second warning in place reaps after grace.
             self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=5),
-                "finish-no did not reap the parent-gone fork",
+                wait_until(lambda: dummy.poll() is not None, timeout=8),
+                "unanswered warning did not reap the parent-gone fork",
             )
         finally:
             broker.stop()
@@ -800,7 +814,7 @@ class BrokerProtocolTests(unittest.TestCase):
     def test_fork_idle_gc_kills_owner(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_ping_grace=0)
+                            sweep_interval=0.1, gc_warn_grace=0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -841,7 +855,7 @@ class BrokerProtocolTests(unittest.TestCase):
     def test_busy_ping_keeps_fork_alive(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.5,
-                            sweep_interval=0.1, gc_ping_grace=0)
+                            sweep_interval=0.1, gc_warn_grace=0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -892,7 +906,7 @@ class BrokerProtocolTests(unittest.TestCase):
     def test_waiting_fork_survives_idle_gc(self):
         root = make_root()
         broker = TeamBroker(root, idle_timeout=2.0, fork_idle=0.5,
-                            sweep_interval=0.1, gc_ping_grace=0)
+                            sweep_interval=0.1, gc_warn_grace=0)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         dummy = subprocess.Popen(
@@ -940,13 +954,13 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def _start_broker(self, root, host, tunnel_factory=None,
-                      gc_ping_grace=None):
+                      gc_warn_grace=None):
         sessions = os.path.join(root, "sessions")
         os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             sweep_interval=0.1, host=host,
                             peer_grace=0.3, sessions_root=sessions,
-                            session_grace=0.3, gc_ping_grace=gc_ping_grace,
+                            session_grace=0.3, gc_warn_grace=gc_warn_grace,
                             tunnel_factory=tunnel_factory)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
@@ -1190,7 +1204,7 @@ class BrokerProtocolTests(unittest.TestCase):
         # short grace keeps this reap-timing test quick while still
         # exercising the silence-past-grace path.
         broker_b, thread_b = self._start_broker(root_b, "beta",
-                                                gc_ping_grace=0.5)
+                                                gc_warn_grace=0.5)
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import os, time; time.sleep(60)"])
         try:
