@@ -270,7 +270,7 @@ class ForkLifecycleTests(unittest.TestCase):
         # lands once the grace on the warning expires. A short grace
         # keeps the test quick.
         stop_broker(self.root, self.proc)
-        os.environ["PI_TEAMS_GC_WARN_GRACE"] = "0.5"
+        os.environ["PI_TEAMS_GC_WARN_HOURS"] = "0.0002"
         try:
             self.proc = start_broker(self.root, idle_timeout=15.0)
             parent = self._parent("parent-2")
@@ -289,7 +289,7 @@ class ForkLifecycleTests(unittest.TestCase):
                 child.kill()
                 child.wait(timeout=5)
         finally:
-            os.environ.pop("PI_TEAMS_GC_WARN_GRACE", None)
+            os.environ.pop("PI_TEAMS_GC_WARN_HOURS", None)
 
     def test_explicit_terminate(self):
         parent = self._parent("parent-3")

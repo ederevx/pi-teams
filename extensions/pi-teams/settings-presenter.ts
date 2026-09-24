@@ -142,26 +142,26 @@ export class TeamSettingsPresenter {
 				value: s.stateDir(),
 			},
 			{
-				id: "forkIdleSeconds", label: "Fork idle", kind: "number",
-				key: "forkIdleSeconds", env: ["PI_TEAMS_FORK_IDLE"],
-				description: "Work-idle seconds before the broker warns a " +
+				id: "forkIdleHours", label: "Fork idle (h)", kind: "number",
+				key: "forkIdleHours", env: ["PI_TEAMS_FORK_IDLE_HOURS"],
+				description: "Work-idle hours before the broker warns a " +
 					"fork; 0 disables fork-idle GC.",
-				value: String(s.forkIdleSeconds()),
+				value: String(s.forkIdleHours()),
 			},
 			{
-				id: "busyGraceSeconds", label: "Busy grace", kind: "number",
-				key: "busyGraceSeconds", env: ["PI_TEAMS_BUSY_GRACE"],
-				description: "Seconds a stale .busy file may outlive its " +
+				id: "busyGraceHours", label: "Busy grace (h)", kind: "number",
+				key: "busyGraceHours", env: ["PI_TEAMS_BUSY_GRACE_HOURS"],
+				description: "Hours a stale .busy file may outlive its " +
 					"agent.",
-				value: String(s.busyGraceSeconds()),
+				value: String(s.busyGraceHours()),
 			},
 			{
-				id: "gcWarnGraceSeconds", label: "GC warning grace",
-				kind: "number", key: "gcWarnGraceSeconds",
-				env: ["PI_TEAMS_GC_WARN_GRACE", "PI_TEAMS_GC_PING_GRACE"],
-				description: "Seconds a fork has to answer an idle warning " +
+				id: "gcWarnGraceHours", label: "GC warning grace (h)",
+				kind: "number", key: "gcWarnGraceHours",
+				env: ["PI_TEAMS_GC_WARN_HOURS"],
+				description: "Hours a fork has to answer an idle warning " +
 					"before it is reaped.",
-				value: String(s.gcWarnGraceSeconds()),
+				value: String(s.gcWarnGraceHours()),
 			},
 			{
 				id: "restartGraceSeconds", label: "Restart grace",
@@ -179,12 +179,12 @@ export class TeamSettingsPresenter {
 				value: String(s.peerGraceSeconds()),
 			},
 			{
-				id: "sessionGraceSeconds", label: "Session grace",
-				kind: "number", key: "sessionGraceSeconds",
-				env: ["PI_TEAMS_SESSION_GRACE"],
-				description: "Age past which a dead teammate's transcript " +
-					"is deleted, in seconds.",
-				value: String(s.sessionGraceSeconds()),
+				id: "sessionGraceHours", label: "Session grace (h)",
+				kind: "number", key: "sessionGraceHours",
+				env: ["PI_TEAMS_SESSION_GRACE_HOURS"],
+				description: "Age in hours past which a dead teammate's " +
+					"transcript is deleted.",
+				value: String(s.sessionGraceHours()),
 			},
 			{
 				id: "sessionSweepIntervalSeconds",

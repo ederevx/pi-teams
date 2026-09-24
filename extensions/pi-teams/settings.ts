@@ -137,23 +137,24 @@ export class PackageSettings {
 		return explicit || join(this.agentDir, "sessions");
 	}
 
-	forkIdleSeconds(): number {
+	// Reaper windows are configured in hours (the settings keys end in
+	// "Hours") and are shown in the dock in those units.
+	forkIdleHours(): number {
 		return this.resolve(
-			"PI_TEAMS_FORK_IDLE", "forkIdleSeconds", 300, "number") as number;
-	}
-
-	busyGraceSeconds(): number {
-		return this.resolve(
-			"PI_TEAMS_BUSY_GRACE", "busyGraceSeconds", 120,
+			"PI_TEAMS_FORK_IDLE_HOURS", "forkIdleHours", 6,
 			"number") as number;
 	}
 
-	gcWarnGraceSeconds(): number {
-		// The legacy variable stays read after the current one; both
-		// are environment overrides and precede the settings value.
+	busyGraceHours(): number {
 		return this.resolve(
-			["PI_TEAMS_GC_WARN_GRACE", "PI_TEAMS_GC_PING_GRACE"],
-			"gcWarnGraceSeconds", 60, "number") as number;
+			"PI_TEAMS_BUSY_GRACE_HOURS", "busyGraceHours", 2,
+			"number") as number;
+	}
+
+	gcWarnGraceHours(): number {
+		return this.resolve(
+			"PI_TEAMS_GC_WARN_HOURS", "gcWarnGraceHours", 1,
+			"number") as number;
 	}
 
 	restartGraceSeconds(): number {
@@ -168,16 +169,16 @@ export class PackageSettings {
 			"number") as number;
 	}
 
-	sessionGraceSeconds(): number {
+	sessionGraceHours(): number {
 		return this.resolve(
-			"PI_TEAMS_SESSION_GRACE", "sessionGraceSeconds", 3600,
+			"PI_TEAMS_SESSION_GRACE_HOURS", "sessionGraceHours", 72,
 			"number") as number;
 	}
 
 	sessionSweepIntervalSeconds(): number {
 		return this.resolve(
 			"PI_TEAMS_SESSION_SWEEP_INTERVAL", "sessionSweepIntervalSeconds",
-			300, "number") as number;
+			3600, "number") as number;
 	}
 
 	/** A zero or negative answer window is no window at all, so the

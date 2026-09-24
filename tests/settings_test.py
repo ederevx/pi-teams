@@ -45,13 +45,13 @@ class DefaultTests(SettingsCase):
             os.path.join(os.path.expanduser("~"), ".local", "state",
                          "pi-teams"))
         self.assertEqual(s.sessions_root(), str(self.agent / "sessions"))
-        self.assertEqual(s.fork_idle(), 300)
-        self.assertEqual(s.busy_grace(), 120)
-        self.assertEqual(s.gc_warn_grace(), 60)
+        self.assertEqual(s.fork_idle(), 6 * 3600.0)
+        self.assertEqual(s.busy_grace(), 2 * 3600.0)
+        self.assertEqual(s.gc_warn_grace(), 1 * 3600.0)
         self.assertEqual(s.restart_grace(), 60)
         self.assertEqual(s.peer_grace(), 15)
-        self.assertEqual(s.session_grace(), 3600)
-        self.assertEqual(s.session_sweep_interval(), 300)
+        self.assertEqual(s.session_grace(), 72 * 3600.0)
+        self.assertEqual(s.session_sweep_interval(), 3600)
         self.assertEqual(s.ssh(), "ssh")
         self.assertIsNone(s.remote_state())
         self.assertIsNone(s.peer_setup())
@@ -68,12 +68,12 @@ class SettingsValueTests(SettingsCase):
             "stateDir": "/file/state",
             "binDir": "/file/bin",
             "sessionsRoot": "/file/sessions",
-            "forkIdleSeconds": 11,
-            "busyGraceSeconds": 22,
-            "gcWarnGraceSeconds": 33,
+            "forkIdleHours": 11,
+            "busyGraceHours": 22,
+            "gcWarnGraceHours": 33,
             "restartGraceSeconds": 44,
             "peerGraceSeconds": 55,
-            "sessionGraceSeconds": 66,
+            "sessionGraceHours": 66,
             "sessionSweepIntervalSeconds": 77,
             "spawnWindowMs": 88,
             "waitSeconds": 99,
@@ -86,12 +86,12 @@ class SettingsValueTests(SettingsCase):
         self.assertEqual(s.host(), "file-host")
         self.assertEqual(s.state_dir(), "/file/state")
         self.assertEqual(s.sessions_root(), "/file/sessions")
-        self.assertEqual(s.fork_idle(), 11)
-        self.assertEqual(s.busy_grace(), 22)
-        self.assertEqual(s.gc_warn_grace(), 33)
+        self.assertEqual(s.fork_idle(), 11 * 3600.0)
+        self.assertEqual(s.busy_grace(), 22 * 3600.0)
+        self.assertEqual(s.gc_warn_grace(), 33 * 3600.0)
         self.assertEqual(s.restart_grace(), 44)
         self.assertEqual(s.peer_grace(), 55)
-        self.assertEqual(s.session_grace(), 66)
+        self.assertEqual(s.session_grace(), 66 * 3600.0)
         self.assertEqual(s.session_sweep_interval(), 77)
         self.assertEqual(s.ssh(), "file-ssh")
         self.assertEqual(s.remote_state(), "/file/remote")
@@ -99,31 +99,31 @@ class SettingsValueTests(SettingsCase):
 
     def test_env_overrides_settings(self):
         self.write_settings({"piTeams": {
-            "host": "file-host", "forkIdleSeconds": 11, "ssh": "file-ssh",
+            "host": "file-host", "forkIdleHours": 11, "ssh": "file-ssh",
         }})
         s = self.settings({
             "PI_TEAMS_HOST": "env-host",
-            "PI_TEAMS_FORK_IDLE": "5",
+            "PI_TEAMS_FORK_IDLE_HOURS": "5",
             "PI_TEAMS_SSH": "env-ssh",
         })
         self.assertEqual(s.host(), "env-host")
-        self.assertEqual(s.fork_idle(), 5)
+        self.assertEqual(s.fork_idle(), 5 * 3600.0)
         self.assertEqual(s.ssh(), "env-ssh")
 
     def test_empty_env_is_not_an_override(self):
         self.write_settings({"piTeams": {"host": "file-host"}})
-        s = self.settings({"PI_TEAMS_HOST": "", "PI_TEAMS_FORK_IDLE": ""})
+        s = self.settings({"PI_TEAMS_HOST": "", "PI_TEAMS_FORK_IDLE_HOURS": ""})
         self.assertEqual(s.host(), "file-host")
-        self.assertEqual(s.fork_idle(), 300)
+        self.assertEqual(s.fork_idle(), 6 * 3600.0)
 
     def test_invalid_values_fall_through(self):
         self.write_settings({"piTeams": {
-            "forkIdleSeconds": -1, "busyGraceSeconds": "nope",
+            "forkIdleHours": -1, "busyGraceHours": "nope",
             "host": 42, "ssh": "",
         }})
-        s = self.settings({"PI_TEAMS_FORK_IDLE": "abc"})
-        self.assertEqual(s.fork_idle(), 300)
-        self.assertEqual(s.busy_grace(), 120)
+        s = self.settings({"PI_TEAMS_FORK_IDLE_HOURS": "abc"})
+        self.assertEqual(s.fork_idle(), 6 * 3600.0)
+        self.assertEqual(s.busy_grace(), 2 * 3600.0)
         self.assertEqual(s.host(), socket.gethostname().split(".")[0])
         self.assertEqual(s.ssh(), "ssh")
 
@@ -131,35 +131,26 @@ class SettingsValueTests(SettingsCase):
 class ToleranceTests(SettingsCase):
     def test_missing_file_is_tolerated(self):
         missing = self.agent / "no-such-agent"
-        self.assertEqual(self.settings(agent_dir=missing).fork_idle(), 300)
+        self.assertEqual(self.settings(agent_dir=missing).fork_idle(),
+                         6 * 3600.0)
 
     def test_malformed_file_is_tolerated(self):
         self.write_settings(None, raw="{not json")
-        self.assertEqual(self.settings().fork_idle(), 300)
+        self.assertEqual(self.settings().fork_idle(), 6 * 3600.0)
 
     def test_non_object_settings_are_tolerated(self):
         for payload in ([], "text", 3, None):
             self.write_settings(payload)
-            self.assertEqual(self.settings().fork_idle(), 300)
+            self.assertEqual(self.settings().fork_idle(), 6 * 3600.0)
 
 
 class ZeroSemanticsTests(SettingsCase):
     def test_gc_warn_zero_from_settings_and_env(self):
-        self.write_settings({"piTeams": {"gcWarnGraceSeconds": 0}})
+        self.write_settings({"piTeams": {"gcWarnGraceHours": 0}})
         self.assertEqual(self.settings().gc_warn_grace(), 0)
         self.assertEqual(
-            self.settings({"PI_TEAMS_GC_WARN_GRACE": "0"}).gc_warn_grace(), 0)
-
-    def test_gc_warn_legacy_environment_fallback(self):
-        self.assertEqual(
-            self.settings({"PI_TEAMS_GC_PING_GRACE": "7"}).gc_warn_grace(),
-            7)
-        # The current variable, when set, wins over the legacy one.
-        both = self.settings({
-            "PI_TEAMS_GC_WARN_GRACE": "8",
-            "PI_TEAMS_GC_PING_GRACE": "7",
-        })
-        self.assertEqual(both.gc_warn_grace(), 8)
+            self.settings({"PI_TEAMS_GC_WARN_HOURS": "0"}).gc_warn_grace(),
+            0)
 
     def test_sessions_root_legacy_environment_fallback(self):
         self.assertEqual(
@@ -184,29 +175,29 @@ class BrokerWiringTests(SettingsCase):
         self.write_settings({"piTeams": {
             "host": "set-host",
             "sessionsRoot": "/set/sessions",
-            "forkIdleSeconds": 11,
-            "busyGraceSeconds": 22,
-            "gcWarnGraceSeconds": 33,
+            "forkIdleHours": 11,
+            "busyGraceHours": 22,
+            "gcWarnGraceHours": 33,
             "restartGraceSeconds": 44,
             "peerGraceSeconds": 55,
-            "sessionGraceSeconds": 66,
+            "sessionGraceHours": 66,
             "sessionSweepIntervalSeconds": 77,
         }})
         root = str(self.agent / "root")
         broker = TeamBroker(root=root, settings=self.settings())
         self.assertEqual(broker.host, "set-host")
-        self.assertEqual(broker.fork_idle, 11)
-        self.assertEqual(broker.busy_grace, 22)
-        self.assertEqual(broker.gc_warn_grace, 33)
+        self.assertEqual(broker.fork_idle, 11 * 3600.0)
+        self.assertEqual(broker.busy_grace, 22 * 3600.0)
+        self.assertEqual(broker.gc_warn_grace, 33 * 3600.0)
         self.assertEqual(broker.restart_grace, 44)
         self.assertEqual(broker.peer_grace, 55)
-        self.assertEqual(broker.session_grace, 66)
+        self.assertEqual(broker.session_grace, 66 * 3600.0)
         self.assertEqual(broker._session_sweep_interval, 77)
         self.assertEqual(str(broker.sessions_root), "/set/sessions")
 
     def test_injected_values_beat_env_and_settings(self):
-        self.write_settings({"piTeams": {"forkIdleSeconds": 11}})
-        s = self.settings({"PI_TEAMS_FORK_IDLE": "5"})
+        self.write_settings({"piTeams": {"forkIdleHours": 11}})
+        s = self.settings({"PI_TEAMS_FORK_IDLE_HOURS": "5"})
         broker = TeamBroker(root=str(self.agent / "root"), settings=s,
                             host="injected", fork_idle=9)
         self.assertEqual(broker.host, "injected")

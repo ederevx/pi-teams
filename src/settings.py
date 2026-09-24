@@ -119,20 +119,24 @@ class PackageSettings:
             "sessionsRoot", None, "path") \
             or os.path.join(str(self._agent_dir), "sessions")
 
+    # Reaper windows are configured in hours: every GC setting key ends
+    # in "Hours" and its value counts hours. The broker's clocks are all
+    # seconds, so these accessors convert once, here. Zero keeps its
+    # meaning (immediate reap or disabled warning) after conversion.
     def fork_idle(self):
         return self.resolve(
-            "PI_TEAMS_FORK_IDLE", "forkIdleSeconds", 300, "number")
+            "PI_TEAMS_FORK_IDLE_HOURS", "forkIdleHours", 6,
+            "number") * 3600.0
 
     def busy_grace(self):
         return self.resolve(
-            "PI_TEAMS_BUSY_GRACE", "busyGraceSeconds", 120, "number")
+            "PI_TEAMS_BUSY_GRACE_HOURS", "busyGraceHours", 2,
+            "number") * 3600.0
 
     def gc_warn_grace(self):
-        # The legacy variable stays read after the current one; both
-        # are environment overrides and precede the settings value.
         return self.resolve(
-            ("PI_TEAMS_GC_WARN_GRACE", "PI_TEAMS_GC_PING_GRACE"),
-            "gcWarnGraceSeconds", 60, "number")
+            "PI_TEAMS_GC_WARN_HOURS", "gcWarnGraceHours", 1,
+            "number") * 3600.0
 
     def restart_grace(self):
         return self.resolve(
@@ -144,12 +148,13 @@ class PackageSettings:
 
     def session_grace(self):
         return self.resolve(
-            "PI_TEAMS_SESSION_GRACE", "sessionGraceSeconds", 3600, "number")
+            "PI_TEAMS_SESSION_GRACE_HOURS", "sessionGraceHours", 72,
+            "number") * 3600.0
 
     def session_sweep_interval(self):
         return self.resolve(
             "PI_TEAMS_SESSION_SWEEP_INTERVAL",
-            "sessionSweepIntervalSeconds", 300, "number")
+            "sessionSweepIntervalSeconds", 3600, "number")
 
     def ssh(self):
         return self.resolve("PI_TEAMS_SSH", "ssh", "ssh", "text")
