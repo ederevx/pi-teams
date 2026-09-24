@@ -4,6 +4,17 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.27 - 2026-09-24
+
+- Configure the GC reaper windows in hours instead of seconds, and
+  relax them so liveness GC stops killing work that is merely between
+  turns: fork idle 6h (was 300s), GC warning grace 1h (was 60s),
+  busy-file grace 2h (was 120s), session-transcript grace 72h (was
+  1h), and the session sweep interval 1h (was 300s). The `Seconds`
+  setting keys and their environment variables are replaced by
+  `Hours` names (`forkIdleHours`/`PI_TEAMS_FORK_IDLE_HOURS` and so
+  on); the broker still works in seconds internally.
+
 ## v0.4.26 - 2026-09-24
 
 - An idle-GC warning now preempts the teammate: the running turn is
