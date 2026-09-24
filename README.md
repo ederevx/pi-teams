@@ -84,19 +84,18 @@ natively, without a shared filesystem as the channel.
 Liveness is connection-based everywhere; only forks are ever
 signalled, never main agents.
 
-- **Idle GC**: with no work contact for `PI_TEAMS_FORK_IDLE`
-  (default 300s), the broker warns before it kills. It leaves the
+- **Idle GC**: with no work contact for `PI_TEAMS_FORK_IDLE_HOURS`
+  (default 6h), the broker warns before it kills. It leaves the
   teammate a timestamped warning file under the team root
   (`<id>.warn`) and steers it to delete the file. A running
   teammate is interrupted at once — its turn aborted so a tool
   blocked on it returns — and the warning then opens its own turn.
-  The fork is spared while `PI_TEAMS_GC_WARN_GRACE` (default 60s; 0
+  The fork is spared while `PI_TEAMS_GC_WARN_HOURS` (default 1h; 0
   reaps immediately) is open; deleting the file is the working
   answer and resets the idle clock, while leaving it past the grace
   reaps the fork. A busy or waiting hold deletes the file itself. A
   parent-gone fork is warned the same way and reaped when the
-  warning goes unanswered. (`PI_TEAMS_GC_PING_GRACE` is still read
-  as a legacy fallback.)
+  warning goes unanswered.
 - **Work keeps forks alive**: pi's lifecycle publishes busy state
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends
@@ -105,12 +104,12 @@ signalled, never main agents.
   owner pid. A spawned teammate's session file is removed with it;
   attached sessions keep theirs in `/resume`.
 - **Busy-file GC** clears stale `.busy` state: a file whose agent is
-  unregistered and untouched past `PI_TEAMS_BUSY_GRACE` (default
-  120s) is removed; registered agents keep theirs.
+  unregistered and untouched past `PI_TEAMS_BUSY_GRACE_HOURS`
+  (default 2h) is removed; registered agents keep theirs.
 - **Session GC** removes teammate-marked transcripts whose agent is
-  not live and whose mtime is past `PI_TEAMS_SESSION_GRACE` (default
-  1h; `PI_TEAMS_SESSIONS_ROOT` overrides the root). Deletions are
-  guarded to the sessions root.
+  not live and whose mtime is past `PI_TEAMS_SESSION_GRACE_HOURS`
+  (default 72h; `PI_TEAMS_SESSIONS_ROOT` overrides the root).
+  Deletions are guarded to the sessions root.
 - **Self-restart**: the broker stamps its endpoint with a source hash
   and exits once idle for `PI_TEAMS_RESTART_GRACE` (default 60s) after
   the on-disk source changes, never while agents are live; the next
@@ -172,11 +171,12 @@ agent-directory settings file, `<agent-dir>/settings.json`, where
 3. the built-in default.
 
 An injected constructor argument (used by tests) beats all three.
-`stallSeconds` and `gcWarnGraceSeconds` treat `0` as a real value, not
+`stallSeconds` and `gcWarnGraceHours` treat `0` as a real value, not
 "unset": 0 disables the stall nudge and reaps an idle fork at once.
-`forkIdleSeconds: 0` disables fork-idle GC entirely, while
+`forkIdleHours: 0` disables fork-idle GC entirely, while
 `sessionSweepIntervalSeconds` must stay positive (it drives the whole
-disk sweep).
+disk sweep). The GC reaper windows are configured in hours (`Hours`
+keys); the broker converts them to seconds internally.
 
 | Key | Default | Environment override |
 | --- | --- | --- |
@@ -184,13 +184,13 @@ disk sweep).
 | `stateDir` | `$XDG_STATE_HOME` or `~/.local/state`, then `/pi-teams` | `TEAM_ROOT` |
 | `binDir` | `~/.local/bin` | `PI_TEAMS_BIN` |
 | `sessionsRoot` | `<agent-dir>/sessions` | `PI_TEAMS_SESSIONS_ROOT`; legacy `PI_SESSIONS_ROOT` |
-| `forkIdleSeconds` | `300` | `PI_TEAMS_FORK_IDLE` |
-| `busyGraceSeconds` | `120` | `PI_TEAMS_BUSY_GRACE` |
-| `gcWarnGraceSeconds` | `60` | `PI_TEAMS_GC_WARN_GRACE`; legacy `PI_TEAMS_GC_PING_GRACE` |
+| `forkIdleHours` | `6` | `PI_TEAMS_FORK_IDLE_HOURS` |
+| `busyGraceHours` | `2` | `PI_TEAMS_BUSY_GRACE_HOURS` |
+| `gcWarnGraceHours` | `1` | `PI_TEAMS_GC_WARN_HOURS` |
 | `restartGraceSeconds` | `60` | `PI_TEAMS_RESTART_GRACE` |
 | `peerGraceSeconds` | `15` | `PI_TEAMS_PEER_GRACE` |
-| `sessionGraceSeconds` | `3600` | `PI_TEAMS_SESSION_GRACE` |
-| `sessionSweepIntervalSeconds` | `300` | `PI_TEAMS_SESSION_SWEEP_INTERVAL` |
+| `sessionGraceHours` | `72` | `PI_TEAMS_SESSION_GRACE_HOURS` |
+| `sessionSweepIntervalSeconds` | `3600` | `PI_TEAMS_SESSION_SWEEP_INTERVAL` |
 | `spawnWindowMs` | `15000` | `PI_TEAMS_SPAWN_WINDOW` |
 | `waitSeconds` | `300` | `PI_TEAMS_WAIT` |
 | `stallSeconds` | `90` | `PI_TEAMS_STALL` |
