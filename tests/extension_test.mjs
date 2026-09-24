@@ -556,6 +556,67 @@ test("an idle warning steers the agent to delete its file", async () => {
 	assert.match(text, /60s/);
 });
 
+test("an idle warning preempts a running turn and delivers on settle", () => {
+	const delivered = [];
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, (m) => delivered.push(m));
+	let aborts = 0;
+	let idle = false;
+	agent.bindInterrupt(() => { aborts += 1; }, () => idle);
+	agent.deliverMessage(JSON.stringify({
+		op: "message", id: "w1", from: "*", to: "parent-1",
+		kind: "idle-warning",
+		payload: {
+			id: "parent-1", why: "idle-gc",
+			file: "/state/pi-teams/parent-1.warn", grace: 60,
+		},
+		ts: 1,
+	}));
+	// The running turn is aborted at once and the warning is held, so
+	// a tool blocked on the run returns before the agent reads it.
+	assert.equal(aborts, 1, "the running turn was not aborted");
+	assert.deepEqual(delivered, [], "the warning was steered mid-run");
+	idle = true;
+	agent.surfaceInterrupts();
+	assert.equal(delivered.length, 1);
+	assert.match(String(delivered[0].payload), /delete/i);
+	assert.match(String(delivered[0].payload), /parent-1\.warn/);
+});
+
+test("an idle warning with no running turn delivers at once", () => {
+	const delivered = [];
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, (m) => delivered.push(m));
+	let aborts = 0;
+	agent.bindInterrupt(() => { aborts += 1; }, () => true);
+	agent.deliverMessage(JSON.stringify({
+		op: "message", id: "w2", from: "*", to: "parent-1",
+		kind: "idle-warning",
+		payload: { id: "parent-1", why: "idle-gc",
+			file: "/state/pi-teams/parent-1.warn", grace: 60 },
+		ts: 1,
+	}));
+	assert.equal(aborts, 0, "an idle session was aborted");
+	assert.equal(delivered.length, 1);
+});
+
+test("an ordinary report never preempts a running turn", () => {
+	const delivered = [];
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, (m) => delivered.push(m));
+	let aborts = 0;
+	agent.bindInterrupt(() => { aborts += 1; }, () => false);
+	agent.deliverMessage(JSON.stringify({
+		op: "message", id: "r1", from: "kid", to: agent.id,
+		kind: "result", payload: "done", ts: 1,
+	}));
+	assert.equal(aborts, 0, "a report aborted the turn");
+	assert.deepEqual(delivered.map((m) => m.payload), ["done"]);
+});
+
 test("deliverMessage filters a redelivered envelope id", async () => {
 	const delivered = [];
 	const { runner } = makeRunner(() =>
@@ -1606,6 +1667,59 @@ test("team_wait returns a delivered report as formatted text", async () => {
 		assert.equal(result.content[0].text, formatReport(report));
 		assert.equal(result.details.reports[0].payload, "all done");
 		assert.deepEqual(result.details.remaining, []);
+	} finally {
+		if (previous === undefined) delete globalThis.__piTeamsAgent;
+		else globalThis.__piTeamsAgent = previous;
+	}
+});
+
+test("the extension wires abort and settle into the idle-warning path", async () => {
+	// The session_start handler captures the runner's abort/isIdle probes
+	// into the agent, and agent_settled opens the next turn for a
+	// warning held across the preemption.
+	const handlers = new Map();
+	const sent = [];
+	const pi = {
+		appendEntry: () => {},
+		sendMessage: (message) => { sent.push(message); },
+		on: (event, handler) => handlers.set(event, handler),
+		registerEntryRenderer: () => {},
+		registerCommand: () => {},
+		registerTool: () => {},
+	};
+	const previous = globalThis.__piTeamsAgent;
+	globalThis.__piTeamsAgent = undefined;
+	try {
+		const { default: register } =
+			await import("../extensions/pi-teams.ts");
+		await register(pi);
+		const app = globalThis.__piTeamsAgent;
+		assert.ok(app, "the extension publishes its agent");
+		app.ensureBroker = () => {};
+		app.hold = () => {};
+		app.announceSession = async () => {};
+		let aborts = 0;
+		let idle = false;
+		await handlers.get("session_start")({}, {
+			abort: () => { aborts += 1; },
+			isIdle: () => idle,
+			sessionManager: { getSessionFile: () => "" },
+			cwd: "/work",
+		});
+		app.deliverMessage(JSON.stringify({
+			op: "message", id: "w-ext", from: "*", to: app.id,
+			kind: "idle-warning",
+			payload: { id: app.id, why: "idle-gc",
+				file: "/state/x.warn", grace: 60 },
+			ts: 1,
+		}));
+		assert.equal(aborts, 1, "the session ctx abort was not used");
+		assert.deepEqual(sent, [], "the warning was steered mid-run");
+		idle = true;
+		await handlers.get("agent_settled")();
+		assert.equal(sent.length, 1, "the hold was not surfaced on settle");
+		assert.match(String(sent[0].content), /delete/i);
+		assert.match(String(sent[0].content), /\/state\/x\.warn/);
 	} finally {
 		if (previous === undefined) delete globalThis.__piTeamsAgent;
 		else globalThis.__piTeamsAgent = previous;
