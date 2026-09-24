@@ -16,6 +16,7 @@ import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
 	announceAgents,
 	deliverToAgent,
+	logTeamMessage,
 	registerLogRenderer,
 } from "./pi-teams/messages.ts";
 import { sessionsRoot } from "./pi-teams/paths.ts";
@@ -37,7 +38,7 @@ export {
 	WindowlessPython,
 	windowlessCandidates,
 } from "./pi-teams/interpreter.ts";
-export { logTeamMessage } from "./pi-teams/messages.ts";
+export { logTeamMessage };
 export { AgentDirectory } from "./pi-teams/directory.ts";
 export { ResultInbox } from "./pi-teams/inbox.ts";
 export { PendingRequests } from "./pi-teams/pending.ts";
