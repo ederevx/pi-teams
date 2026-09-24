@@ -3,6 +3,16 @@
  * The wire protocol shape is the only responsibility this module owns.
  */
 
+import {
+	settings,
+	DEFAULT_SPAWN_WINDOW_MS,
+	DEFAULT_STALL_SECONDS,
+	DEFAULT_WAIT_SECONDS,
+} from "./settings.ts";
+
+export { DEFAULT_SPAWN_WINDOW_MS, DEFAULT_STALL_SECONDS,
+	DEFAULT_WAIT_SECONDS };
+
 export interface TeamMessage {
 	from: string;
 	to: string;
@@ -35,27 +45,15 @@ export function mintSendToken(): string {
 		Math.random().toString(16).slice(2, 10);
 }
 
-/** Default bound for an active team_wait, overridable with PI_TEAMS_WAIT. */
-export const DEFAULT_WAIT_SECONDS = 300;
-
 /** How often an active team_wait re-checks its stop conditions. */
 export const WAIT_POLL_MS = 250;
 
-/** One spawn request's answer window per candidate target, in ms;
- *  PI_TEAMS_SPAWN_WINDOW overrides. A silent target fails to the
- *  next candidate on the host. */
-export const DEFAULT_SPAWN_WINDOW_MS = 15000;
-
-/** Resolves the spawn answer window from the environment, then the
- *  default. */
+/** The spawn answer window per candidate target, in ms (settings or
+ *  PI_TEAMS_SPAWN_WINDOW override). A silent target fails to the next
+ *  candidate on the host. */
 export function spawnWindowMs(): number {
-	const env = Number(process.env.PI_TEAMS_SPAWN_WINDOW);
-	return Number.isFinite(env) && env > 0 ? env : DEFAULT_SPAWN_WINDOW_MS;
+	return settings.spawnWindowMs();
 }
-
-/** Default silence bound before team_wait nudges silent teammates,
- *  overridable with PI_TEAMS_STALL; 0 disables the nudge. */
-export const DEFAULT_STALL_SECONDS = 90;
 
 /** The steering message a wait sends a teammate gone silent. */
 export const STEER_NUDGE_TEXT =
@@ -63,19 +61,17 @@ export const STEER_NUDGE_TEXT =
 	"If you are still working, continue; if you are done or stuck, " +
 	"report your result to your parent now.";
 
-/** Resolves the team_wait bound from the call, then the environment. */
+/** Resolves the team_wait bound from the call, then settings (env or
+ *  file), then the default. */
 export function waitSeconds(requested?: number): number {
 	if (typeof requested === "number" && requested > 0) return requested;
-	const env = Number(process.env.PI_TEAMS_WAIT);
-	return Number.isFinite(env) && env > 0 ? env : DEFAULT_WAIT_SECONDS;
+	return settings.waitSeconds();
 }
 
-/** Resolves the stall bound from the call (0 disables), then the
- *  environment, then the default. An explicit 0 wins over every other
+/** Resolves the stall bound from the call (0 disables), then settings
+ *  (env or file), then the default. An explicit 0 wins over every other
  *  source so a call can turn the watchdog off. */
 export function stallSeconds(requested?: number): number {
 	if (typeof requested === "number" && requested >= 0) return requested;
-	const env = Number(process.env.PI_TEAMS_STALL);
-	if (Number.isFinite(env) && env >= 0) return env;
-	return DEFAULT_STALL_SECONDS;
+	return settings.stallSeconds();
 }
