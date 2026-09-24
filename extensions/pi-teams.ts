@@ -16,6 +16,7 @@ import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
 	announceAgents,
 	deliverToAgent,
+	formatReport,
 	logTeamMessage,
 	registerLogRenderer,
 } from "./pi-teams/messages.ts";

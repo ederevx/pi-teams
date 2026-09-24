@@ -65,6 +65,8 @@ const { SettingsStore } =
 	await import("../extensions/pi-teams/settings-store.ts");
 const { TeamSettingsView } =
 	await import("../extensions/pi-teams/settings-view.ts");
+const { formatReport } =
+	await import("../extensions/pi-teams/messages.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -1569,3 +1571,43 @@ test("team-settings refuses a corrupt file and rejects bad numbers", () => {
 	}
 });
 
+
+
+test("team_wait returns a delivered report as formatted text", async () => {
+	// Regression: the report path called formatReport without importing
+	// it, so a real report threw "formatReport is not defined".
+	const tools = new Map();
+	const pi = {
+		appendEntry: () => {},
+		sendMessage: () => {},
+		on: () => {},
+		registerEntryRenderer: () => {},
+		registerCommand: () => {},
+		registerTool: (definition) => tools.set(definition.name, definition),
+	};
+	const previous = globalThis.__piTeamsAgent;
+	globalThis.__piTeamsAgent = undefined;
+	try {
+		const { default: register } =
+			await import("../extensions/pi-teams.ts");
+		await register(pi);
+		const app = globalThis.__piTeamsAgent;
+		assert.ok(app, "the extension publishes its agent");
+		const report = {
+			from: "kid", to: app.id, kind: "result", payload: "all done",
+		};
+		app.requireTeammate = async () => {};
+		app.setState = () => {};
+		app.setBusy = () => {};
+		app.waitForResults = async () => [report];
+		const result = await tools.get("team_wait").execute(
+			"call-1", { id: "kid" }, undefined, undefined,
+			{ hasPendingMessages: () => false });
+		assert.equal(result.content[0].text, formatReport(report));
+		assert.equal(result.details.reports[0].payload, "all done");
+		assert.deepEqual(result.details.remaining, []);
+	} finally {
+		if (previous === undefined) delete globalThis.__piTeamsAgent;
+		else globalThis.__piTeamsAgent = previous;
+	}
+});
