@@ -170,39 +170,44 @@ class ForkLifecycleTests(unittest.TestCase):
             child.kill()
             child.wait(timeout=5)
 
-    def test_hold_answers_working_with_finish_yes(self):
-        # The hold's answer polarity: a busy or waiting agent is still
-        # working, so it must answer "finish-yes" (spared); answering
-        # "finish-no" would reap a working fork at once. An idle hold
-        # never answers; it surfaces the query for the agent's turn.
+    def test_hold_deletes_idle_warning_while_busy(self):
+        # A busy or waiting hold deletes the broker's warning file at
+        # once; an idle hold surfaces the warning for the agent's turn.
         for value, state in (("1", "busy"), ("2", "waiting"),
                              ("0", "idle")):
             busy = os.path.join(self.root, "%s.busy" % state)
             with open(busy, "w") as fh:
                 fh.write(value)
+            warning = os.path.join(self.root, "%s.warn" % state)
+            with open(warning, "w") as fh:
+                fh.write("{}")
             client = TeamClient(self.root, heartbeat=None)
             client.id = "fork-hold"
             client.busy_file = busy
-            sent = []
-            client.send_msg = (
-                lambda to, kind, payload, _s=sent: _s.append(kind))
+            emitted = []
+            client._emit = lambda msg, _e=emitted: _e.append(msg)
             client.register = lambda: None
             client._watch_stdin = lambda: threading.Event()
-            client._emit = lambda msg: None
             replies = iter([
-                {"kind": "finish?", "payload": {"why": "idle-gc"}},
+                {"kind": "idle-warning",
+                 "payload": {"why": "idle-gc", "file": warning}},
                 {"kind": "terminate"},
             ])
             client._read_line = lambda: next(replies)
             client.hold()
             if state == "idle":
+                self.assertTrue(
+                    os.path.exists(warning),
+                    "idle hold deleted the warning instead of surfacing it")
                 self.assertEqual(
-                    sent, [], "idle hold answered instead of surfacing")
+                    len(emitted), 1,
+                    "idle hold did not surface the warning")
             else:
+                self.assertFalse(
+                    os.path.exists(warning),
+                    "%s hold did not delete the warning" % state)
                 self.assertEqual(
-                    sent, ["finish-yes"],
-                    "%s hold must answer finish-yes, got %r" % (state, sent),
-                )
+                    emitted, [], "%s hold surfaced the warning" % state)
 
     def test_fork_lives_while_parent_connected(self):
         parent = self._parent("parent-1")
@@ -221,11 +226,12 @@ class ForkLifecycleTests(unittest.TestCase):
             parent.close()
 
     def test_fork_dies_when_parent_connection_closes(self):
-        # The parent-gone fork is asked first (finish-query courtesy);
-        # its hold answers nothing, so the reap lands once the grace
-        # on silence expires. A short grace keeps the test quick.
+        # The parent-gone fork is warned first (file-based courtesy);
+        # its hold is idle and never deletes the file, so the reap
+        # lands once the grace on the warning expires. A short grace
+        # keeps the test quick.
         stop_broker(self.root, self.proc)
-        os.environ["PI_TEAMS_GC_PING_GRACE"] = "0.5"
+        os.environ["PI_TEAMS_GC_WARN_GRACE"] = "0.5"
         try:
             self.proc = start_broker(self.root, idle_timeout=15.0)
             parent = self._parent("parent-2")
@@ -244,7 +250,7 @@ class ForkLifecycleTests(unittest.TestCase):
                 child.kill()
                 child.wait(timeout=5)
         finally:
-            os.environ.pop("PI_TEAMS_GC_PING_GRACE", None)
+            os.environ.pop("PI_TEAMS_GC_WARN_GRACE", None)
 
     def test_explicit_terminate(self):
         parent = self._parent("parent-3")

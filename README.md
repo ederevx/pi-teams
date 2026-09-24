@@ -11,7 +11,7 @@ natively, without a shared filesystem as the channel.
 ## What it provides
 
 - **Broker** — `src/teamd.py`, composed from `team_broker.py`,
-  `team_root.py`, `peer_link.py`, `peer_tunnel.py`, `finish_query.py`,
+  `team_root.py`, `peer_link.py`, `peer_tunnel.py`, `idle_warning.py`,
   and `peer_transport.py`:
   - Loopback TCP registry and relay on `127.0.0.1`; ephemeral port and
     random token, published atomically at `TEAM_ROOT/endpoint`
@@ -22,7 +22,7 @@ natively, without a shared filesystem as the channel.
     race at startup or the extension reloads.
 - **Client** — `src/team.py` over `src/team_client.py`: one persistent
   connection per agent (`team hold`); CLI ops: `register`, `ls`,
-  `send`, `follow`, `terminate`, `finish`, `deregister`.
+  `send`, `follow`, `terminate`, `deregister`.
 - **Extension** — `extensions/pi-teams.ts` plus the modules under
   `extensions/pi-teams/`: registers the running pi, holds its
   endpoint open, injects the teammates note before the first run, and
@@ -84,18 +84,20 @@ Liveness is connection-based everywhere; only forks are ever
 signalled, never main agents.
 
 - **Idle GC**: with no work contact for `PI_TEAMS_FORK_IDLE`
-  (default 300s), the broker asks before it kills. A `finish?` query
-  goes to the fork's client, which answers at once through its
-  heartbeat when the teammate is busy or waiting, and otherwise
-  surfaces the question to its agent. The fork is spared while
-  `PI_TEAMS_GC_PING_GRACE` (default 60s; 0 reaps immediately) is open;
-  silence past the grace reaps it. `team finish --done` answers
-  immediately. A parent-gone fork has no one left to answer and is
-  reaped at once.
+  (default 300s), the broker warns before it kills. It leaves the
+  teammate a timestamped warning file under the team root
+  (`<id>.warn`) and steers it to delete the file. The fork is spared
+  while `PI_TEAMS_GC_WARN_GRACE` (default 60s; 0 reaps immediately)
+  is open; deleting the file is the working answer and resets the
+  idle clock, while leaving it past the grace reaps the fork. A
+  busy or waiting hold deletes the file itself. A parent-gone fork
+  is warned the same way and reaped when the warning goes
+  unanswered. (`PI_TEAMS_GC_PING_GRACE` is still read as a legacy
+  fallback.)
 - **Work keeps forks alive**: pi's lifecycle publishes busy state
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends
-  counts too.
+  counts too, and clears an outstanding warning.
 - **Reaping** closes the endpoint, drops the entry, and signals the
   owner pid. A spawned teammate's session file is removed with it;
   attached sessions keep theirs in `/resume`.
@@ -176,7 +178,7 @@ never the system `/tmp`. It chains:
   flows, and peer-add failure guidance.
 - **Broker protocol tests** (`broker_test.py`, `fork_test.py`,
   `attach_test.py`, `setup_script_test.py`) — handshake and token
-  rejection, registry and relay, idle sweep and the finish-query
+  rejection, registry and relay, idle sweep and the idle-warning
   courtesy (spared when answered, reaped on silence), waiting-fork
   exemption, orphan sweeps, fork lifecycle with the parent, and
   two-broker federation including remote-parent reaping.

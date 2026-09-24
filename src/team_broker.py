@@ -23,7 +23,7 @@ from delivery import MailboxDelivery
 from mailbox import Mailbox
 from registry import RegistryMirror
 
-from finish_query import FinishQueries
+from idle_warning import IdleWarnings
 from peer_link import PeerLink
 from send_gate import SendGate
 from peer_transport import PeerTransport
@@ -44,7 +44,7 @@ class TeamBroker:
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
                  fork_idle=None, busy_grace=None, sessions_root=None,
                  session_grace=None, restart_grace=None, peer_grace=None,
-                 gc_ping_grace=None, host=None, tunnel_factory=None):
+                 gc_warn_grace=None, host=None, tunnel_factory=None):
         self.root = TeamRoot(root or DEFAULT_ROOT)
         self.idle_timeout = idle_timeout
         self.sweep_interval = sweep_interval
@@ -71,14 +71,17 @@ class TeamBroker:
         # cadence so one crashed write cannot litter the root.
         self.tmp_sweep_interval = 3600.0
         self._last_tmp_sweep = 0.0
-        # Before an idle fork is reaped it is asked whether it is done
-        # (see finish_query): the fork is spared while this grace is
-        # open; zero disables the query and reaps immediately.
-        self.gc_ping_grace = float(
-            gc_ping_grace if gc_ping_grace is not None
-            else os.environ.get("PI_TEAMS_GC_PING_GRACE", "60")
+        # Before an idle fork is reaped the broker leaves it a
+        # timestamped warning file (see idle_warning): deleting the
+        # file is a working answer, leaving it past this grace is
+        # consent; zero disables the warning and reaps immediately.
+        self.gc_warn_grace = float(
+            gc_warn_grace if gc_warn_grace is not None
+            else os.environ.get(
+                "PI_TEAMS_GC_WARN_GRACE",
+                os.environ.get("PI_TEAMS_GC_PING_GRACE", "60"))
         )
-        self._finish_queries = FinishQueries(self.gc_ping_grace)
+        self._idle_warnings = IdleWarnings(self.root, self.gc_warn_grace)
         # A teammate-marked pi session file whose agent is not live
         # and idle past this grace is swept (see state_gc); keeps old
         # forks out of pi's /resume list.
@@ -329,9 +332,6 @@ class TeamBroker:
             agent_id = self._register(conn, msg)
         elif op == "send":
             kind = str(msg.get("kind") or "text")
-            if kind in ("finish-yes", "finish-no"):
-                self._handle_finish_answer(agent_id, kind, conn)
-                return agent_id
             # The asserted sender is the envelope's from: a transient
             # client (the extension's own team.py runs) presents its
             # agent's token without holding a connection.
@@ -483,13 +483,17 @@ class TeamBroker:
                     entry["waiting"] = waiting
                 due = self.mirror.due(now)
                 data = self.mirror.render(now) if due else None
+        if work and agent_id:
+            # Fresh work is a working answer: drop any warning file so
+            # a stale one cannot reap the fork on its next idle window.
+            self._idle_warnings.clear(agent_id)
         if due:
             self.root.write_atomic(REGISTRY_NAME, data + "\n")
 
     def _release(self, agent_id, dropped=False):
         """The one registration release path, for every drop: removes
         the entry, its connection, its gate credential, and any
-        outstanding finish query. `dropped` records a connection loss
+        outstanding idle warning. `dropped` records a connection loss
         (not an eviction), so sends during the hold-restart gap park.
         Returns (entry, conn) for the caller's GC and teardown."""
         with self._lock:
@@ -498,7 +502,7 @@ class TeamBroker:
             self._send_gate.drop(agent_id)
             if dropped and entry is not None:
                 self.delivery.mark_dropped(agent_id)
-        self._finish_queries.close(agent_id)
+        self._idle_warnings.clear(agent_id)
         return entry, conn
 
     def _drop_entry(self, agent_id):
@@ -645,21 +649,6 @@ class TeamBroker:
 
     # -- liveness ----------------------------------------------------
 
-    def _handle_finish_answer(self, agent_id, kind, conn):
-        # A finish answer arrives as a relayed message: "yes" = still
-        # working (drop the query, fresh idle window), "no" = done
-        # (reap now instead of waiting out the grace on silence).
-        if kind == "finish-yes":
-            if agent_id:
-                self._finish_queries.close(agent_id)
-                self._touch(agent_id, work=True)
-        elif kind == "finish-no":
-            if agent_id and \
-                    self._registry.get(agent_id, {}).get("role") == "fork":
-                self._reap_fork(agent_id, "finished")
-                self._persist_and_notify()
-        self._reply(conn, op="ack")
-
     def _sweep_loop(self):
         while self._running:
             time.sleep(self.sweep_interval)
@@ -670,6 +659,7 @@ class TeamBroker:
         self._expire_peer_relays()
         self._reap_expired_peers(now)
         self.state_gc.gc_orphan_busy_files(now)
+        self.state_gc.gc_orphan_warning_files(now)
         if now - self._last_tmp_sweep >= self.tmp_sweep_interval:
             self._last_tmp_sweep = now
             self.root.gc_tmp_files(now, self.busy_grace)
@@ -679,49 +669,63 @@ class TeamBroker:
         self.delivery.prune(now)
         self._maybe_restart(now)
         doomed_fork, doomed_idle = self._classify(now)
-        if not doomed_fork and not doomed_idle:
-            self._finish_queries.expired(now)
-            return
-        # An idle fork is asked whether it is done before reaping;
-        # only silence (or a done answer) past the grace proceeds. A
-        # parent-gone fork with a live connection is asked too: its own
-        # agent answers, and a working answer spares it until the next
-        # sweep re-dooms and re-asks it.
-        asked = self._ask_idle_forks(doomed_fork, now)
+        # A doomed fork gets a timestamped warning file before it is
+        # reaped; deleting the file is a working answer, leaving it
+        # past the grace proceeds to the reap. A parent-gone fork with
+        # a live connection is warned too: its own agent answers.
+        spared = self._warn_idle_forks(doomed_fork, now)
         for agent_id, why in doomed_fork:
-            if agent_id in asked:
+            if agent_id in spared:
                 continue
             self._reap_fork(agent_id, why)
         for agent_id in doomed_idle:
             self._forget(agent_id)
-        self._finish_queries.expired(now)
-        self._persist_and_notify()
+        if doomed_fork or doomed_idle:
+            self._persist_and_notify()
 
-    def _ask_idle_forks(self, doomed_fork, now):
-        # Sends a finish query to each doomed fork that still holds a
-        # live connection and marks it outstanding; returns the ids
-        # spared this sweep (answer window open). A parent-gone fork is
-        # asked like an idle one: the answer comes from the fork's own
-        # agent, not from its gone parent.
-        asked = set()
-        if not self._finish_queries.enabled:
-            return asked
+    def _warn_idle_forks(self, doomed_fork, now):
+        # Leaves a warning file for each newly doomed fork that still
+        # holds a live connection and returns the ids spared this sweep
+        # (warning present and young, or just deleted by the teammate).
+        spared = set()
+        if not self._idle_warnings.enabled:
+            return spared
+        doomed_ids = {agent_id for agent_id, _ in doomed_fork}
+        for agent_id in self._idle_warnings.known_ids:
+            if self._idle_warnings.record(agent_id) is not None:
+                continue
+            # The teammate deleted the file: still working, so reset
+            # its idle clock and spare it from this sweep.
+            self._idle_warnings.clear(agent_id)
+            if agent_id in doomed_ids:
+                self._touch(agent_id, work=True)
+                spared.add(agent_id)
         for agent_id, why in doomed_fork:
-            if agent_id in self._finish_queries.ids():
+            if agent_id in spared:
                 continue
-            entry = self._registry.get(agent_id)
-            if entry is None:
+            if self._idle_warnings.record(agent_id) is not None:
+                if self._idle_warnings.is_open(agent_id, now):
+                    spared.add(agent_id)
                 continue
-            conn = self._clients.get(agent_id)
-            if conn is None:
+            if self._clients.get(agent_id) is None:
                 continue
-            self._write(conn, self._envelope(
-                "*", "finish?", {"id": agent_id, "why": why}))
-            self._finish_queries.open(agent_id, now)
-        for agent_id in self._finish_queries.ids():
-            if self._finish_queries.is_open(agent_id, now):
-                asked.add(agent_id)
-        return asked
+            self._idle_warnings.warn(agent_id, why, now)
+            self._notify_idle_warning(agent_id, why)
+            spared.add(agent_id)
+        return spared
+
+    def _notify_idle_warning(self, agent_id, why):
+        # Steers the teammate to the warning file it must delete to
+        # stay alive; a lost connection needs no notice, the next
+        # sweep re-warns or reaps.
+        conn = self._clients.get(agent_id)
+        if conn is None:
+            return
+        self._write(conn, self._envelope(
+            "*", "idle-warning",
+            {"id": agent_id, "why": why,
+             "file": str(self._idle_warnings.path(agent_id)),
+             "grace": self.gc_warn_grace}))
 
     def _classify(self, now):
         # Pure policy: which agents outlived their liveness window. An
@@ -1097,7 +1101,7 @@ class TeamBroker:
             peers = list(self._peers.values())
             self._clients.clear()
             self._registry.clear()
-            self._finish_queries.clear()
+            self._idle_warnings.clear_all()
             self._peer_pending.clear()
             self._remote.clear()
             self._peer_down_at.clear()

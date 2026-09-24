@@ -6,7 +6,7 @@
 
 import type { AgentInfo } from "./directory.ts";
 import { stateRoot, teamBin } from "./paths.ts";
-import type { ExecResult, ProcessHost } from "./process-runner.ts";
+import type { ProcessHost } from "./process-runner.ts";
 
 /** A linked peer host as reported by the broker's peer list. */
 export interface PeerInfo {
@@ -82,12 +82,6 @@ export class BrokerOps {
 
 	async terminate(agentId: string): Promise<void> {
 		await this.run(["terminate", agentId], 25000);
-	}
-
-	/** Answers a finish query on this agent's behalf (done): the CLI
-	 *  answers for an idle agent that cannot answer by heartbeat. */
-	async finish(): Promise<ExecResult> {
-		return this.run(["finish", "--done"], 5000);
 	}
 
 	/** Links a peer host; the broker owns the ssh tunnel, and a

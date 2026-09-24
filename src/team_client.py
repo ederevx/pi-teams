@@ -351,16 +351,17 @@ class TeamClient:
             return
         print(json.dumps(msg, separators=(",", ":")), flush=True)
 
-    def answer_finish(self, done):
-        """The CLI answer to a surfaced finish query: the idle agent
-        cannot answer through its heartbeat, so the shell speaks."""
-        return self._answer(done)
-
-    def _answer(self, done):
-        # One finish answer shape, shared by the CLI and the hold.
-        return self.send_msg("*", "finish-yes" if not done else "finish-no",
-                             {"id": self.ensure_id(),
-                              "state": self._state()})
+    def _remove_warning(self, msg):
+        # A busy or waiting agent deletes the broker's idle warning file
+        # at once; the broker sees the deletion as a working answer.
+        payload = msg.get("payload")
+        path = payload.get("file") if isinstance(payload, dict) else None
+        if not path:
+            return
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
     def hold(self):
         self.register()
@@ -377,13 +378,12 @@ class TeamClient:
                     break
                 if msg is None or msg.get("kind") == "terminate":
                     return
-                if msg.get("kind") == "finish?":
-                    # A busy or waiting agent is still working and
-                    # answers "finish-yes" (spared) at once; an idle
-                    # one is blocked in pi, so the question is surfaced
-                    # for its next turn.
+                if msg.get("kind") == "idle-warning":
+                    # A busy or waiting agent is still working: delete
+                    # the warning file at once. An idle one is blocked
+                    # in pi, so the warning is surfaced for its turn.
                     if self._state() in ("busy", "waiting"):
-                        self._answer(False)
+                        self._remove_warning(msg)
                     else:
                         self._emit(msg)
                     continue
