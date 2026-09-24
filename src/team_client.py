@@ -353,15 +353,17 @@ class TeamClient:
 
     def _remove_warning(self, msg):
         # A busy or waiting agent deletes the broker's idle warning file
-        # at once; the broker sees the deletion as a working answer.
+        # at once; the broker sees the deletion as a working answer. Only
+        # the broker's own warning (enveloped from "*") is honored, and
+        # the delete stays confined to this client's state root even when
+        # the payload carries some other path.
+        if msg.get("from") != "*":
+            return
         payload = msg.get("payload")
         path = payload.get("file") if isinstance(payload, dict) else None
         if not path:
             return
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        self.root.unlink_under(path, self.root.base)
 
     def hold(self):
         self.register()

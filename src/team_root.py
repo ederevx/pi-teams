@@ -61,11 +61,11 @@ class TeamRoot:
         for attempt in range(11):
             try:
                 os.replace(str(tmp), str(target))
-                return
+                return True
             except FileNotFoundError:
                 # The owning root vanished (teardown raced a lingering
                 # connection thread); memory stays authoritative.
-                return
+                return False
             except PermissionError:
                 if attempt >= 10:
                     break
@@ -76,6 +76,7 @@ class TeamRoot:
             tmp.unlink()
         except OSError:
             pass
+        return False
 
     def tmp_files(self):
         # Scratch can sit below the root (a mailbox write), so the
@@ -142,8 +143,11 @@ class TeamRoot:
             return []
 
     def write_warning(self, agent_id, record):
-        self.write_atomic(self.safe_component(agent_id) + WARNING_SUFFIX,
-                          json.dumps(record) + "\n", mode=0o600)
+        # True only when the warning file is durably in place; the
+        # caller must not treat a failed write as an answered warning.
+        return self.write_atomic(
+            self.safe_component(agent_id) + WARNING_SUFFIX,
+            json.dumps(record) + "\n", mode=0o600)
 
     def read_warning(self, agent_id):
         try:

@@ -652,6 +652,16 @@ class TeamBroker:
             self._sweep()
 
     def _sweep(self):
+        # One bad stage must never kill the sweep thread: a raised
+        # OSError (a full or read-only state dir) would otherwise stop
+        # idle reap, mailbox prune, peer expiry, and restart policy for
+        # the daemon's whole life.
+        try:
+            self._sweep_once()
+        except Exception as exc:
+            log("sweep failed: %s" % exc)
+
+    def _sweep_once(self):
         now = time.time()
         self._expire_peer_relays()
         self._reap_expired_peers(now)
@@ -689,7 +699,7 @@ class TeamBroker:
             return spared
         doomed_ids = {agent_id for agent_id, _ in doomed_fork}
         for agent_id in self._idle_warnings.known_ids:
-            if self._idle_warnings.record(agent_id) is not None:
+            if self._idle_warnings.exists(agent_id):
                 continue
             # The teammate deleted the file: still working, so reset
             # its idle clock and spare it from this sweep.
@@ -700,15 +710,23 @@ class TeamBroker:
         for agent_id, why in doomed_fork:
             if agent_id in spared:
                 continue
-            if self._idle_warnings.record(agent_id) is not None:
-                if self._idle_warnings.is_open(agent_id, now):
+            if agent_id in self._idle_warnings.known_ids:
+                # Our own warning: spare while it is present and young,
+                # otherwise (deleted or expired) let the reap proceed.
+                if self._idle_warnings.exists(agent_id) \
+                        and self._idle_warnings.is_open(agent_id, now):
                     spared.add(agent_id)
                 continue
             if self._clients.get(agent_id) is None:
                 continue
-            self._idle_warnings.warn(agent_id, why, now)
+            # A stale file from an earlier broker generation is not
+            # trusted: replace it with a fresh warning naming this reap.
+            written = self._idle_warnings.warn(agent_id, why, now)
             self._notify_idle_warning(agent_id, why)
-            spared.add(agent_id)
+            # Only a warning actually in place and young earns the grace;
+            # a failed write falls through to silence consent.
+            if written and self._idle_warnings.is_open(agent_id, now):
+                spared.add(agent_id)
         return spared
 
     def _notify_idle_warning(self, agent_id, why):

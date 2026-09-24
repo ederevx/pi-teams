@@ -12,6 +12,11 @@ import time
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
+# Identity leaks from an ambient pi-teams session (TEAM_ID/TEAM_ROLE/...)
+# would change TeamClient's behavior mid-test; the suite owns its identity.
+for _key in [k for k in os.environ if k.startswith("TEAM_")]:
+    del os.environ[_key]
+
 TEAMD = SRC / "teamd.py"
 TEAM = SRC / "team.py"
 

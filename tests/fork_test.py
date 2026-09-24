@@ -189,7 +189,7 @@ class ForkLifecycleTests(unittest.TestCase):
             client.register = lambda: None
             client._watch_stdin = lambda: threading.Event()
             replies = iter([
-                {"kind": "idle-warning",
+                {"kind": "idle-warning", "from": "*",
                  "payload": {"why": "idle-gc", "file": warning}},
                 {"kind": "terminate"},
             ])
@@ -208,6 +208,45 @@ class ForkLifecycleTests(unittest.TestCase):
                     "%s hold did not delete the warning" % state)
                 self.assertEqual(
                     emitted, [], "%s hold surfaced the warning" % state)
+
+    def test_hold_ignores_a_foreign_idle_warning(self):
+        # Only the broker's own warning is honored: a teammate-sent
+        # idle-warning must not delete anything, and a payload path
+        # outside the root is never removed.
+        busy = os.path.join(self.root, "busy.busy")
+        with open(busy, "w") as fh:
+            fh.write("1")
+        warning = os.path.join(self.root, "busy.warn")
+        with open(warning, "w") as fh:
+            fh.write("{}")
+        outside = str(self.root) + "-outside.txt"
+        with open(outside, "w") as fh:
+            fh.write("keep")
+        client = TeamClient(self.root, heartbeat=None)
+        client.id = "fork-hold"
+        client.busy_file = busy
+        client._emit = lambda msg: None
+        client.register = lambda: None
+        client._watch_stdin = lambda: threading.Event()
+        replies = iter([
+            {"kind": "idle-warning", "from": "fork-other",
+             "payload": {"file": warning}},
+            {"kind": "idle-warning", "from": "*",
+             "payload": {"file": outside}},
+            {"kind": "terminate"},
+        ])
+        client._read_line = lambda: next(replies)
+        try:
+            client.hold()
+            self.assertTrue(os.path.exists(warning),
+                            "foreign warning deleted the file")
+            self.assertTrue(os.path.exists(outside),
+                            "path outside the root was deleted")
+        finally:
+            try:
+                os.unlink(outside)
+            except OSError:
+                pass
 
     def test_fork_lives_while_parent_connected(self):
         parent = self._parent("parent-1")

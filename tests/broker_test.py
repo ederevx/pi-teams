@@ -11,8 +11,10 @@ import time
 import unittest
 
 from harness import make_root, read_endpoint, wait_endpoint, wait_until
+from idle_warning import IdleWarnings
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from team import TeamClient
+from team_root import TeamRoot
 from teamd import TEAMMATE_MARKER, PeerLink, TeamBroker
 
 IDLE_ROOMY = 30.0
@@ -579,6 +581,36 @@ class BrokerProtocolTests(unittest.TestCase):
         first.stop()
         thread.join(timeout=3)
         shutil.rmtree(root, ignore_errors=True)
+
+    def test_warning_write_failure_is_not_an_answer(self):
+        # A warning file that never landed must not look like an answered
+        # warning on the next sweep: the id stays unknown and the fork
+        # remains reapable.
+        root = make_root()
+        try:
+            warnings = IdleWarnings(TeamRoot(root), 60)
+
+            def failing_write(agent_id, record):
+                return False
+
+            warnings.root.write_warning = failing_write
+            self.assertFalse(warnings.warn("f1", "idle-gc"))
+            self.assertNotIn("f1", warnings.known_ids)
+            self.assertFalse(warnings.exists("f1"))
+            del warnings.root.write_warning
+            # A corrupt file is present but unreadable: not an answer.
+            with open(str(warnings.path("f2")), "w") as fh:
+                fh.write("{not json")
+            self.assertTrue(warnings.exists("f2"))
+            self.assertIsNone(warnings.record("f2"))
+            # A successful write is known, and its deletion is the answer.
+            self.assertTrue(warnings.warn("f3", "idle-gc"))
+            self.assertIn("f3", warnings.known_ids)
+            self.assertTrue(warnings.exists("f3"))
+            os.unlink(str(warnings.path("f3")))
+            self.assertFalse(warnings.exists("f3"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_idle_fork_is_warned_before_reap_and_spared(self):
         # The courtesy warning: an idle fork gets a timestamped warning
