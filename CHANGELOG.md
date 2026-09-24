@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.28 - 2026-09-24
+
+- Make the broker's idle-restart policy cover every package source
+  file instead of only `team_broker.py`, so the hour-based GC windows
+  added to `settings.py` reach a running broker. The broker still
+  waits for an idle window before it exits, so no live work is
+  dropped.
+
 ## v0.4.27 - 2026-09-24
 
 - Configure the GC reaper windows in hours instead of seconds, and
