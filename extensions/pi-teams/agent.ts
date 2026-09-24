@@ -17,7 +17,7 @@ import {
 	writeStateFile,
 } from "./paths.ts";
 import { settings } from "./settings.ts";
-import { WaitController } from "./wait.ts";
+import { WaitController, type WaitOutcome } from "./wait.ts";
 import type { ProcessHost, SpawnedProcess } from "./process-runner.ts";
 import {
 	resolvePython,
@@ -400,6 +400,12 @@ export class TeamAgent {
 		// delivered as an ordinary message, so no report is ever lost.
 		if (message.kind === "result" && message.to === this.id) {
 			if (this.inbox.deliver(message)) return;
+		}
+		// A direct message must not sit behind a blocked team_wait: end
+		// the wait so the steer below surfaces now. A notice is
+		// bookkeeping and never wakes a wait.
+		if (message.to === this.id && message.kind !== "notice") {
+			this.waits.onMessage(message);
 		}
 		this.deliver(message);
 	}
@@ -976,7 +982,7 @@ export class TeamAgent {
 		shouldYield: () => boolean,
 		onTick?: () => void,
 		stallMs?: number,
-	): Promise<Array<TeamMessage | null>> {
+	): Promise<WaitOutcome> {
 		return this.waits.waitForResults(
 			agentIds, timeoutMs, signal, shouldYield, onTick, stallMs);
 	}

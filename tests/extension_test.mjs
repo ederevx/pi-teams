@@ -295,9 +295,9 @@ test("an active wait consumes a result that arrives during it", async () => {
 	onData(JSON.stringify({
 		from: "kid", to: agent.id, kind: "result", payload: "done",
 	}) + "\n");
-	const results = await waiting;
-	assert.equal(results.length, 1);
-	assert.equal(results[0].payload, "done");
+	const outcome = await waiting;
+	assert.equal(outcome.results.length, 1);
+	assert.equal(outcome.results[0].payload, "done");
 	// The tool result owns it, so it is not also delivered as a message.
 	assert.deepEqual(received, []);
 	agent.stopHold();
@@ -313,17 +313,17 @@ test("a result that arrived early is returned by the next wait", async () => {
 	}) + "\n");
 	// No waiter: the report is delivered as a message and buffered.
 	assert.deepEqual(received.map((m) => m.payload), ["early"]);
-	const results = await agent.waitForResults(
+	const outcome = await agent.waitForResults(
 		["kid"], 5000, undefined, () => false);
-	assert.equal(results[0].payload, "early");
+	assert.equal(outcome.results[0].payload, "early");
 	agent.stopHold();
 });
 
 test("an active wait returns null on its bound", async () => {
 	const { agent } = makeAgent();
-	const results = await agent.waitForResults(
+	const outcome = await agent.waitForResults(
 		["nobody"], 20, undefined, () => false);
-	assert.deepEqual(results, [null]);
+	assert.deepEqual(outcome.results, [null]);
 });
 
 test("an active wait yields when a user message is queued", async () => {
@@ -332,7 +332,7 @@ test("an active wait yields when a user message is queued", async () => {
 	const waiting = agent.waitForResults(
 		["kid"], 5000, undefined, () => pending);
 	setTimeout(() => { pending = true; }, 20);
-	assert.deepEqual(await waiting, [null]);
+	assert.deepEqual((await waiting).results, [null]);
 });
 
 test("an active wait ends when the run aborts", async () => {
@@ -341,7 +341,7 @@ test("an active wait ends when the run aborts", async () => {
 	const waiting = agent.waitForResults(
 		["kid"], 5000, controller.signal, () => false);
 	setTimeout(() => controller.abort(), 10);
-	assert.deepEqual(await waiting, [null]);
+	assert.deepEqual((await waiting).results, [null]);
 });
 
 test("deregister cancels an active wait", async () => {
@@ -350,7 +350,7 @@ test("deregister cancels an active wait", async () => {
 		["kid"], 5000, undefined, () => false);
 	await new Promise((resolve) => setTimeout(resolve, 10));
 	agent.deregister();
-	assert.deepEqual(await waiting, [null]);
+	assert.deepEqual((await waiting).results, [null]);
 });
 
 test("a multi-id wait ends on the first result", async () => {
@@ -362,9 +362,9 @@ test("a multi-id wait ends on the first result", async () => {
 	onData(JSON.stringify({
 		from: "other", to: agent.id, kind: "result", payload: "fast",
 	}) + "\n");
-	const results = await waiting;
-	assert.equal(results[0], null);
-	assert.equal(results[1].payload, "fast");
+	const outcome = await waiting;
+	assert.equal(outcome.results[0], null);
+	assert.equal(outcome.results[1].payload, "fast");
 	agent.stopHold();
 });
 
@@ -375,10 +375,10 @@ test("a buffered result ends a multi-id wait at once", async () => {
 	onData(JSON.stringify({
 		from: "kid", to: agent.id, kind: "result", payload: "early",
 	}) + "\n");
-	const results = await agent.waitForResults(
+	const outcome = await agent.waitForResults(
 		["kid", "other"], 5000, undefined, () => false);
-	assert.equal(results[0].payload, "early");
-	assert.equal(results[1], null);
+	assert.equal(outcome.results[0].payload, "early");
+	assert.equal(outcome.results[1], null);
 	agent.stopHold();
 });
 
@@ -398,7 +398,7 @@ test("a stalled wait nudges each silent teammate once", async () => {
 	});
 	const windowless = (python) => new WindowlessPython(python, () => false);
 	const agent = new TeamAgent(runner, () => {}, windowless);
-	const results = await agent.waitForResults(
+	const outcome = await agent.waitForResults(
 		["kid", "other"], 700, undefined, () => false, undefined, 150);
 	// Silence past the stall bound sends one nudge per teammate; the
 	// 250ms poll fires several times but the nudge must not repeat.
@@ -421,38 +421,69 @@ test("a stalled wait nudges each silent teammate once", async () => {
 	for (const args of nudges) {
 		assert.ok(String(args[args.length - 1]).includes("continue"));
 	}
-	assert.deepEqual(results, [null, null]);
+	assert.deepEqual(outcome.results, [null, null]);
 });
 
-test("an active teammate message resets the stall clock", async () => {
-	const runCalls = [];
+test("an active teammate message wakes the wait so it can steer", async () => {
 	const received = [];
+	const { agent, calls } = makeAgent((message) => received.push(message));
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const waiting = agent.waitForResults(
+		["kid"], 5000, undefined, () => false);
+	onData(JSON.stringify({
+		from: "kid", to: agent.id, kind: "text", payload: "need input",
+	}) + "\n");
+	const outcome = await waiting;
+	assert.deepEqual(outcome.results, [null]);
+	assert.equal(outcome.interruptedBy.payload, "need input");
+	// The message still arrives as an ordinary steering message.
+	assert.deepEqual(received.map((m) => m.payload), ["need input"]);
+	agent.stopHold();
+});
+
+test("a message from outside the wait also wakes it", async () => {
+	const received = [];
+	const { agent, calls } = makeAgent((message) => received.push(message));
+	agent.hold("/work");
+	const onData = calls[0]["stdout:data"];
+	const waiting = agent.waitForResults(
+		["kid"], 5000, undefined, () => false);
+	onData(JSON.stringify({
+		from: "other", to: agent.id, kind: "text", payload: "hello",
+	}) + "\n");
+	const outcome = await waiting;
+	assert.deepEqual(outcome.results, [null]);
+	assert.equal(outcome.interruptedBy.from, "other");
+	assert.deepEqual(received.map((m) => m.payload), ["hello"]);
+	agent.stopHold();
+});
+
+test("a notice resets the stall clock without waking the wait", async () => {
+	const runCalls = [];
 	const { calls, runner } = makeRunner(async (file, args) => {
 		runCalls.push(args);
 		return { stdout: "{}", stderr: "", code: 0 };
 	});
 	const windowless = (python) => new WindowlessPython(python, () => false);
-	const agent = new TeamAgent(
-		runner, (message) => received.push(message), windowless);
+	const agent = new TeamAgent(runner, () => {}, windowless);
 	agent.hold("/work");
 	const onData = calls[0]["stdout:data"];
 	const waiting = agent.waitForResults(
 		["kid"], 600, undefined, () => false, undefined, 200);
-	// Progress chatter every 150ms is a continuous sign of life: the
-	// 200ms stall bound never elapses, so no nudge is ever sent, and
-	// the non-result chatter still arrives as ordinary messages.
-	for (const at of [100, 250, 400, 550]) {
+	// A notice is bookkeeping: it resets the stall clock but never
+	// wakes the wait, so a just-announced teammate is not nudged.
+	for (const at of [100, 250, 400]) {
 		setTimeout(() => onData(JSON.stringify({
-			from: "kid", to: agent.id, kind: "text", payload: "progress",
+			from: "kid", to: agent.id, kind: "notice", payload: "session",
 		}) + "\n"), at);
 	}
-	const results = await waiting;
-	assert.deepEqual(results, [null]);
-	assert.deepEqual(received.map((m) => m.payload),
-		["progress", "progress", "progress", "progress"]);
+	const outcome = await waiting;
+	assert.equal(outcome.interruptedBy, null);
+	assert.deepEqual(outcome.results, [null]);
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.equal(runCalls.filter((args) => args.includes("send")).length, 0,
-		"a messaging teammate was nudged anyway");
+		"a noticed teammate was nudged anyway");
 	agent.stopHold();
 });
 
@@ -1656,13 +1687,54 @@ test("team_wait returns a delivered report as formatted text", async () => {
 		app.requireTeammate = async () => {};
 		app.setState = () => {};
 		app.setBusy = () => {};
-		app.waitForResults = async () => [report];
+		app.waitForResults = async () => ({
+			results: [report], interruptedBy: null,
+		});
 		const result = await tools.get("team_wait").execute(
 			"call-1", { id: "kid" }, undefined, undefined,
 			{ hasPendingMessages: () => false });
 		assert.equal(result.content[0].text, formatReport(report));
 		assert.equal(result.details.reports[0].payload, "all done");
 		assert.deepEqual(result.details.remaining, []);
+	} finally {
+		if (previous === undefined) delete globalThis.__piTeamsAgent;
+		else globalThis.__piTeamsAgent = previous;
+	}
+});
+
+test("team_wait reports a message that woke the wait", async () => {
+	const tools = new Map();
+	const pi = {
+		appendEntry: () => {},
+		sendMessage: () => {},
+		on: () => {},
+		registerEntryRenderer: () => {},
+		registerCommand: () => {},
+		registerTool: (definition) => tools.set(definition.name, definition),
+	};
+	const previous = globalThis.__piTeamsAgent;
+	globalThis.__piTeamsAgent = undefined;
+	try {
+		const { default: register } =
+			await import("../extensions/pi-teams.ts");
+		await register(pi);
+		const app = globalThis.__piTeamsAgent;
+		assert.ok(app, "the extension publishes its agent");
+		const message = {
+			from: "kid", to: app.id, kind: "text", payload: "need input",
+		};
+		app.requireTeammate = async () => {};
+		app.setState = () => {};
+		app.setBusy = () => {};
+		app.waitForResults = async () => ({
+			results: [null], interruptedBy: message,
+		});
+		const result = await tools.get("team_wait").execute(
+			"call-1", { id: "kid" }, undefined, undefined,
+			{ hasPendingMessages: () => false });
+		assert.match(result.content[0].text, /yielded to a text from kid/);
+		assert.equal(result.details.interruptedBy.payload, "need input");
+		assert.deepEqual(result.details.remaining, ["kid"]);
 	} finally {
 		if (previous === undefined) delete globalThis.__piTeamsAgent;
 		else globalThis.__piTeamsAgent = previous;
