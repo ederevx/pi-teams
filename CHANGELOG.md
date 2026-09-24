@@ -4,6 +4,19 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.23 - 2026-09-24
+
+- Configuration moves to the pi settings file: every flag is read from
+  the `piTeams` object in `<agent-dir>/settings.json`, with an explicit
+  environment variable still winning and the built-in default last.
+  `PackageSettings` (`src/settings.py`,
+  `extensions/pi-teams/settings.ts`) is the single owner of the
+  namespace; the per-flag env reads in the broker, peer tunnel, paths,
+  protocol, and agent are gone.
+- `stallSeconds` and `gcWarnGraceSeconds` keep `0` as a real value
+  (disable the nudge / reap at once). `TEAM_ROOT`, `PI_SESSIONS_ROOT`,
+  and `PI_TEAMS_GC_PING_GRACE` remain legacy env fallbacks.
+
 ## v0.4.22 - 2026-09-24
 
 - File-based idle-GC warning: before reaping a work-idle or
