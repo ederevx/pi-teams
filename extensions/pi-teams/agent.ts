@@ -6,7 +6,6 @@
  */
 
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { hostname } from "node:os";
 import { connect as netConnect } from "node:net";
 import { basename, dirname, join } from "node:path";
 
@@ -17,6 +16,7 @@ import {
 	teamdBin,
 	writeStateFile,
 } from "./paths.ts";
+import { settings } from "./settings.ts";
 import { WaitController } from "./wait.ts";
 import type { ProcessHost, SpawnedProcess } from "./process-runner.ts";
 import {
@@ -93,7 +93,7 @@ export class TeamAgent {
 		this.deliver = deliver;
 		this.python = resolvePython();
 		this.windowless = windowlessFactory(this.python);
-		this.host = process.env.PI_TEAMS_HOST || hostname().split(".")[0];
+		this.host = settings.host();
 		// A main's id is minted at first hold (once the session file is
 		// known) and derives from the session stem, surviving restarts
 		// and reloads; TEAM_ID pins a fork's id from spawn.
