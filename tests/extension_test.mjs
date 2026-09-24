@@ -28,7 +28,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -54,6 +54,8 @@ const { TeamAgent, ProcessRunner, PendingRequests,
 	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory,
 	ResultInbox } =
 	await import("../extensions/pi-teams.ts");
+const { PackageSettings } =
+	await import("../extensions/pi-teams/settings.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -1278,3 +1280,125 @@ test("reload handover keeps identity and surrenders the old hold", () => {
 	assert.equal(first.surrendered, true);
 });
 
+
+test("settings read the piTeams object, env overriding the file", () => {
+	const dir = mkdtempSync(join(scratch, "settings-"));
+	writeFileSync(join(dir, "settings.json"), JSON.stringify({
+		piTeams: {
+			host: "file-host",
+			forkIdleSeconds: 111,
+			busyGraceSeconds: 222,
+			gcWarnGraceSeconds: 0,
+			stallSeconds: 0,
+			sessionsRoot: join(dir, "file-sessions"),
+			ssh: "file-ssh",
+		},
+		other: { ignored: true },
+	}));
+	const file = new PackageSettings({}, dir);
+	assert.equal(file.host(), "file-host");
+	assert.equal(file.forkIdleSeconds(), 111);
+	assert.equal(file.busyGraceSeconds(), 222);
+	assert.equal(file.gcWarnGraceSeconds(), 0);
+	assert.equal(file.stallSeconds(), 0);
+	assert.equal(file.sessionsRoot(), join(dir, "file-sessions"));
+	assert.equal(file.ssh(), "file-ssh");
+
+	// An explicit non-empty env variable beats the settings value.
+	const env = new PackageSettings({
+		PI_TEAMS_HOST: "env-host",
+		PI_TEAMS_FORK_IDLE: "5",
+		PI_TEAMS_STALL: "0",
+	}, dir);
+	assert.equal(env.host(), "env-host");
+	assert.equal(env.forkIdleSeconds(), 5);
+	assert.equal(env.stallSeconds(), 0);
+});
+
+test("settings fall back to built-in defaults without a file", () => {
+	const s = new PackageSettings({}, join(scratch, "no-settings"));
+	assert.equal(s.forkIdleSeconds(), 300);
+	assert.equal(s.busyGraceSeconds(), 120);
+	assert.equal(s.gcWarnGraceSeconds(), 60);
+	assert.equal(s.restartGraceSeconds(), 60);
+	assert.equal(s.peerGraceSeconds(), 15);
+	assert.equal(s.sessionGraceSeconds(), 3600);
+	assert.equal(s.sessionSweepIntervalSeconds(), 300);
+	assert.equal(s.spawnWindowMs(), 15000);
+	assert.equal(s.waitSeconds(), 300);
+	assert.equal(s.stallSeconds(), 90);
+	assert.equal(s.ssh(), "ssh");
+	assert.equal(s.remoteState(), null);
+	assert.equal(s.peerSetup(), null);
+	assert.equal(s.stateDir(),
+		join(homedir(), ".local", "state", "pi-teams"));
+	assert.equal(s.sessionsRoot(), join(scratch, "no-settings", "sessions"));
+});
+
+test("a missing, malformed, or non-object settings file is tolerated", () => {
+	const dir = mkdtempSync(join(scratch, "bad-settings-"));
+	// Missing file: the constructed agent dir simply has none.
+	assert.equal(new PackageSettings({}, dir).forkIdleSeconds(), 300);
+	// Malformed JSON.
+	writeFileSync(join(dir, "settings.json"), "{not json");
+	assert.equal(new PackageSettings({}, dir).forkIdleSeconds(), 300);
+	// piTeams exists but is not an object.
+	writeFileSync(join(dir, "settings.json"),
+		JSON.stringify({ piTeams: ["nope"] }));
+	assert.equal(new PackageSettings({}, dir).forkIdleSeconds(), 300);
+});
+
+test("negative and invalid numbers fall through to the default", () => {
+	const dir = mkdtempSync(join(scratch, "invalid-settings-"));
+	writeFileSync(join(dir, "settings.json"), JSON.stringify({
+		piTeams: { forkIdleSeconds: -1, busyGraceSeconds: "nope" },
+	}));
+	const file = new PackageSettings({}, dir);
+	assert.equal(file.forkIdleSeconds(), 300);
+	assert.equal(file.busyGraceSeconds(), 120);
+	assert.equal(new PackageSettings({ PI_TEAMS_FORK_IDLE: "abc" }, dir)
+		.forkIdleSeconds(), 300);
+});
+
+test("gc warn keeps the legacy env fallback and zero", () => {
+	const dir = join(scratch, "gc-settings");
+	assert.equal(new PackageSettings({}, dir).gcWarnGraceSeconds(), 60);
+	assert.equal(new PackageSettings({ PI_TEAMS_GC_PING_GRACE: "7" }, dir)
+		.gcWarnGraceSeconds(), 7);
+	assert.equal(new PackageSettings({
+		PI_TEAMS_GC_WARN_GRACE: "8",
+		PI_TEAMS_GC_PING_GRACE: "7",
+	}, dir).gcWarnGraceSeconds(), 8);
+	assert.equal(new PackageSettings({ PI_TEAMS_GC_WARN_GRACE: "0" }, dir)
+		.gcWarnGraceSeconds(), 0);
+});
+
+test("isConfigured distinguishes a default from a configured value", () => {
+	const dir = join(scratch, "configured-settings");
+	assert.equal(
+		new PackageSettings({}, dir).isConfigured("PI_TEAMS_BIN", "binDir"),
+		false);
+	assert.equal(
+		new PackageSettings({ PI_TEAMS_BIN: "/x" }, dir)
+			.isConfigured("PI_TEAMS_BIN", "binDir"),
+		true);
+	const withFile = mkdtempSync(join(scratch, "file-bin-"));
+	writeFileSync(join(withFile, "settings.json"),
+		JSON.stringify({ piTeams: { binDir: "/file/bin" } }));
+	assert.equal(
+		new PackageSettings({}, withFile)
+			.isConfigured("PI_TEAMS_BIN", "binDir"),
+		true);
+});
+
+test("sessionsRoot keeps the legacy PI_SESSIONS_ROOT fallback", () => {
+	const dir = join(scratch, "session-root-settings");
+	assert.equal(
+		new PackageSettings({ PI_SESSIONS_ROOT: "/legacy" }, dir)
+			.sessionsRoot(),
+		"/legacy");
+	assert.equal(new PackageSettings({
+		PI_TEAMS_SESSIONS_ROOT: "/new",
+		PI_SESSIONS_ROOT: "/legacy",
+	}, dir).sessionsRoot(), "/new");
+});
