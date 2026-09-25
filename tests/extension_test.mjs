@@ -562,89 +562,36 @@ test("requireSameTeam is team-scoped for a teammate", async () => {
 	agent.stopHold();
 });
 
-test("an idle warning steers the agent to delete its file", async () => {
+test("a gc-reap request steers the agent to call the reap tool", async () => {
 	const delivered = [];
 	const { calls, runner } = makeRunner(() =>
 		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
 	const agent = new TeamAgent(runner, (m) => delivered.push(m));
 	agent.deliverMessage(JSON.stringify({
 		op: "message", id: "f1", from: "*", to: "parent-1",
-		kind: "idle-warning",
-		payload: {
-			id: "parent-1", why: "parent-gone",
-			file: "/state/pi-teams/parent-1.warn", grace: 60,
-		},
+		kind: "gc-reap",
+		payload: { id: "parent-1", why: "idle", hours: 3 },
 		ts: 1,
 	}));
-	// The warning steers a turn; no CLI finish or delete runs on the
-	// agent's behalf, so only the agent deleting the file spares it.
-	assert.equal(calls.length, 0, "idle warning was answered automatically");
+	// The request steers a turn; the agent answers by calling the
+	// team_gc_reap tool, so no broker op runs on its behalf here.
+	assert.equal(calls.length, 0, "the reap was answered automatically");
 	assert.equal(delivered.length, 1);
 	const text = String(delivered[0].payload);
-	assert.match(text, /parent-gone/);
-	assert.match(text, /\/state\/pi-teams\/parent-1\.warn/);
-	assert.match(text, /delete/i);
-	assert.match(text, /60s/);
+	assert.match(text, /team_gc_reap/);
+	assert.match(text, /idle/);
+	assert.match(text, /3h/);
 });
 
-test("an idle warning preempts a running turn and delivers on settle", () => {
+test("an ordinary report is delivered without preemption", () => {
 	const delivered = [];
 	const { runner } = makeRunner(() =>
 		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
 	const agent = new TeamAgent(runner, (m) => delivered.push(m));
-	let aborts = 0;
-	let idle = false;
-	agent.bindInterrupt(() => { aborts += 1; }, () => idle);
-	agent.deliverMessage(JSON.stringify({
-		op: "message", id: "w1", from: "*", to: "parent-1",
-		kind: "idle-warning",
-		payload: {
-			id: "parent-1", why: "idle-gc",
-			file: "/state/pi-teams/parent-1.warn", grace: 60,
-		},
-		ts: 1,
-	}));
-	// The running turn is aborted at once and the warning is held, so
-	// a tool blocked on the run returns before the agent reads it.
-	assert.equal(aborts, 1, "the running turn was not aborted");
-	assert.deepEqual(delivered, [], "the warning was steered mid-run");
-	idle = true;
-	agent.surfaceInterrupts();
-	assert.equal(delivered.length, 1);
-	assert.match(String(delivered[0].payload), /delete/i);
-	assert.match(String(delivered[0].payload), /parent-1\.warn/);
-});
-
-test("an idle warning with no running turn delivers at once", () => {
-	const delivered = [];
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, (m) => delivered.push(m));
-	let aborts = 0;
-	agent.bindInterrupt(() => { aborts += 1; }, () => true);
-	agent.deliverMessage(JSON.stringify({
-		op: "message", id: "w2", from: "*", to: "parent-1",
-		kind: "idle-warning",
-		payload: { id: "parent-1", why: "idle-gc",
-			file: "/state/pi-teams/parent-1.warn", grace: 60 },
-		ts: 1,
-	}));
-	assert.equal(aborts, 0, "an idle session was aborted");
-	assert.equal(delivered.length, 1);
-});
-
-test("an ordinary report never preempts a running turn", () => {
-	const delivered = [];
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, (m) => delivered.push(m));
-	let aborts = 0;
-	agent.bindInterrupt(() => { aborts += 1; }, () => false);
 	agent.deliverMessage(JSON.stringify({
 		op: "message", id: "r1", from: "kid", to: agent.id,
 		kind: "result", payload: "done", ts: 1,
 	}));
-	assert.equal(aborts, 0, "a report aborted the turn");
 	assert.deepEqual(delivered.map((m) => m.payload), ["done"]);
 });
 
@@ -1383,15 +1330,30 @@ test("reload handover keeps identity and surrenders the old hold", () => {
 	assert.equal(first.surrendered, true);
 });
 
+test("reap acks the broker with this agent's identity and token", async () => {
+	const runs = [];
+	const { runner } = makeRunner((file, args) => {
+		runs.push({ file, args });
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	agent.id = "rog:pi-1-stem";
+	await agent.reap();
+	const call = runs.find((c) => c.args.includes("reap"));
+	assert.ok(call, "no reap op was sent");
+	assert.equal(call.args[call.args.indexOf("--id") + 1], "rog:pi-1-stem");
+	assert.equal(call.args[call.args.indexOf("--send-token") + 1],
+		agent.sendToken);
+});
+
 
 test("settings read the piTeams object, env overriding the file", () => {
 	const dir = mkdtempSync(join(scratch, "settings-"));
 	writeFileSync(join(dir, "settings.json"), JSON.stringify({
 		piTeams: {
 			host: "file-host",
-			forkIdleHours: 111,
+			gcIdleHours: 111,
 			busyGraceHours: 222,
-			gcWarnGraceHours: 0,
 			stallSeconds: 0,
 			sessionsRoot: join(dir, "file-sessions"),
 			ssh: "file-ssh",
@@ -1400,9 +1362,8 @@ test("settings read the piTeams object, env overriding the file", () => {
 	}));
 	const file = new PackageSettings({}, dir);
 	assert.equal(file.host(), "file-host");
-	assert.equal(file.forkIdleHours(), 111);
+	assert.equal(file.gcIdleHours(), 111);
 	assert.equal(file.busyGraceHours(), 222);
-	assert.equal(file.gcWarnGraceHours(), 0);
 	assert.equal(file.stallSeconds(), 0);
 	assert.equal(file.sessionsRoot(), join(dir, "file-sessions"));
 	assert.equal(file.ssh(), "file-ssh");
@@ -1410,19 +1371,18 @@ test("settings read the piTeams object, env overriding the file", () => {
 	// An explicit non-empty env variable beats the settings value.
 	const env = new PackageSettings({
 		PI_TEAMS_HOST: "env-host",
-		PI_TEAMS_FORK_IDLE_HOURS: "5",
+		PI_TEAMS_GC_IDLE_HOURS: "5",
 		PI_TEAMS_STALL: "0",
 	}, dir);
 	assert.equal(env.host(), "env-host");
-	assert.equal(env.forkIdleHours(), 5);
+	assert.equal(env.gcIdleHours(), 5);
 	assert.equal(env.stallSeconds(), 0);
 });
 
 test("settings fall back to built-in defaults without a file", () => {
 	const s = new PackageSettings({}, join(scratch, "no-settings"));
-	assert.equal(s.forkIdleHours(), 6);
+	assert.equal(s.gcIdleHours(), 3);
 	assert.equal(s.busyGraceHours(), 2);
-	assert.equal(s.gcWarnGraceHours(), 1);
 	assert.equal(s.restartGraceSeconds(), 60);
 	assert.equal(s.peerGraceSeconds(), 15);
 	assert.equal(s.sessionGraceHours(), 72);
@@ -1441,35 +1401,35 @@ test("settings fall back to built-in defaults without a file", () => {
 test("a missing, malformed, or non-object settings file is tolerated", () => {
 	const dir = mkdtempSync(join(scratch, "bad-settings-"));
 	// Missing file: the constructed agent dir simply has none.
-	assert.equal(new PackageSettings({}, dir).forkIdleHours(), 6);
+	assert.equal(new PackageSettings({}, dir).gcIdleHours(), 3);
 	// Malformed JSON.
 	writeFileSync(join(dir, "settings.json"), "{not json");
-	assert.equal(new PackageSettings({}, dir).forkIdleHours(), 6);
+	assert.equal(new PackageSettings({}, dir).gcIdleHours(), 3);
 	// piTeams exists but is not an object.
 	writeFileSync(join(dir, "settings.json"),
 		JSON.stringify({ piTeams: ["nope"] }));
-	assert.equal(new PackageSettings({}, dir).forkIdleHours(), 6);
+	assert.equal(new PackageSettings({}, dir).gcIdleHours(), 3);
 });
 
 test("negative and invalid numbers fall through to the default", () => {
 	const dir = mkdtempSync(join(scratch, "invalid-settings-"));
 	writeFileSync(join(dir, "settings.json"), JSON.stringify({
-		piTeams: { forkIdleHours: -1, busyGraceHours: "nope" },
+		piTeams: { gcIdleHours: -1, busyGraceHours: "nope" },
 	}));
 	const file = new PackageSettings({}, dir);
-	assert.equal(file.forkIdleHours(), 6);
+	assert.equal(file.gcIdleHours(), 3);
 	assert.equal(file.busyGraceHours(), 2);
-	assert.equal(new PackageSettings({ PI_TEAMS_FORK_IDLE_HOURS: "abc" }, dir)
-		.forkIdleHours(), 6);
+	assert.equal(new PackageSettings({ PI_TEAMS_GC_IDLE_HOURS: "abc" }, dir)
+		.gcIdleHours(), 3);
 });
 
-test("gc warn reads hours and treats zero as a real value", () => {
+test("gc idle reads hours and treats zero as a real value", () => {
 	const dir = join(scratch, "gc-settings");
-	assert.equal(new PackageSettings({}, dir).gcWarnGraceHours(), 1);
-	assert.equal(new PackageSettings({ PI_TEAMS_GC_WARN_HOURS: "8" }, dir)
-		.gcWarnGraceHours(), 8);
-	assert.equal(new PackageSettings({ PI_TEAMS_GC_WARN_HOURS: "0" }, dir)
-		.gcWarnGraceHours(), 0);
+	assert.equal(new PackageSettings({}, dir).gcIdleHours(), 3);
+	assert.equal(new PackageSettings({ PI_TEAMS_GC_IDLE_HOURS: "8" }, dir)
+		.gcIdleHours(), 8);
+	assert.equal(new PackageSettings({ PI_TEAMS_GC_IDLE_HOURS: "0" }, dir)
+		.gcIdleHours(), 0);
 });
 
 test("isConfigured distinguishes a default from a configured value", () => {
@@ -1506,8 +1466,8 @@ test("sessionsRoot keeps the legacy PI_SESSIONS_ROOT fallback", () => {
 // -- /team-settings --------------------------------------------------
 
 const ROW_ORDER = "spawnWindowMs,waitSeconds,stallSeconds,binDir,ssh," +
-	"remoteState,sessionsRoot,host,stateDir,forkIdleHours," +
-	"busyGraceHours,gcWarnGraceHours,restartGraceSeconds," +
+	"remoteState,sessionsRoot,host,stateDir,gcIdleHours," +
+	"busyGraceHours,restartGraceSeconds," +
 	"peerGraceSeconds,sessionGraceHours," +
 	"sessionSweepIntervalSeconds,peerSetup";
 
@@ -1543,11 +1503,11 @@ test("team-settings rows keep the piTeams order and effective values", () => {
 	const presenter = new TeamSettingsPresenter(settings, new SettingsStore(), {});
 	const rows = presenter.rows();
 	assert.equal(rows.map((row) => row.id).join(","), ROW_ORDER);
-	assert.equal(rows.length, 17);
+	assert.equal(rows.length, 16);
 	assert.equal(rows[1].value, "42");
 	assert.equal(rows[4].value, "custom-ssh");
 	assert.equal(rows[1].title, "Wait timeout");
-	assert.equal(rows[16].value, "");
+	assert.equal(rows[15].value, "");
 	for (const row of rows) {
 		assert.equal(typeof row.submenu, "function");
 	}
@@ -1741,19 +1701,17 @@ test("team_wait reports a message that woke the wait", async () => {
 	}
 });
 
-test("the extension wires abort and settle into the idle-warning path", async () => {
-	// The session_start handler captures the runner's abort/isIdle probes
-	// into the agent, and agent_settled opens the next turn for a
-	// warning held across the preemption.
-	const handlers = new Map();
-	const sent = [];
+test("the extension wires team_gc_reap to ack and shut down", async () => {
+	// The tool answers the broker's idle request: ack the reap through
+	// the broker, then request an orderly process shutdown.
+	const tools = new Map();
 	const pi = {
 		appendEntry: () => {},
-		sendMessage: (message) => { sent.push(message); },
-		on: (event, handler) => handlers.set(event, handler),
+		sendMessage: () => {},
+		on: () => {},
 		registerEntryRenderer: () => {},
 		registerCommand: () => {},
-		registerTool: () => {},
+		registerTool: (definition) => tools.set(definition.name, definition),
 	};
 	const previous = globalThis.__piTeamsAgent;
 	globalThis.__piTeamsAgent = undefined;
@@ -1763,31 +1721,15 @@ test("the extension wires abort and settle into the idle-warning path", async ()
 		await register(pi);
 		const app = globalThis.__piTeamsAgent;
 		assert.ok(app, "the extension publishes its agent");
-		app.ensureBroker = () => {};
-		app.hold = () => {};
-		app.announceSession = async () => {};
-		let aborts = 0;
-		let idle = false;
-		await handlers.get("session_start")({}, {
-			abort: () => { aborts += 1; },
-			isIdle: () => idle,
-			sessionManager: { getSessionFile: () => "" },
-			cwd: "/work",
-		});
-		app.deliverMessage(JSON.stringify({
-			op: "message", id: "w-ext", from: "*", to: app.id,
-			kind: "idle-warning",
-			payload: { id: app.id, why: "idle-gc",
-				file: "/state/x.warn", grace: 60 },
-			ts: 1,
-		}));
-		assert.equal(aborts, 1, "the session ctx abort was not used");
-		assert.deepEqual(sent, [], "the warning was steered mid-run");
-		idle = true;
-		await handlers.get("agent_settled")();
-		assert.equal(sent.length, 1, "the hold was not surfaced on settle");
-		assert.match(String(sent[0].content), /delete/i);
-		assert.match(String(sent[0].content), /\/state\/x\.warn/);
+		let reaped = 0;
+		let shut = 0;
+		app.reap = async () => { reaped += 1; };
+		const result = await tools.get("team_gc_reap").execute(
+			"call-1", {}, undefined, undefined,
+			{ shutdown: () => { shut += 1; } });
+		assert.equal(reaped, 1, "the reap was not acked to the broker");
+		assert.equal(shut, 1, "the session shutdown was not requested");
+		assert.match(result.content[0].text, /reaping this session/);
 	} finally {
 		if (previous === undefined) delete globalThis.__piTeamsAgent;
 		else globalThis.__piTeamsAgent = previous;

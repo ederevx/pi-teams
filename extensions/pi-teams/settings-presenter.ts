@@ -73,7 +73,7 @@ export class TeamSettingsPresenter {
 	}
 
 	/** Every `piTeams` setting, in settings-pane order: the seven the
-	 *  extension owns, then the ten the broker reads at start. Values
+	 *  extension owns, then the nine the broker reads at start. Values
 	 *  are the effective ones (env beats file beats default), read now. */
 	private specs(): SettingSpec[] {
 		const s = this.settings;
@@ -142,11 +142,11 @@ export class TeamSettingsPresenter {
 				value: s.stateDir(),
 			},
 			{
-				id: "forkIdleHours", label: "Fork idle (h)", kind: "number",
-				key: "forkIdleHours", env: ["PI_TEAMS_FORK_IDLE_HOURS"],
-				description: "Work-idle hours before the broker warns a " +
-					"fork; 0 disables fork-idle GC.",
-				value: String(s.forkIdleHours()),
+				id: "gcIdleHours", label: "GC idle (h)", kind: "number",
+				key: "gcIdleHours", env: ["PI_TEAMS_GC_IDLE_HOURS"],
+				description: "Idle hours before the broker asks a session to " +
+					"reap itself; 0 disables the request.",
+				value: String(s.gcIdleHours()),
 			},
 			{
 				id: "busyGraceHours", label: "Busy grace (h)", kind: "number",
@@ -154,14 +154,6 @@ export class TeamSettingsPresenter {
 				description: "Hours a stale .busy file may outlive its " +
 					"agent.",
 				value: String(s.busyGraceHours()),
-			},
-			{
-				id: "gcWarnGraceHours", label: "GC warning grace (h)",
-				kind: "number", key: "gcWarnGraceHours",
-				env: ["PI_TEAMS_GC_WARN_HOURS"],
-				description: "Hours a fork has to answer an idle warning " +
-					"before it is reaped.",
-				value: String(s.gcWarnGraceHours()),
 			},
 			{
 				id: "restartGraceSeconds", label: "Restart grace",

@@ -11,7 +11,6 @@ import time
 import unittest
 
 from harness import make_root, read_endpoint, wait_endpoint, wait_until
-from idle_warning import IdleWarnings
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from team import TeamClient
 from team_root import TeamRoot
@@ -101,7 +100,7 @@ class BrokerProtocolTests(unittest.TestCase):
                                  sweep_interval=0.2, busy_grace=0.3,
                                  sessions_root=self.sessions_root,
                                  session_grace=0.3)
-        self.broker._session_sweep_interval = 0.2
+        self.broker.gc.session_sweep_interval = 0.2
         self.thread = threading.Thread(target=self.broker.run, daemon=True)
         self.thread.start()
         wait_endpoint(self.root)
@@ -538,7 +537,11 @@ class BrokerProtocolTests(unittest.TestCase):
             "closed connection was not swept",
         )
 
-    def test_idle_sweep(self):
+    def test_seen_idle_entry_is_not_reaped(self):
+        # Liveness is connection-based: a registered agent that stops
+        # heartbeating reads offline but is not reaped by the sweep;
+        # only its own connection drop (or its voluntary reap) removes
+        # it. The idle request covers the abandoned-session case.
         root = make_root()
         broker = TeamBroker(root, idle_timeout=0.4, sweep_interval=0.1)
         thread = threading.Thread(target=broker.run, daemon=True)
@@ -549,9 +552,13 @@ class BrokerProtocolTests(unittest.TestCase):
             ghost.id = "ghost"
             ghost.send_token = "st-5"
             ghost.register()
+            time.sleep(1.0)
+            self.assertIn("ghost", self._ids_via(root),
+                          "a stale-heartbeat entry was reaped by the sweep")
+            ghost.close()
             self.assertTrue(
                 wait_until(lambda: "ghost" not in self._ids_via(root)),
-                "idle agent was never swept",
+                "a dropped connection was never swept",
             )
         finally:
             broker.stop()
@@ -582,417 +589,243 @@ class BrokerProtocolTests(unittest.TestCase):
         thread.join(timeout=3)
         shutil.rmtree(root, ignore_errors=True)
 
-    def test_warning_write_failure_is_not_an_answer(self):
-        # A warning file that never landed must not look like an answered
-        # warning on the next sweep: the id stays unknown and the fork
-        # remains reapable.
+    def test_idle_session_is_asked_to_reap_itself(self):
+        # The single idle policy covers every role, main included: a
+        # reachable session with no work contact past the window is
+        # asked to call its own reap tool, once per idle episode.
         root = make_root()
-        try:
-            warnings = IdleWarnings(TeamRoot(root), 60)
-
-            def failing_write(agent_id, record):
-                return False
-
-            warnings.root.write_warning = failing_write
-            self.assertFalse(warnings.warn("f1", "idle-gc"))
-            self.assertNotIn("f1", warnings.known_ids)
-            self.assertFalse(warnings.exists("f1"))
-            del warnings.root.write_warning
-            # A corrupt file is present but unreadable: not an answer.
-            with open(str(warnings.path("f2")), "w") as fh:
-                fh.write("{not json")
-            self.assertTrue(warnings.exists("f2"))
-            self.assertIsNone(warnings.record("f2"))
-            # A successful write is known, and its deletion is the answer.
-            self.assertTrue(warnings.warn("f3", "idle-gc"))
-            self.assertIn("f3", warnings.known_ids)
-            self.assertTrue(warnings.exists("f3"))
-            os.unlink(str(warnings.path("f3")))
-            self.assertFalse(warnings.exists("f3"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_idle_fork_is_warned_before_reap_and_spared(self):
-        # The courtesy warning: an idle fork gets a timestamped warning
-        # file and survives while that file is young.
-        root = make_root()
-        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_warn_grace=1.5)
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, gc_idle=0.3,
+                            sweep_interval=0.1)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
-        dummy = subprocess.Popen(
-            [sys.executable, "-c", "import os, time; time.sleep(60)"]
-        )
         try:
             wait_endpoint(root)
-            parent = TeamClient(root, heartbeat=None)
-            parent.id = "parent-q"
-            parent.role = "main"
-            parent.send_token = "st-6"
-            parent.register()
-            fork = TeamClient(root, heartbeat=None)
-            fork.id = "fork-query"
-            fork.name = "fork-query"
-            fork.role = "fork"
-            fork.parent = "parent-q"
-            fork.owner_pid = str(dummy.pid)
-            fork.send_token = "st-7"
-            fork.register()
-            # Past the fork-idle window the warning file is left and the
-            # fork stays registered well past the fork-idle grace.
+            client = TeamClient(root, heartbeat=None)
+            client.id = "idle-main"
+            client.name = "idle-main"
+            client.role = "main"
+            client.send_token = "st-idle"
+            received = []
+            ready = threading.Event()
+            follower = threading.Thread(
+                target=client.follow, args=(received.append, ready.set),
+                daemon=True)
+            follower.start()
+            self.assertTrue(ready.wait(timeout=3))
+
+            def requests():
+                return [m for m in received if m.get("kind") == "gc-reap"]
+
             self.assertTrue(
-                wait_until(
-                    lambda: "fork-query" in broker._idle_warnings.known_ids,
-                    timeout=3),
-                "idle fork was never warned with a warning file",
-            )
-            self.assertTrue(
-                broker._idle_warnings.path("fork-query").exists(),
-                "idle warning file was not written",
-            )
-            time.sleep(1.0)
-            self.assertIn("fork-query", self._ids_via(root),
-                          "warned fork was reaped inside its grace")
-            self.assertIsNone(dummy.poll(),
-                              "warned fork's owner was signalled early")
-            # Leaving the file past the grace proceeds to the reap.
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=8),
-                "idle fork's owner was never garbage-collected",
-            )
-            self.assertTrue(
-                wait_until(lambda: "fork-query" not in self._ids_via(root)),
-                "garbage-collected fork stays in the registry",
-            )
+                wait_until(lambda: requests(), timeout=4),
+                "idle session was never asked to reap itself")
+            request = requests()[0]
+            self.assertEqual(request.get("from"), "*")
+            self.assertEqual(request["payload"].get("id"), "idle-main")
+            self.assertEqual(request["payload"].get("why"), "idle")
+            # One idle episode earns exactly one request.
+            time.sleep(0.8)
+            self.assertEqual(len(requests()), 1,
+                             "the reaper repeated an unanswered request")
+            # Answering drops the registration and its files.
+            acker = TeamClient(root, heartbeat=None)
+            acker.id = "idle-main"
+            acker.send_token = "st-idle"
+            self.assertEqual(acker.gc_reap().get("op"), "ack")
+            self.assertTrue(wait_until(
+                lambda: "idle-main" not in self._ids_via(root)))
+            acker.close()
+            client.close()
+            follower.join(timeout=3)
         finally:
             broker.stop()
             thread.join(timeout=3)
-            try:
-                dummy.kill()
-            except OSError:
-                pass
-            dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_deleting_warning_resets_the_idle_clock(self):
+    def test_new_work_earns_a_fresh_reap_request(self):
         root = make_root()
-        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_warn_grace=1.0)
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, gc_idle=0.4,
+                            sweep_interval=0.1)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
-        dummy = subprocess.Popen(
-            [sys.executable, "-c", "import os, time; time.sleep(60)"]
-        )
         try:
             wait_endpoint(root)
-            parent = TeamClient(root, heartbeat=None)
-            parent.id = "parent-y2"
-            parent.role = "main"
-            parent.send_token = "st-8"
-            parent.register()
-            fork = TeamClient(root, heartbeat=None)
-            fork.id = "fork-yes"
-            fork.role = "fork"
-            fork.parent = "parent-y2"
-            fork.owner_pid = str(dummy.pid)
-            fork.send_token = "st-9"
-            fork.register()
+            client = TeamClient(root, heartbeat=None)
+            client.id = "idle-work"
+            client.send_token = "st-work"
+            received = []
+            ready = threading.Event()
+            follower = threading.Thread(
+                target=client.follow, args=(received.append, ready.set),
+                daemon=True)
+            follower.start()
+            self.assertTrue(ready.wait(timeout=3))
+
+            def requests():
+                return [m for m in received if m.get("kind") == "gc-reap"]
+
+            self.assertTrue(wait_until(lambda: requests(), timeout=4))
+            # A busy ping is fresh work: it ends the episode, so the
+            # next idle window earns a second request.
+            client.send({"op": "ping", "busy": True})
             self.assertTrue(
-                wait_until(lambda: "fork-yes" in self._ids_via(root)),
-            )
-            self.assertTrue(
-                wait_until(
-                    lambda: "fork-yes" in broker._idle_warnings.known_ids,
-                    timeout=3),
-                "idle fork was never warned",
-            )
-            # The teammate deletes the warning file: still working, so
-            # the broker resets the idle clock.
-            os.unlink(str(broker._idle_warnings.path("fork-yes")))
-            time.sleep(0.3)
-            self.assertIn("fork-yes", self._ids_via(root),
-                          "deleted warning did not spare the fork")
-            self.assertIsNone(dummy.poll(),
-                              "deleted warning still led to a signal")
+                wait_until(lambda: len(requests()) >= 2, timeout=4),
+                "work did not reset the idle request")
+            client.close()
+            follower.join(timeout=3)
         finally:
             broker.stop()
             thread.join(timeout=3)
-            try:
-                dummy.kill()
-            except OSError:
-                pass
-            dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_warning_file_carries_timestamp_and_why(self):
+    def test_busy_session_is_not_asked_to_reap(self):
         root = make_root()
-        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_warn_grace=5.0)
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, gc_idle=0.5,
+                            sweep_interval=0.1)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
-        dummy = subprocess.Popen(
-            [sys.executable, "-c", "import os, time; time.sleep(60)"]
-        )
+        busy = os.path.join(root, "busy-sess.busy")
+        with open(busy, "w") as fh:
+            fh.write("1")
         try:
             wait_endpoint(root)
-            parent = TeamClient(root, heartbeat=None)
-            parent.id = "parent-n"
-            parent.role = "main"
-            parent.send_token = "st-10"
-            parent.register()
-            fork = TeamClient(root, heartbeat=None)
-            fork.id = "fork-no"
-            fork.role = "fork"
-            fork.parent = "parent-n"
-            fork.owner_pid = str(dummy.pid)
-            fork.send_token = "st-11"
-            fork.register()
-            self.assertTrue(
-                wait_until(
-                    lambda: "fork-no" in broker._idle_warnings.known_ids,
-                    timeout=3),
-                "idle fork was never warned",
-            )
-            record = broker._idle_warnings.record("fork-no")
-            self.assertIsInstance(record, dict)
-            self.assertEqual(record.get("id"), "fork-no")
-            self.assertEqual(record.get("why"), "idle-gc")
-            self.assertIsInstance(record.get("ts"), (int, float))
-            # The file is young, so the fork is spared for now.
-            self.assertIn("fork-no", self._ids_via(root))
-            self.assertIsNone(dummy.poll(),
-                              "young warning still led to a signal")
-        finally:
-            broker.stop()
-            thread.join(timeout=3)
-            try:
-                dummy.kill()
-            except OSError:
-                pass
-            dummy.wait(timeout=5)
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_parent_gone_fork_is_warned_and_answered(self):
-        # A parent-gone fork with a live connection is warned like an
-        # idle one: its own agent deletes the warning, not its gone
-        # parent. A deleted file spares it and it is re-warned on the
-        # next cycle; leaving the file past the grace reaps it.
-        root = make_root()
-        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
-                            fork_idle=IDLE_ROOMY, sweep_interval=0.1,
-                            gc_warn_grace=1.5)
-        thread = threading.Thread(target=broker.run, daemon=True)
-        thread.start()
-        dummy = subprocess.Popen(
-            [sys.executable, "-c", "import os, time; time.sleep(60)"]
-        )
-        try:
-            wait_endpoint(root)
-            parent = TeamClient(root, heartbeat=None)
-            parent.id = "parent-pg"
-            parent.role = "main"
-            parent.send_token = "st-13"
-            parent.register()
-            fork = TeamClient(root, heartbeat=None)
-            fork.id = "fork-pg"
-            fork.name = "fork-pg"
-            fork.role = "fork"
-            fork.parent = "parent-pg"
-            fork.owner_pid = str(dummy.pid)
-            fork.send_token = "st-14"
-            fork.register()
-            self.assertTrue(
-                wait_until(lambda: "fork-pg" in self._ids_via(root)),
-            )
-            # The parent's connection drops: the fork is doomed as
-            # parent-gone and warned, since its own agent can answer.
-            parent.close()
-            self.assertTrue(
-                wait_until(
-                    lambda: "fork-pg" in broker._idle_warnings.known_ids,
-                    timeout=3),
-                "parent-gone fork was never warned",
-            )
-            reason = (broker._idle_warnings.record("fork-pg") or {}).get("why")
-            self.assertEqual(reason, "parent-gone")
-            # The fork's agent deletes the warning: spared, then
-            # warned again on the next cycle while the parent is gone.
-            os.unlink(str(broker._idle_warnings.path("fork-pg")))
-            self.assertTrue(
-                wait_until(
-                    lambda: "fork-pg" in broker._idle_warnings.known_ids,
-                    timeout=3),
-                "spared fork was not re-warned on the next cycle",
-            )
-            self.assertIn("fork-pg", self._ids_via(root),
-                          "re-warned fork was not spared")
-            self.assertIsNone(dummy.poll(),
-                              "spared fork's owner was signalled")
-            # Leaving the second warning in place reaps after grace.
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=8),
-                "unanswered warning did not reap the parent-gone fork",
-            )
-        finally:
-            broker.stop()
-            thread.join(timeout=3)
-            try:
-                dummy.kill()
-            except OSError:
-                pass
-            dummy.wait(timeout=5)
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_fork_idle_gc_kills_owner(self):
-        root = make_root()
-        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.3,
-                            sweep_interval=0.1, gc_warn_grace=0)
-        thread = threading.Thread(target=broker.run, daemon=True)
-        thread.start()
-        dummy = subprocess.Popen(
-            [sys.executable, "-c", "import os, time; time.sleep(60)"]
-        )
-        try:
-            wait_endpoint(root)
-            parent = TeamClient(root, heartbeat=None)
-            parent.id = "parent-x"
-            parent.role = "main"
-            parent.send_token = "st-12"
-            parent.register()
-            fork = TeamClient(root, heartbeat=None)
-            fork.id = "fork-gc"
-            fork.name = "fork-gc"
-            fork.role = "fork"
-            fork.parent = "parent-x"
-            fork.owner_pid = str(dummy.pid)
-            self.assertIn(fork.register().get("op"), ("ack", "error"))
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "idle fork's owner was never garbage-collected",
-            )
-            self.assertTrue(
-                wait_until(lambda: "fork-gc" not in self._ids_via(root)),
-                "garbage-collected fork stays in the registry",
-            )
-        finally:
-            broker.stop()
-            thread.join(timeout=3)
-            try:
-                dummy.kill()
-            except OSError:
-                pass
-            dummy.wait(timeout=5)
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_busy_ping_keeps_fork_alive(self):
-        root = make_root()
-        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, fork_idle=0.5,
-                            sweep_interval=0.1, gc_warn_grace=0)
-        thread = threading.Thread(target=broker.run, daemon=True)
-        thread.start()
-        dummy = subprocess.Popen(
-            [sys.executable, "-c", "import os, time; time.sleep(60)"]
-        )
-        try:
-            wait_endpoint(root)
-            parent = TeamClient(root, heartbeat=None)
-            parent.id = "parent-y"
-            parent.role = "main"
-            parent.send_token = "st-13"
-            parent.register()
-            fork = TeamClient(root, heartbeat=None)
-            fork.id = "fork-busy"
-            fork.role = "fork"
-            fork.parent = "parent-y"
-            fork.owner_pid = str(dummy.pid)
-            fork.send_token = "st-14"
-            fork.register()
-            stop_pings = threading.Event()
-
-            def ping_busy():
-                while not stop_pings.is_set():
-                    fork.send({"op": "ping", "busy": True})
-                    time.sleep(0.2)
-
-            pinger = threading.Thread(target=ping_busy, daemon=True)
-            pinger.start()
+            client = TeamClient(root, heartbeat=0.2)
+            client.id = "busy-sess"
+            client.busy_file = busy
+            client.send_token = "st-busy"
+            received = []
+            ready = threading.Event()
+            follower = threading.Thread(
+                target=client.follow, args=(received.append, ready.set),
+                daemon=True)
+            follower.start()
+            self.assertTrue(ready.wait(timeout=3))
             time.sleep(1.4)
-            self.assertIsNone(dummy.poll(),
-                              "busy fork was garbage-collected")
-            self.assertIn("fork-busy", self._ids_via(root))
-            stop_pings.set()
+            self.assertEqual(
+                [m for m in received if m.get("kind") == "gc-reap"], [],
+                "a busy session was asked to reap itself")
+            # Leaving the busy state lets the idle window reach it.
+            with open(busy, "w") as fh:
+                fh.write("0")
             self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "fork never GC'd after going idle",
-            )
+                wait_until(lambda: any(
+                    m.get("kind") == "gc-reap" for m in received),
+                    timeout=4),
+                "an idle session was never asked to reap itself")
+            client.close()
+            follower.join(timeout=3)
         finally:
             broker.stop()
             thread.join(timeout=3)
-            try:
-                dummy.kill()
-            except OSError:
-                pass
-            dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_waiting_fork_survives_idle_gc(self):
+    def test_waiting_session_is_not_asked_to_reap(self):
         root = make_root()
-        broker = TeamBroker(root, idle_timeout=2.0, fork_idle=0.5,
-                            sweep_interval=0.1, gc_warn_grace=0)
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, gc_idle=0.4,
+                            sweep_interval=0.1)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
-        dummy = subprocess.Popen(
-            [sys.executable, "-c", "import os, time; time.sleep(60)"]
-        )
-        busy = os.path.join(root, "fork-wait.busy")
+        busy = os.path.join(root, "wait-sess.busy")
         with open(busy, "w") as fh:
             fh.write("2")
         try:
             wait_endpoint(root)
-            parent = TeamClient(root, heartbeat=0.2)
-            parent.id = "parent-w"
-            parent.role = "main"
-            parent.send_token = "st-15"
-            parent.register()
-            fork = TeamClient(root, heartbeat=0.2)
-            fork.id = "fork-wait"
-            fork.role = "fork"
-            fork.parent = "parent-w"
-            fork.owner_pid = str(dummy.pid)
-            fork.busy_file = busy
-            fork.send_token = "st-16"
-            fork.register()
-            # Waiting is not work, but it is not idle either: the fork
-            # must outlive several fork-idle windows while it waits.
-            time.sleep(2.0)
-            self.assertIsNone(dummy.poll(),
-                              "waiting fork was garbage-collected")
-            self.assertIn("fork-wait", self._ids_via(root))
-            # Leaving the wait lets the stale work clock expire it again.
+            client = TeamClient(root, heartbeat=0.2)
+            client.id = "wait-sess"
+            client.busy_file = busy
+            client.send_token = "st-wait"
+            received = []
+            ready = threading.Event()
+            follower = threading.Thread(
+                target=client.follow, args=(received.append, ready.set),
+                daemon=True)
+            follower.start()
+            self.assertTrue(ready.wait(timeout=3))
+            time.sleep(1.2)
+            self.assertEqual(
+                [m for m in received if m.get("kind") == "gc-reap"], [],
+                "a waiting session was asked to reap itself")
             with open(busy, "w") as fh:
                 fh.write("0")
             self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "fork never GC'd after it left the wait",
-            )
+                wait_until(lambda: any(
+                    m.get("kind") == "gc-reap" for m in received),
+                    timeout=4),
+                "a session that left the wait was never asked to reap")
+            client.close()
+            follower.join(timeout=3)
         finally:
             broker.stop()
             thread.join(timeout=3)
-            try:
-                dummy.kill()
-            except OSError:
-                pass
-            dummy.wait(timeout=5)
             shutil.rmtree(root, ignore_errors=True)
 
-    def _start_broker(self, root, host, tunnel_factory=None,
-                      gc_warn_grace=None):
+    def test_zero_idle_disables_the_reap_request(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, gc_idle=0,
+                            sweep_interval=0.1)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        try:
+            wait_endpoint(root)
+            client = TeamClient(root, heartbeat=None)
+            client.id = "no-reap"
+            client.send_token = "st-noreap"
+            received = []
+            ready = threading.Event()
+            follower = threading.Thread(
+                target=client.follow, args=(received.append, ready.set),
+                daemon=True)
+            follower.start()
+            self.assertTrue(ready.wait(timeout=3))
+            time.sleep(0.8)
+            self.assertEqual(
+                [m for m in received if m.get("kind") == "gc-reap"], [],
+                "a zero idle window still requested a reap")
+            self.assertIn("no-reap", self._ids_via(root))
+            client.close()
+            follower.join(timeout=3)
+        finally:
+            broker.stop()
+            thread.join(timeout=3)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_gc_reap_removes_teammate_session_and_keeps_attached(self):
+        # The voluntary reap drops the registration; a spawned
+        # teammate's marked transcript goes with it, an attached
+        # session's unmarked transcript stays for /resume.
+        spawned = os.path.join(self.sessions_root, "reaped-fork.jsonl")
+        self._write_session(spawned, marker=True)
+        attached = os.path.join(self.sessions_root, "reaped-attached.jsonl")
+        self._write_session(attached, marker=False)
+        for agent_id, session, token in (
+                ("beta:reap-fork", spawned, "st-rf"),
+                ("beta:reap-attached", attached, "st-ra")):
+            client = TeamClient(self.root)
+            client.id = agent_id
+            client.role = "fork"
+            client.parent = "checker"
+            client.session = session
+            client.send_token = token
+            self.assertEqual(client.register().get("op"), "ack")
+        for agent_id, session, token, kept in (
+                ("beta:reap-fork", spawned, "st-rf", False),
+                ("beta:reap-attached", attached, "st-ra", True)):
+            acker = TeamClient(self.root)
+            acker.id = agent_id
+            acker.send_token = token
+            self.assertEqual(acker.gc_reap().get("op"), "ack")
+            acker.close()
+            self.assertEqual(os.path.exists(session), kept, session)
+            self.assertTrue(wait_until(
+                lambda a=agent_id: a not in self._ids_via(self.root)))
+
+    def _start_broker(self, root, host, tunnel_factory=None):
         sessions = os.path.join(root, "sessions")
         os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             sweep_interval=0.1, host=host,
                             peer_grace=0.3, sessions_root=sessions,
-                            session_grace=0.3, gc_warn_grace=gc_warn_grace,
+                            session_grace=0.3,
                             tunnel_factory=tunnel_factory)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
@@ -1228,15 +1061,13 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root_a, ignore_errors=True)
             shutil.rmtree(root_b, ignore_errors=True)
 
-    def test_remote_fork_reaped_when_parent_disconnects(self):
+    def test_remote_fork_survives_parent_disconnect(self):
+        # A parent agent's own disconnect no longer reaps its forks:
+        # only the single idle window (or a peer link loss) does.
         root_a = make_root()
         root_b = make_root()
         broker_a, thread_a = self._start_broker(root_a, "alpha")
-        # A parent-gone fork with a live connection is asked first; a
-        # short grace keeps this reap-timing test quick while still
-        # exercising the silence-past-grace path.
-        broker_b, thread_b = self._start_broker(root_b, "beta",
-                                                gc_warn_grace=0.5)
+        broker_b, thread_b = self._start_broker(root_b, "beta")
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import os, time; time.sleep(60)"])
         try:
@@ -1261,13 +1092,14 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertIsNone(dummy.poll(),
                               "fork reaped while its parent was live")
             # The requesting agent's session ends: only its connection
-            # drops while the peer link stays up.
+            # drops while the peer link stays up. The fork is not reaped
+            # for a departed parent; it stays until its own idle window.
             caller.close()
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "remote fork not reaped when its parent disconnected")
-            self.assertTrue(wait_until(
-                lambda: "beta:fork-live" not in self._ids_via(root_b)))
+            time.sleep(1.5)
+            self.assertIsNone(
+                dummy.poll(),
+                "remote fork was reaped when its parent disconnected")
+            self.assertIn("beta:fork-live", self._ids_via(root_b))
             self.assertIn("alpha", broker_b._peers)
         finally:
             broker_a.stop()

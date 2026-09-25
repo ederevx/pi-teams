@@ -48,7 +48,7 @@ class BrokerCli:
         parser.add_argument("--root", default=DEFAULT_ROOT)
         parser.add_argument("--host", default=None)
         parser.add_argument("--idle-timeout", type=float, default=15.0)
-        parser.add_argument("--fork-idle", type=float, default=None)
+        parser.add_argument("--gc-idle", type=float, default=None)
         parser.add_argument("--busy-grace", type=float, default=None)
         parser.add_argument("--restart-grace", type=float, default=None)
         parser.add_argument("--sweep-interval", type=float, default=1.0)
@@ -61,7 +61,7 @@ class BrokerCli:
             return 0
         TeamBroker(args.root, idle_timeout=args.idle_timeout,
                    sweep_interval=args.sweep_interval,
-                   fork_idle=args.fork_idle, busy_grace=args.busy_grace,
+                   gc_idle=args.gc_idle, busy_grace=args.busy_grace,
                    restart_grace=args.restart_grace, host=args.host).run()
         return 0
 

@@ -33,7 +33,6 @@ import {
 } from "./spawn.ts";
 import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
-import { InterruptGate } from "./interrupt.ts";
 import {
 	mintSendToken,
 	requestId,
@@ -45,9 +44,6 @@ import { TEAM_ROLE_PROMPT } from "./roles.ts";
 export class TeamAgent {
 	private readonly runner: ProcessHost;
 	private readonly deliver: DeliverFn;
-	// Preempts a running turn for an urgent control message and holds
-	// it until the settle, so a blocked tool cannot swallow it.
-	private readonly interrupts: InterruptGate;
 	private readonly python: string;
 	private readonly windowless: InterpreterResolver;
 	id: string = "";
@@ -95,7 +91,6 @@ export class TeamAgent {
 	) {
 		this.runner = runner;
 		this.deliver = deliver;
-		this.interrupts = new InterruptGate(deliver);
 		this.python = resolvePython();
 		this.windowless = windowlessFactory(this.python);
 		this.host = settings.host();
@@ -376,13 +371,11 @@ export class TeamAgent {
 			this.pending.settle(message, "attach-ack");
 			return;
 		}
-		if (message.kind === "idle-warning") {
-			// The broker left a warning file and will reap this session
-			// at its next idle-GC poll unless the file is deleted. The
-			// warning preempts a running turn so a blocked tool returns
-			// and the delete instruction is actually read; an idle
-			// session has nothing to preempt and gets it at once.
-			this.interrupts.request(this.idleWarning(message));
+		if (message.kind === "gc-reap") {
+			// The broker has asked this idle session to reap itself.
+			// The request steers a turn; the agent answers by calling
+			// team_gc_reap, which acks and shuts the session down.
+			this.deliver(this.reapRequest(message));
 			return;
 		}
 		if (message.kind === "attach") {
@@ -410,41 +403,31 @@ export class TeamAgent {
 		this.deliver(message);
 	}
 
-	/** Rewrites the broker's idle warning into the instruction the agent
-	 *  must act on: delete the warning file, or be reaped at the next
-	 *  idle-GC poll. The broker's why (idle-gc or parent-gone) and the
-	 *  file path ride along. */
-	private idleWarning(message: TeamMessage): TeamMessage {
+	/** Rewrites the broker's idle reap request into the instruction the
+	 *  agent must act on: call team_gc_reap to acknowledge and shut this
+	 *  session down. The broker's why and idle window ride along. */
+	private reapRequest(message: TeamMessage): TeamMessage {
 		const payload = (message.payload ?? {}) as {
-			why?: unknown; file?: unknown; grace?: unknown;
+			why?: unknown; hours?: unknown;
 		};
-		const why = typeof payload.why === "string" ? payload.why : "idle-gc";
-		const file = typeof payload.file === "string" ? payload.file : "";
-		const grace = typeof payload.grace === "number"
-			? Math.round(payload.grace)
-			: 60;
+		const why = typeof payload.why === "string" ? payload.why : "idle";
+		const hours = typeof payload.hours === "number" ? payload.hours : 3;
 		return {
 			...message,
 			payload:
-				`The broker will reap this session at its next idle-GC ` +
-				`poll (why: ${why}). To stay alive, delete the warning ` +
-				`file it left you now:\n  ${file}\n` +
-				`Leaving it in place for more than ${grace}s is treated ` +
-				`as consent and the session is reaped. Deleting the file ` +
-				`tells the broker you are still working.`,
+				`The broker asks this session to reap itself after ` +
+				`${hours}h idle (why: ${why}). Call the team_gc_reap ` +
+				`tool now to acknowledge and shut this session down. If ` +
+				`you are in fact working, send the broker a message and ` +
+				`keep working; the request is not a forced kill.`,
 		};
 	}
 
-	/** Binds the session abort/idle probes an idle warning preempts
-	 *  with; captured once per session from the ExtensionContext. */
-	bindInterrupt(abort: () => void, isIdle: () => boolean): void {
-		this.interrupts.bind(abort, isIdle);
-	}
-
-	/** Opens the next turn for warnings held across an abort; called
-	 *  from the agent_settled event so the agent answers the warning. */
-	surfaceInterrupts(): void {
-		this.interrupts.settle();
+	/** The voluntary reap the team_gc_reap tool performs: tell the
+	 *  broker to drop this registration and its files. The caller owns
+	 *  the orderly process shutdown (ctx.shutdown()). */
+	async reap(): Promise<void> {
+		await this.brokerOps.gcReap(this.id, this.sendToken);
 	}
 
 	stopHold(): void {
@@ -663,10 +646,9 @@ export class TeamAgent {
 	}
 
 	/** Re-registers this running session as a teammate of `parent`. The
-	 *  broker then treats it as a fork, so it can be waited on and is
-	 *  GC'd with the parent; it is exempt from fork-idle GC. The session
-	 *  file is left intact (no spawn marker), so it stays in `/resume`
-	 *  after the fork is reaped. */
+	 *  broker then treats it as a fork, so it can be waited on. The
+	 *  session file is left intact (no spawn marker), so it stays in
+	 *  `/resume` after the fork is reaped. */
 	async attachTo(parent: string, name?: string): Promise<TeammateRef> {
 		if (!parent) throw new Error("attach needs a parent agent id");
 		if (this.hasParent()) {

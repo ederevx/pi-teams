@@ -145,8 +145,7 @@ export default async function (pi: ExtensionAPI) {
 		description:
 			"Attach an existing live pi agent (by id) as your teammate. " +
 			"It re-registers as your fork, so team_wait blocks for its " +
-			"reports and the broker reaps it with you (exempt from " +
-			"fork-idle GC while you stay connected). One team per agent: " +
+			"reports. One team per agent: " +
 			"a target with a parent is refused, and a teammate cannot " +
 			"attach (a root runs the attach). Use team_spawn for a new " +
 			"teammate instead.",
@@ -447,10 +446,6 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		app.ensureBroker();
-		// The runner binds abort/isIdle once per session; the idle
-		// warning needs both to preempt a blocked turn and then open
-		// the fresh turn that answers the reap warning.
-		app.bindInterrupt(() => ctx.abort(), () => ctx.isIdle());
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		app.rememberSession(sessionFile);
 		app.hold(ctx.cwd);
@@ -463,9 +458,6 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async () => {
 		app.setBusy(false);
-		// A warning held across the abort opens its own turn here, so
-		// the agent sees it and deletes the file before the grace ends.
-		app.surfaceInterrupts();
 	});
 
 	pi.on("before_agent_start", async (event, _ctx) => {
@@ -559,6 +551,35 @@ export default async function (pi: ExtensionAPI) {
 					text: `terminated ${params.target}`,
 				}],
 				details: { target: params.target },
+			};
+		},
+	});
+
+	// -- agent-facing voluntary reap --------------------------------------
+	// The broker's idle request asks the session to call this tool; the
+	// call acks the reap (so the broker drops the registration and, for
+	// a spawned teammate, the transcript) and then requests an orderly
+	// process shutdown.
+	pi.registerTool({
+		name: "team_gc_reap",
+		label: "reap this session",
+		description:
+			"Voluntarily reap this session after the broker's idle " +
+			"request: acknowledge the reap to the broker (it drops the " +
+			"registration and, for a spawned teammate, the transcript) " +
+			"and request an orderly process shutdown. Call it only when " +
+			"the broker asks or when this session should end itself.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			await app.reap();
+			ctx?.shutdown();
+			return {
+				content: [{
+					type: "text",
+					text: "reaping this session: the broker dropped its " +
+						"registration and a shutdown was requested.",
+				}],
+				details: undefined,
 			};
 		},
 	});

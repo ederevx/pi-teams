@@ -26,7 +26,8 @@ const ROLE_TEXT = [
 	"",
 	"Boundaries:",
 	"- You are a spawned teammate: when your task settles and the " +
-		"broker reaps your process, your transcript goes with it. Stay " +
+		"broker asks your session to reap itself (the team_gc_reap " +
+		"tool), your transcript goes with it. Stay " +
 		"resumable while you live, and put anything durable in your " +
 		"report.",
 	"- Do not write memory, private or shared; put durable additions in " +

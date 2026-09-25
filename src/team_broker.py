@@ -2,11 +2,10 @@
 
 An agent registers once, then exchanges JSON-lines messages; the
 broker relays to online recipients, mirrors the registry, and enforces
-fork lifetime through connections only (liveness is connection
-liveness: a closed connection ends its agent, idle entries are swept,
-and a fork whose parent disappears or goes idle gets a terminate
-notice, a closed connection, and its owner signalled). One
-pid-probing exception: the broker lock (see TeamRoot.acquire_lock).
+lifetime through connections only (liveness is connection liveness: a
+closed connection ends its agent, and one idle past the single GC
+window is asked to reap itself). One pid-probing exception: the broker
+lock (see TeamRoot.acquire_lock).
 """
 
 import hashlib
@@ -23,11 +22,10 @@ from delivery import MailboxDelivery
 from mailbox import Mailbox
 from registry import RegistryMirror
 
-from idle_warning import IdleWarnings
+from gc_reaper import GcReaper
 from peer_link import PeerLink
 from send_gate import SendGate
 from peer_transport import PeerTransport
-from state_gc import StateGc
 from wire import LineStream, dump_line
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from settings import PackageSettings
@@ -42,10 +40,9 @@ class TeamBroker:
     """Registry + relay for connected agents on one loopback endpoint."""
 
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
-                 fork_idle=None, busy_grace=None, sessions_root=None,
+                 gc_idle=None, busy_grace=None, sessions_root=None,
                  session_grace=None, restart_grace=None, peer_grace=None,
-                 gc_warn_grace=None, host=None, settings=None,
-                 tunnel_factory=None):
+                 host=None, settings=None, tunnel_factory=None):
         # Settings own every configurable flag; an injected value (the
         # tests) or an explicit environment variable beats them.
         self.settings = settings or PackageSettings()
@@ -55,12 +52,12 @@ class TeamBroker:
         # Globally unique ids need a per-host label; peers route by the
         # host prefix of a target id.
         self.host = host or self.settings.host()
-        # A spawned teammate (role "fork") idle this long is GCed:
-        # connection closed, owner signalled, entry dropped. A busy
-        # teammate's heartbeats keep it alive.
-        self.fork_idle = float(
-            fork_idle if fork_idle is not None
-            else self.settings.fork_idle()
+        # The single idle window: a session with no work contact this
+        # long is asked to reap itself (see gc_reaper). Zero disables
+        # the request.
+        self.gc_idle = float(
+            gc_idle if gc_idle is not None
+            else self.settings.gc_idle()
         )
         # A .busy file whose agent is unregistered and whose mtime is
         # past this grace belongs to an old session (reload, crash, or
@@ -69,22 +66,8 @@ class TeamBroker:
             busy_grace if busy_grace is not None
             else self.settings.busy_grace()
         )
-        # write_atomic leaves a .tmp.<pid> scratch only when every
-        # rename retry failed; sweep those aged leftovers on this
-        # cadence so one crashed write cannot litter the root.
-        self.tmp_sweep_interval = 3600.0
-        self._last_tmp_sweep = 0.0
-        # Before an idle fork is reaped the broker leaves it a
-        # timestamped warning file (see idle_warning): deleting the
-        # file is a working answer, leaving it past this grace is
-        # consent; zero disables the warning and reaps immediately.
-        self.gc_warn_grace = float(
-            gc_warn_grace if gc_warn_grace is not None
-            else self.settings.gc_warn_grace()
-        )
-        self._idle_warnings = IdleWarnings(self.root, self.gc_warn_grace)
         # A teammate-marked pi session file whose agent is not live
-        # and idle past this grace is swept (see state_gc); keeps old
+        # and idle past this grace is swept (see gc_reaper); keeps old
         # forks out of pi's /resume list.
         self.sessions_root = pathlib.Path(
             sessions_root or self.settings.sessions_root()
@@ -93,9 +76,8 @@ class TeamBroker:
             session_grace if session_grace is not None
             else self.settings.session_grace()
         )
-        self._session_sweep_interval = float(
+        self.session_sweep_interval = float(
             self.settings.session_sweep_interval())
-        self._last_session_sweep = 0.0
         self.token = secrets.token_hex(16)
         # Stamp the running source (the installed file's hash) so a
         # reloading extension can restart an older broker.
@@ -137,9 +119,11 @@ class TeamBroker:
         self.mirror = RegistryMirror(
             self.root, self._registry, self.idle_timeout)
         self._lock = threading.RLock()
-        self.state_gc = StateGc(
+        self.gc = GcReaper(
             self.root, self._registry, self._lock,
-            self.sessions_root, self.session_grace, self.busy_grace)
+            self.sessions_root, self.session_grace, self.busy_grace,
+            self.gc_idle, self.session_sweep_interval,
+            self._request_reap)
         self._running = False
         self._server = None
 
@@ -395,6 +379,18 @@ class TeamBroker:
             if agent_id:
                 self._drop_entry(agent_id)
             self._reply(conn, op="ack")
+        elif op == "gc-reap":
+            # A session's own agent answered the reaper's request by
+            # calling its reap tool: drop its registration and files
+            # (a teammate transcript included), then ack. The tool owns
+            # the orderly process shutdown.
+            target = str(msg.get("id") or agent_id or "")
+            if not self._send_gate.check(target, msg.get("send_token")):
+                self._reply(conn, op="error", error="send-token",
+                            detail=SendGate.refused_reason())
+            else:
+                self._drop_entry(target)
+                self._reply(conn, op="ack")
         elif op == "shutdown":
             self._reply(conn, op="ack")
             self.stop()
@@ -431,7 +427,7 @@ class TeamBroker:
             self._send_gate.issue(agent_id, msg.get("send_token"))
         for old_id, old_entry in stale:
             self.root.remove_busy_file(old_entry)
-            self.state_gc.remove_session_file(old_entry)
+            self.gc.remove_session_file(old_entry)
         self._persist_and_notify()
         self._reply(conn, op="ack", id=agent_id)
         self.delivery.replay(
@@ -487,16 +483,16 @@ class TeamBroker:
                 due = self.mirror.due(now)
                 data = self.mirror.render(now) if due else None
         if work and agent_id:
-            # Fresh work is a working answer: drop any warning file so
-            # a stale one cannot reap the fork on its next idle window.
-            self._idle_warnings.clear(agent_id)
+            # Fresh work ends the idle episode: the reaper may ask
+            # again only after a new idle window.
+            self.gc.forget_request(agent_id)
         if due:
             self.root.write_atomic(REGISTRY_NAME, data + "\n")
 
     def _release(self, agent_id, dropped=False):
         """The one registration release path, for every drop: removes
         the entry, its connection, its gate credential, and any
-        outstanding idle warning. `dropped` records a connection loss
+        outstanding reap request. `dropped` records a connection loss
         (not an eviction), so sends during the hold-restart gap park.
         Returns (entry, conn) for the caller's GC and teardown."""
         with self._lock:
@@ -505,13 +501,13 @@ class TeamBroker:
             self._send_gate.drop(agent_id)
             if dropped and entry is not None:
                 self.delivery.mark_dropped(agent_id)
-        self._idle_warnings.clear(agent_id)
+        self.gc.forget_request(agent_id)
         return entry, conn
 
     def _drop_entry(self, agent_id):
         entry, _ = self._release(agent_id)
         self.root.remove_busy_file(entry)
-        self.state_gc.remove_session_file(entry)
+        self.gc.remove_session_file(entry)
         self._persist_and_notify()
 
     def _drop_conn(self, agent_id):
@@ -593,7 +589,7 @@ class TeamBroker:
             except OSError:
                 pass
         self.root.remove_busy_file(entry)
-        self.state_gc.remove_session_file(entry)
+        self.gc.remove_session_file(entry)
         self._kill_owner(entry or {}, why)
 
     def _terminate(self, agent_id, why):
@@ -660,8 +656,8 @@ class TeamBroker:
     def _sweep(self):
         # One bad stage must never kill the sweep thread: a raised
         # OSError (a full or read-only state dir) would otherwise stop
-        # idle reap, mailbox prune, peer expiry, and restart policy for
-        # the daemon's whole life.
+        # the reap request, mailbox prune, peer expiry, and restart
+        # policy for the daemon's whole life.
         try:
             self._sweep_once()
         except Exception as exc:
@@ -671,127 +667,24 @@ class TeamBroker:
         now = time.time()
         self._expire_peer_relays()
         self._reap_expired_peers(now)
-        self.state_gc.gc_orphan_busy_files(now)
-        self.state_gc.gc_orphan_warning_files(now)
-        if now - self._last_tmp_sweep >= self.tmp_sweep_interval:
-            self._last_tmp_sweep = now
-            self.root.gc_tmp_files(now, self.busy_grace)
-        if now - self._last_session_sweep >= self._session_sweep_interval:
-            self._last_session_sweep = now
-            self.state_gc.gc_orphan_session_files(now)
+        self.gc.gc_orphan_busy_files(now)
+        self.gc.gc_orphan_session_files(now)
+        self.gc.gc_tmp_files(now)
         self.delivery.prune(now)
         self._maybe_restart(now)
-        doomed_fork, doomed_idle = self._classify(now)
-        # A doomed fork gets a timestamped warning file before it is
-        # reaped; deleting the file is a working answer, leaving it
-        # past the grace proceeds to the reap. A parent-gone fork with
-        # a live connection is warned too: its own agent answers.
-        spared = self._warn_idle_forks(doomed_fork, now)
-        for agent_id, why in doomed_fork:
-            if agent_id in spared:
-                continue
-            self._reap_fork(agent_id, why)
-        for agent_id in doomed_idle:
-            self._forget(agent_id)
-        if doomed_fork or doomed_idle:
-            self._persist_and_notify()
+        self.gc.request_idle_reaps(now)
 
-    def _warn_idle_forks(self, doomed_fork, now):
-        # Leaves a warning file for each newly doomed fork that still
-        # holds a live connection and returns the ids spared this sweep
-        # (warning present and young, or just deleted by the teammate).
-        spared = set()
-        if not self._idle_warnings.enabled:
-            return spared
-        doomed_ids = {agent_id for agent_id, _ in doomed_fork}
-        for agent_id in self._idle_warnings.known_ids:
-            if self._idle_warnings.exists(agent_id):
-                continue
-            # The teammate deleted the file: still working, so reset
-            # its idle clock and spare it from this sweep.
-            self._idle_warnings.clear(agent_id)
-            if agent_id in doomed_ids:
-                self._touch(agent_id, work=True)
-                spared.add(agent_id)
-        for agent_id, why in doomed_fork:
-            if agent_id in spared:
-                continue
-            if agent_id in self._idle_warnings.known_ids:
-                # Our own warning: spare while it is present and young,
-                # otherwise (deleted or expired) let the reap proceed.
-                if self._idle_warnings.exists(agent_id) \
-                        and self._idle_warnings.is_open(agent_id, now):
-                    spared.add(agent_id)
-                continue
-            if self._clients.get(agent_id) is None:
-                continue
-            # A stale file from an earlier broker generation is not
-            # trusted: replace it with a fresh warning naming this reap.
-            written = self._idle_warnings.warn(agent_id, why, now)
-            self._notify_idle_warning(agent_id, why)
-            # Only a warning actually in place and young earns the grace;
-            # a failed write falls through to silence consent.
-            if written and self._idle_warnings.is_open(agent_id, now):
-                spared.add(agent_id)
-        return spared
-
-    def _notify_idle_warning(self, agent_id, why):
-        # Steers the teammate to the warning file it must delete to
-        # stay alive; a lost connection needs no notice, the next
-        # sweep re-warns or reaps.
+    def _request_reap(self, agent_id, why):
+        # Sends the reap request to a reachable session: its own agent
+        # answers by calling team_gc_reap. A dropped connection returns
+        # False so the reaper retries on the next sweep.
         conn = self._clients.get(agent_id)
         if conn is None:
-            return
-        self._write(conn, self._envelope(
-            "*", "idle-warning",
+            return False
+        return self._write(conn, self._envelope(
+            "*", "gc-reap",
             {"id": agent_id, "why": why,
-             "file": str(self._idle_warnings.path(agent_id)),
-             "grace": self.gc_warn_grace}))
-
-    def _classify(self, now):
-        # Pure policy: which agents outlived their liveness window. An
-        # attached session keeps the parent-gone lifetime but not the
-        # fork-idle one: the user chose to attach it, it was not
-        # spawned for one task.
-        doomed_fork = []
-        doomed_idle = []
-        with self._lock:
-            for agent_id, entry in list(self._registry.items()):
-                parent = entry.get("parent")
-                parent_gone = self._parent_gone(parent)
-                is_fork = entry.get("role") == "fork"
-                work_idle = (
-                    is_fork and self.fork_idle > 0
-                    and not entry.get("attached")
-                    and not entry.get("waiting")
-                    and entry.get("last_work", 0) < now - self.fork_idle
-                )
-                seen_idle = (
-                    entry.get("last_seen", 0) < now - self.idle_timeout
-                )
-                if is_fork and (parent_gone or work_idle or seen_idle):
-                    doomed_fork.append(
-                        (agent_id, "parent-gone" if parent_gone else "idle-gc"))
-                elif seen_idle:
-                    doomed_idle.append(agent_id)
-        return doomed_fork, doomed_idle
-
-    def _reap_fork(self, agent_id, why):
-        # A fork: terminate its endpoint, drop its entry, and signal the
-        # pi process it serves. Only forks are ever signalled.
-        self._evict(agent_id, why)
-
-    def _forget(self, agent_id):
-        # An idle non-fork is dropped and its socket closed so the serve
-        # thread ends instead of looping on an open connection forever.
-        entry, conn = self._release(agent_id, dropped=True)
-        if conn is not None:
-            try:
-                conn.close()
-            except OSError:
-                pass
-        self.root.remove_busy_file(entry)
-        self.state_gc.remove_session_file(entry)
+             "hours": round(self.gc_idle / 3600.0, 3)}))
 
     # -- peer federation ---------------------------------------------
 
@@ -802,34 +695,6 @@ class TeamBroker:
             return agent_id.split(":", 1)[0]
         return self.host
 
-    def _parent_gone(self, parent):
-        # Gone when neither a live local entry nor a live agent on a
-        # connected peer. For a peer parent the peer's registry
-        # snapshot is the liveness signal, so a remote fork is reaped
-        # when its requesting agent disconnects, not only when the
-        # peer link drops.
-        if not parent:
-            return False
-        if parent in self._registry:
-            return False
-        host = self._parent_host(parent)
-        if host == self.host:
-            return True
-        now = time.time()
-        with self._lock:
-            if host not in self._peers:
-                down_at = self._peer_down_at.get(host)
-                # A just-dropped link may be a transient flap or a
-                # tunnel replacement; spare the fork within the
-                # reconnect grace.
-                if down_at is not None and now - down_at < self.peer_grace:
-                    return False
-                return True
-            agents = self._remote.get(host)
-        if agents is None:
-            return False
-        return not any(a.get("id") == parent for a in agents)
-
     def _snapshot_all(self):
         agents = self._snapshot()
         with self._lock:
@@ -837,8 +702,8 @@ class TeamBroker:
         for host, entries in remote:
             for entry in entries:
                 # The peer's registry is the liveness signal for its
-                # agents (see _parent_gone); forcing online=False
-                # would hide live remote agents from ls.
+                # agents; forcing online=False would hide live remote
+                # agents from ls.
                 agents.append(dict(
                     entry, online=bool(entry.get("online")), remote=True))
         return agents
@@ -1078,6 +943,10 @@ class TeamBroker:
             self._reply(entry[0], op="error", error="undeliverable")
 
     def _reap_peer(self, host):
+        # A dropped peer link owns its remote-parented forks: they
+        # cannot outlive the host that spawned them. Only a link loss
+        # reaches here; a local parent's own disconnect does not reap
+        # its forks (the single idle window does).
         doomed = []
         with self._lock:
             for agent_id, entry in list(self._registry.items()):
@@ -1086,7 +955,7 @@ class TeamBroker:
                 if self._parent_host(entry.get("parent")) == host:
                     doomed.append(agent_id)
         for agent_id in doomed:
-            self._evict(agent_id, "parent-gone")
+            self._evict(agent_id, "peer-down")
         if doomed:
             self._persist_and_notify()
 
@@ -1122,7 +991,6 @@ class TeamBroker:
             peers = list(self._peers.values())
             self._clients.clear()
             self._registry.clear()
-            self._idle_warnings.clear_all()
             self._peer_pending.clear()
             self._remote.clear()
             self._peer_down_at.clear()

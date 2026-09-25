@@ -58,6 +58,8 @@ class ClientCli:
         self.add_identity_args(p_register)
         sub.add_parser("ls")
         sub.add_parser("deregister")
+        p_reap = sub.add_parser("reap")
+        self.add_identity_args(p_reap)
         p_follow = sub.add_parser("follow")
         self.add_identity_args(p_follow)
         p_hold = sub.add_parser("hold")
@@ -84,7 +86,7 @@ class ClientCli:
             parser.print_help()
             return 0
         client = TeamClient(args.root)
-        if args.command in ("register", "follow", "hold", "send"):
+        if args.command in ("register", "follow", "hold", "send", "reap"):
             self.apply_identity(client, args)
         if args.command == "register":
             print(json.dumps(client.register()))
@@ -92,6 +94,8 @@ class ClientCli:
             print(json.dumps(client.ls(), indent=2))
         elif args.command == "deregister":
             print(json.dumps(client.deregister()))
+        elif args.command == "reap":
+            print(json.dumps(client.gc_reap()))
         elif args.command == "follow":
             client.follow()
         elif args.command == "hold":

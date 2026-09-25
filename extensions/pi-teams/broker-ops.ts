@@ -84,6 +84,15 @@ export class BrokerOps {
 		await this.run(["terminate", agentId], 25000);
 	}
 
+	/** The voluntary reap: answers the broker's idle request with this
+	 *  agent's identity and credential, so the broker drops the
+	 *  registration and its files. The caller owns ctx.shutdown(). */
+	async gcReap(agentId: string, sendToken?: string): Promise<void> {
+		const args = ["reap", "--id", agentId];
+		if (sendToken) args.push("--send-token", sendToken);
+		await this.run(args);
+	}
+
 	/** Links a peer host; the broker owns the ssh tunnel, and a
 	 *  failure carries the one-line setup a password-only host needs. */
 	async peerAdd(label: string, ssh: string): Promise<PeerInfo> {
