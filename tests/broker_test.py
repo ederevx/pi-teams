@@ -262,6 +262,74 @@ class BrokerProtocolTests(unittest.TestCase):
         )
         client.deregister()
 
+    def _dead_pid(self):
+        # A pid whose process has exited and been reaped, so the
+        # liveness probe reads it dead.
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait(timeout=5)
+        return str(proc.pid)
+
+    def _owner_agent(self, agent_id, owner_pid, busy_path):
+        with open(busy_path, "w") as fh:
+            fh.write("1")
+        client = TeamClient(self.root, heartbeat=None)
+        client.id = agent_id
+        client.name = agent_id
+        client.role = "fork"
+        client.owner_pid = owner_pid
+        client.busy_file = busy_path
+        client.send_token = "st-%s" % agent_id
+        client.register()
+        return client
+
+    def test_dead_owner_entry_and_busy_file_evicted(self):
+        # A dead owning process whose connection lingers must not pin
+        # its registry entry and busy file for the broker's whole life.
+        path = os.path.join(self.root, "dead-owner.busy")
+        client = self._owner_agent("dead-owner", self._dead_pid(), path)
+        self.broker.gc.liveness_grace = 0
+        self.assertTrue(
+            wait_until(lambda: "dead-owner" not in self.broker._registry),
+            "a dead owner's registry entry was never evicted",
+        )
+        self.assertFalse(os.path.exists(path),
+                         "the evicted entry's busy file survived")
+        client.close()
+
+    def test_live_owner_entry_survives_dead_sweep(self):
+        path = os.path.join(self.root, "live-owner.busy")
+        client = self._owner_agent("live-owner", str(os.getpid()), path)
+        self.broker.gc.liveness_grace = 0
+        time.sleep(0.6)
+        self.assertIn("live-owner", self.broker._registry)
+        self.assertTrue(os.path.exists(path))
+        client.close()
+
+    def test_fresh_owner_entry_survives_liveness_grace(self):
+        # A pid record can lag a moment after registration; a fresh
+        # entry is never judged dead within the grace.
+        path = os.path.join(self.root, "fresh-owner.busy")
+        client = self._owner_agent("fresh-owner", self._dead_pid(), path)
+        self.broker.gc.liveness_grace = 30
+        time.sleep(0.6)
+        self.assertIn("fresh-owner", self.broker._registry)
+        client.close()
+
+    def test_remote_entry_is_never_dead_evicted(self):
+        # A remote entry's owner process lives on the peer host; this
+        # broker can never judge it and must leave it alone.
+        self.broker.gc.liveness_grace = 0
+        with self.broker._lock:
+            self.broker._registry["rog:remote"] = {
+                "id": "rog:remote", "remote": True,
+                "owner_pid": self._dead_pid(),
+                "since_ts": time.time() - 100,
+            }
+        time.sleep(0.6)
+        self.assertIn("rog:remote", self.broker._registry)
+        with self.broker._lock:
+            self.broker._registry.pop("rog:remote", None)
+
     def test_handshake_rejects_bad_token(self):
         endpoint = self.broker.root.read_endpoint()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -588,6 +656,46 @@ class BrokerProtocolTests(unittest.TestCase):
         first.stop()
         thread.join(timeout=3)
         shutil.rmtree(root, ignore_errors=True)
+
+    def test_shutdown_removes_published_pid(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
+                            sweep_interval=0.2)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        try:
+            wait_endpoint(root)
+            self.assertTrue(broker.root.pidfile.exists(),
+                            "the broker must publish its pid")
+            broker.stop()
+            thread.join(timeout=3)
+            self.assertFalse(broker.root.pidfile.exists(),
+                             "shutdown must remove the broker pid file")
+        finally:
+            broker.stop()
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_release_pid_removes_only_its_own_record(self):
+        root = TeamRoot(make_root())
+        try:
+            root.write_pid()
+            self.assertTrue(root.pidfile.exists())
+            root.release_pid()
+            self.assertFalse(root.pidfile.exists())
+            # A record this process did not publish (a different pid or
+            # start mark) belongs to another broker and stays.
+            root.pidfile.write_text(
+                json.dumps({"pid": os.getpid(), "start": -1}),
+                encoding="utf-8")
+            root.release_pid()
+            self.assertTrue(root.pidfile.exists())
+            root.pidfile.write_text(
+                json.dumps({"pid": os.getpid() + 100000, "start": None}),
+                encoding="utf-8")
+            root.release_pid()
+            self.assertTrue(root.pidfile.exists())
+        finally:
+            shutil.rmtree(root.base, ignore_errors=True)
 
     def test_idle_session_is_asked_to_reap_itself(self):
         # The single idle policy covers every role, main included: a
