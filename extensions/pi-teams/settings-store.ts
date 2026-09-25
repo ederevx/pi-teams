@@ -74,6 +74,16 @@ export class SettingsStore {
 		this.write(this.path(), settings);
 	}
 
+	/** Deletes the whole `piTeams` namespace, preserving every other
+	 *  top-level key and the file mode. `load` refuses a corrupt file,
+	 *  so one is reported rather than overwritten, and the whole
+	 *  settings document is never discarded. */
+	reset(): void {
+		const settings = this.load();
+		delete settings[NAMESPACE];
+		this.write(this.path(), settings);
+	}
+
 	/** The scratch-pad write: a temp file beside the target, the
 	 *  original's mode preserved, then moved over it. */
 	private write(file: string, settings: Record<string, unknown>): void {
