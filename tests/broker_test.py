@@ -589,6 +589,46 @@ class BrokerProtocolTests(unittest.TestCase):
         thread.join(timeout=3)
         shutil.rmtree(root, ignore_errors=True)
 
+    def test_shutdown_removes_published_pid(self):
+        root = make_root()
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
+                            sweep_interval=0.2)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        try:
+            wait_endpoint(root)
+            self.assertTrue(broker.root.pidfile.exists(),
+                            "the broker must publish its pid")
+            broker.stop()
+            thread.join(timeout=3)
+            self.assertFalse(broker.root.pidfile.exists(),
+                             "shutdown must remove the broker pid file")
+        finally:
+            broker.stop()
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_release_pid_removes_only_its_own_record(self):
+        root = TeamRoot(make_root())
+        try:
+            root.write_pid()
+            self.assertTrue(root.pidfile.exists())
+            root.release_pid()
+            self.assertFalse(root.pidfile.exists())
+            # A record this process did not publish (a different pid or
+            # start mark) belongs to another broker and stays.
+            root.pidfile.write_text(
+                json.dumps({"pid": os.getpid(), "start": -1}),
+                encoding="utf-8")
+            root.release_pid()
+            self.assertTrue(root.pidfile.exists())
+            root.pidfile.write_text(
+                json.dumps({"pid": os.getpid() + 100000, "start": None}),
+                encoding="utf-8")
+            root.release_pid()
+            self.assertTrue(root.pidfile.exists())
+        finally:
+            shutil.rmtree(root.base, ignore_errors=True)
+
     def test_idle_session_is_asked_to_reap_itself(self):
         # The single idle policy covers every role, main included: a
         # reachable session with no work contact past the window is

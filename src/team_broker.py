@@ -169,6 +169,7 @@ class TeamBroker:
             self._serve_forever()
         finally:
             self._remove_endpoint()
+            self.root.release_pid()
             self.root.release_lock()
 
     def _serve_forever(self):
