@@ -123,7 +123,7 @@ class TeamBroker:
             self.root, self._registry, self._lock,
             self.sessions_root, self.session_grace, self.busy_grace,
             self.gc_idle, self.session_sweep_interval,
-            self._request_reap)
+            self._request_reap, self._drop_dead_agent)
         self._running = False
         self._server = None
 
@@ -506,10 +506,24 @@ class TeamBroker:
         return entry, conn
 
     def _drop_entry(self, agent_id):
-        entry, _ = self._release(agent_id)
+        entry, conn = self._release(agent_id)
         self.root.remove_busy_file(entry)
         self.gc.remove_session_file(entry)
         self._persist_and_notify()
+        return conn
+
+    def _drop_dead_agent(self, agent_id):
+        # The reaper found a local entry whose owning process is gone
+        # but whose connection lingers. Reuse the registration drop
+        # path so the entry, its gate, and its busy/session files all
+        # go, then close the orphaned connection so its shim stops
+        # waiting on a dead hold.
+        conn = self._drop_entry(agent_id)
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def _drop_conn(self, agent_id):
         if not agent_id:
@@ -671,6 +685,7 @@ class TeamBroker:
         self.gc.gc_orphan_busy_files(now)
         self.gc.gc_orphan_session_files(now)
         self.gc.gc_tmp_files(now)
+        self.gc.gc_dead_agents(now)
         self.delivery.prune(now)
         self._maybe_restart(now)
         self.gc.request_idle_reaps(now)
