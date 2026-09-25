@@ -11,6 +11,7 @@
 import type { Component } from "@earendil-works/pi-tui";
 import {
 	ExtensionInputComponent,
+	ExtensionSelectorComponent,
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 
@@ -61,6 +62,7 @@ export class TeamSettingsPresenter {
 	private readonly settings: PackageSettings;
 	private readonly store: SettingsStore;
 	private readonly env: Record<string, string | undefined>;
+	private ui: ExtensionUIContext | undefined;
 
 	constructor(
 		settings: PackageSettings = new PackageSettings(),
@@ -197,19 +199,50 @@ export class TeamSettingsPresenter {
 		];
 	}
 
-	/** The rows, in order, from the effective settings. A row whose
-	 *  environment variable is set carries a marker so the user sees why
-	 *  an edit would not stick across restarts. `notify` reports invalid
-	 *  input while the submenu is still open. */
+	/** The rows, in order, from the effective settings, then the
+	 *  restore action. A row whose environment variable is set carries a
+	 *  marker so the user sees why an edit would not stick across
+	 *  restarts. `notify` reports invalid input while the submenu is
+	 *  still open. */
 	rows(notify: Notify = () => {}): SettingRow[] {
-		return this.specs().map((spec) => ({
+		return [...this.specs().map((spec) => ({
 			id: spec.id,
 			title: this.envPinned(spec) ? `${spec.label} (env-pinned)` : spec.label,
 			description: spec.description,
 			value: spec.value,
 			submenu: (currentValue: string, done: (value?: string) => void) =>
 				this.inputFor(spec, currentValue, done, notify),
-		}));
+		})), this.restoreRow()];
+	}
+
+	/** The action row that clears every stored override: it carries no
+	 *  value, only a confirmation submenu, and sits after the settings. */
+	private restoreRow(): SettingRow {
+		return {
+			id: "restoreDefaults",
+			title: "Restore default configuration",
+			description: "Delete the stored piTeams overrides and return " +
+				"every option to its built-in default. Options pinned by an " +
+				"environment variable still win.",
+			value: "",
+			submenu: (_currentValue, done) => this.confirmRestore(done),
+		};
+	}
+
+	/** The destructive-action confirmation: only "Restore defaults"
+	 *  resets, anything else (including cancel) just closes the submenu. */
+	private confirmRestore(done: (value?: string) => void): Component {
+		return new ExtensionSelectorComponent(
+			"Restore default configuration?",
+			["Restore defaults", "Cancel"],
+			(option) => {
+				if (option === "Restore defaults") {
+					this.restoreDefaults(this.ui);
+				}
+				done();
+			},
+			() => done(),
+		);
 	}
 
 	/** Present the rows: the two-column settings view when a TUI custom
@@ -221,6 +254,7 @@ export class TeamSettingsPresenter {
 		onChange: SettingsChange,
 	): Promise<void> {
 		const notify: Notify = (message) => ui?.notify?.(message, "error");
+		this.ui = ui;
 		const rows = this.rows(notify);
 		if (mode === "tui" && typeof ui?.custom === "function") {
 			try {
@@ -262,6 +296,23 @@ export class TeamSettingsPresenter {
 		} catch (err) {
 			ui?.notify?.(
 				`Could not save ${spec.label}: ${this.message(err)}`, "error");
+		}
+	}
+
+	/** Delete every stored `piTeams` override and report the outcome;
+	 *  the returned line is the same text shown through `ui`. */
+	restoreDefaults(ui?: ExtensionUIContext): string {
+		try {
+			this.store.reset();
+			const message = "Restored default configuration. pi reloads " +
+				"extensions when settings.json changes; environment-pinned " +
+				"values still win.";
+			ui?.notify?.(message, "info");
+			return message;
+		} catch (err) {
+			const message = `Could not restore defaults: ${this.message(err)}`;
+			ui?.notify?.(message, "error");
+			return message;
 		}
 	}
 
