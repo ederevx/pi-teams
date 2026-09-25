@@ -1469,7 +1469,7 @@ const ROW_ORDER = "spawnWindowMs,waitSeconds,stallSeconds,binDir,ssh," +
 	"remoteState,sessionsRoot,host,stateDir,gcIdleHours," +
 	"busyGraceHours,restartGraceSeconds," +
 	"peerGraceSeconds,sessionGraceHours," +
-	"sessionSweepIntervalSeconds,peerSetup";
+	"sessionSweepIntervalSeconds,peerSetup,restoreDefaults";
 
 const VIEW_THEME = {
 	fg: (_color, text) => text,
@@ -1503,7 +1503,7 @@ test("team-settings rows keep the piTeams order and effective values", () => {
 	const presenter = new TeamSettingsPresenter(settings, new SettingsStore(), {});
 	const rows = presenter.rows();
 	assert.equal(rows.map((row) => row.id).join(","), ROW_ORDER);
-	assert.equal(rows.length, 16);
+	assert.equal(rows.length, 17);
 	assert.equal(rows[1].value, "42");
 	assert.equal(rows[4].value, "custom-ssh");
 	assert.equal(rows[1].title, "Wait timeout");
@@ -1613,6 +1613,71 @@ test("team-settings refuses a corrupt file and rejects bad numbers", () => {
 		assert.equal(notes.notes.at(-1).type, "error");
 		assert.match(notes.notes.at(-1).message, /number at or above 0/);
 		assert.equal(existsSync(join(clean, "settings.json")), false);
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
+	}
+});
+
+test("SettingsStore.reset drops only the piTeams namespace", () => {
+	const dir = mkdtempSync(join(scratch, "settings-reset-"));
+	const file = join(dir, "settings.json");
+	writeFileSync(file, JSON.stringify({
+		theme: "dark",
+		packages: ["git:x"],
+		piTeams: { ssh: "old-ssh", waitSeconds: 42 },
+	}, null, 2) + "\n");
+	chmodSync(file, 0o640);
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		new SettingsStore().reset();
+		const saved = JSON.parse(readFileSync(file, "utf8"));
+		assert.equal("piTeams" in saved, false);
+		assert.equal(saved.theme, "dark");
+		assert.deepEqual(saved.packages, ["git:x"]);
+		assert.equal(statSync(file).mode & 0o777, 0o640);
+		assert.deepEqual(
+			readdirSync(dir).filter(
+				(name) => name.startsWith("settings.json.tmp")),
+			[]);
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
+	}
+});
+
+test("team-settings exposes restoreDefaults and clears the namespace", () => {
+	const dir = mkdtempSync(join(scratch, "settings-restore-"));
+	const file = join(dir, "settings.json");
+	writeFileSync(file, JSON.stringify({
+		theme: "dark", piTeams: { ssh: "old-ssh" },
+	}, null, 2) + "\n");
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		const presenter = new TeamSettingsPresenter(
+			new PackageSettings({}, dir), new SettingsStore(), {});
+		const row = presenter.rows().at(-1);
+		assert.equal(row.id, "restoreDefaults");
+		assert.equal(row.title, "Restore default configuration");
+		assert.equal(row.value, "");
+		assert.equal(typeof row.submenu, "function");
+
+		const recorder = recordingUi();
+		const result = presenter.restoreDefaults(recorder.ui);
+		assert.match(result, /Restored default configuration/);
+		assert.equal(recorder.notes.at(-1).type, "info");
+		const saved = JSON.parse(readFileSync(file, "utf8"));
+		assert.equal("piTeams" in saved, false);
+		assert.equal(saved.theme, "dark");
+
+		// A corrupt file is reported, never overwritten.
+		writeFileSync(file, "{not json");
+		const failure = presenter.restoreDefaults(recorder.ui);
+		assert.match(failure, /Could not restore defaults/);
+		assert.equal(recorder.notes.at(-1).type, "error");
+		assert.equal(readFileSync(file, "utf8"), "{not json");
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previous;

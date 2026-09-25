@@ -484,10 +484,17 @@ export default async function (pi: ExtensionAPI) {
 	// -- settings editor ------------------------------------------------
 	// Every piTeams value as an editable row; a change is written to the
 	// agent-directory settings.json, which pi reloads extensions from.
+	// The `restore` argument (alias `reset`) deletes every stored
+	// override at once, without opening the view.
 	const settingsPresenter = new TeamSettingsPresenter();
 	pi.registerCommand("team-settings", {
 		description: "Edit pi-teams settings",
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
+			const action = args.trim();
+			if (action === "restore" || action === "reset") {
+				settingsPresenter.restoreDefaults(ctx.ui);
+				return;
+			}
 			try {
 				await settingsPresenter.present(
 					ctx.ui, ctx.mode, settingsPresenter.changeHandler(ctx.ui));
