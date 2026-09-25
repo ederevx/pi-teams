@@ -4,9 +4,10 @@ orphan-file sweeps.
 One owner for every GC decision the broker makes: the single idle
 window that asks a reachable session to reap itself, and the retention
 sweeps of orphan busy files, teammate transcripts, and aged write
-scratch. Reads the registry (never mutates it); removes only files
-whose owners are gone. The broker composes this from its sweep loop and
-drop paths.
+scratch. Reads the registry and removes only files whose owners are
+gone; a registry entry it deems dead is handed to the broker's drop
+callback because the reaper never mutates the registry. The broker
+composes this from its sweep loop and drop paths.
 """
 
 import pathlib
@@ -21,7 +22,7 @@ class GcReaper:
 
     def __init__(self, root, registry, lock, sessions_root, session_grace,
                  busy_grace, gc_idle, session_sweep_interval,
-                 request_reap):
+                 request_reap, drop_agent):
         self.root = root
         self.registry = registry
         self.lock = lock
@@ -39,6 +40,12 @@ class GcReaper:
         # here only decides when, and treats a False answer (a dropped
         # connection) as retryable on the next sweep.
         self.request_reap = request_reap
+        # The callback evicts a registry entry whose owning process is
+        # gone; the policy here only decides which entries qualify.
+        self.drop_agent = drop_agent
+        # A registration's pid record can lag a moment; never judge an
+        # entry younger than this as dead-owner.
+        self.liveness_grace = 5.0
         self._last_session_sweep = 0.0
         self._last_tmp_sweep = 0.0
         # Ids already asked to reap; kept until the session shows work
@@ -70,6 +77,34 @@ class GcReaper:
         # Work contact or a release ends the idle episode, so the next
         # idle window earns a fresh request.
         self._requested.discard(agent_id)
+
+    def gc_dead_agents(self, now):
+        # An owner process can die while its TCP connection lingers (a
+        # stalled shim), leaving a registry entry and its .busy file
+        # for the broker's whole life. Evict local entries whose
+        # recorded owner pid is provably gone through the broker's
+        # drop path, which also removes the files. A just-registered
+        # entry is skipped because its pid record can lag a moment,
+        # and a remote entry is never judged (its owner is elsewhere).
+        with self.lock:
+            dead = [
+                agent_id for agent_id, entry in list(self.registry.items())
+                if entry.get("owner_pid")
+                and not entry.get("remote")
+                and entry.get("since_ts", 0) <= now - self.liveness_grace
+                and not self._owner_alive(entry)
+            ]
+        for agent_id in dead:
+            self.drop_agent(agent_id)
+
+    def _owner_alive(self, entry):
+        # The root owns the pid/start-mark probe; a pid that cannot be
+        # read is treated as alive so an unjudgeable entry is kept.
+        try:
+            pid = int(entry.get("owner_pid"))
+        except (TypeError, ValueError):
+            return True
+        return self.root._pid_alive(pid)
 
     def gc_orphan_busy_files(self, now):
         # A busy file is published by the extension, not the broker;
