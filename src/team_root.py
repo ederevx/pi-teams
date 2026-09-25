@@ -154,6 +154,20 @@ class TeamRoot:
         # holder from a reused pid.
         self.write_atomic(PID_NAME, self._lock_record_text())
 
+    def release_pid(self):
+        # Remove the published broker pid only while this broker still
+        # owns it: a newer broker that replaced the record keeps its
+        # file. The delete stays guarded under the root.
+        record = self._pid_record()
+        if record is None:
+            return
+        own = {"pid": os.getpid(),
+               "start": self.process_start_mark(os.getpid())}
+        if record.get("pid") != own["pid"] \
+                or record.get("start") != own["start"]:
+            return
+        self.unlink_under(self.pidfile, self.base)
+
     # -- single-broker lock ------------------------------------------
 
     def acquire_lock(self):
@@ -230,15 +244,25 @@ class TeamRoot:
         return True
 
     def _lock_record(self):
-        # The lock record: a plain pid (older brokers) or pid + start
-        # mark; None when unreadable or malformed.
         try:
-            text = (self._lockbase / "pid").read_text(
-                encoding="utf-8").strip()
+            text = (self._lockbase / "pid").read_text(encoding="utf-8")
         except OSError:
             return None
+        return self._parse_pid_record(text)
+
+    def _pid_record(self):
         try:
-            return {"pid": int(text), "start": None}
+            text = self.pidfile.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return self._parse_pid_record(text)
+
+    @staticmethod
+    def _parse_pid_record(text):
+        # The record: a plain pid (older brokers) or pid + start mark;
+        # None when unreadable or malformed.
+        try:
+            return {"pid": int((text or "").strip()), "start": None}
         except ValueError:
             pass
         try:
