@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.31 - 2026-09-25
+
+- Unlink the published broker pid file (`teamd.pid`) when the broker
+  shuts down, guarded so a record another live broker owns is left in
+  place.
+- Evict a local registry entry whose owning process died while its
+  connection lingered, through the normal drop path so the entry, its
+  gate, and its busy and session files all go; remote entries and
+  entries younger than the liveness grace are never judged dead.
+
 ## v0.4.30 - 2026-09-25
 
 - Replace the fork-idle warning/kill policy with one GC reaper: a
