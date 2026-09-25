@@ -224,6 +224,14 @@ class TeamClient:
         # for the pending-relay window, so allow more than a round trip.
         return self._peer_op("terminate", 20, to=agent_id, why=why)
 
+    def gc_reap(self):
+        # The voluntary reap: the agent answers the broker's idle
+        # request by telling it to drop the registration and its files.
+        # The caller owns the orderly process shutdown.
+        return self.request("gc-reap", expected=("ack", "error"),
+                            id=self.ensure_id(),
+                            send_token=self.send_token or "")
+
     def peer_add(self, label, ssh):
         return self._peer_op("peer-add", 35, label=label, ssh=ssh)
 
@@ -351,20 +359,6 @@ class TeamClient:
             return
         print(json.dumps(msg, separators=(",", ":")), flush=True)
 
-    def _remove_warning(self, msg):
-        # A busy or waiting agent deletes the broker's idle warning file
-        # at once; the broker sees the deletion as a working answer. Only
-        # the broker's own warning (enveloped from "*") is honored, and
-        # the delete stays confined to this client's state root even when
-        # the payload carries some other path.
-        if msg.get("from") != "*":
-            return
-        payload = msg.get("payload")
-        path = payload.get("file") if isinstance(payload, dict) else None
-        if not path:
-            return
-        self.root.unlink_under(path, self.root.base)
-
     def hold(self):
         self.register()
         stdin_dead = self._watch_stdin()
@@ -380,15 +374,6 @@ class TeamClient:
                     break
                 if msg is None or msg.get("kind") == "terminate":
                     return
-                if msg.get("kind") == "idle-warning":
-                    # A busy or waiting agent is still working: delete
-                    # the warning file at once. An idle one is blocked
-                    # in pi, so the warning is surfaced for its turn.
-                    if self._state() in ("busy", "waiting"):
-                        self._remove_warning(msg)
-                    else:
-                        self._emit(msg)
-                    continue
                 self._emit(msg)
                 if stdin_dead.is_set():
                     return

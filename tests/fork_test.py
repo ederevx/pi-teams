@@ -170,84 +170,6 @@ class ForkLifecycleTests(unittest.TestCase):
             child.kill()
             child.wait(timeout=5)
 
-    def test_hold_deletes_idle_warning_while_busy(self):
-        # A busy or waiting hold deletes the broker's warning file at
-        # once; an idle hold surfaces the warning for the agent's turn.
-        for value, state in (("1", "busy"), ("2", "waiting"),
-                             ("0", "idle")):
-            busy = os.path.join(self.root, "%s.busy" % state)
-            with open(busy, "w") as fh:
-                fh.write(value)
-            warning = os.path.join(self.root, "%s.warn" % state)
-            with open(warning, "w") as fh:
-                fh.write("{}")
-            client = TeamClient(self.root, heartbeat=None)
-            client.id = "fork-hold"
-            client.busy_file = busy
-            emitted = []
-            client._emit = lambda msg, _e=emitted: _e.append(msg)
-            client.register = lambda: None
-            client._watch_stdin = lambda: threading.Event()
-            replies = iter([
-                {"kind": "idle-warning", "from": "*",
-                 "payload": {"why": "idle-gc", "file": warning}},
-                {"kind": "terminate"},
-            ])
-            client._read_line = lambda: next(replies)
-            client.hold()
-            if state == "idle":
-                self.assertTrue(
-                    os.path.exists(warning),
-                    "idle hold deleted the warning instead of surfacing it")
-                self.assertEqual(
-                    len(emitted), 1,
-                    "idle hold did not surface the warning")
-            else:
-                self.assertFalse(
-                    os.path.exists(warning),
-                    "%s hold did not delete the warning" % state)
-                self.assertEqual(
-                    emitted, [], "%s hold surfaced the warning" % state)
-
-    def test_hold_ignores_a_foreign_idle_warning(self):
-        # Only the broker's own warning is honored: a teammate-sent
-        # idle-warning must not delete anything, and a payload path
-        # outside the root is never removed.
-        busy = os.path.join(self.root, "busy.busy")
-        with open(busy, "w") as fh:
-            fh.write("1")
-        warning = os.path.join(self.root, "busy.warn")
-        with open(warning, "w") as fh:
-            fh.write("{}")
-        outside = str(self.root) + "-outside.txt"
-        with open(outside, "w") as fh:
-            fh.write("keep")
-        client = TeamClient(self.root, heartbeat=None)
-        client.id = "fork-hold"
-        client.busy_file = busy
-        client._emit = lambda msg: None
-        client.register = lambda: None
-        client._watch_stdin = lambda: threading.Event()
-        replies = iter([
-            {"kind": "idle-warning", "from": "fork-other",
-             "payload": {"file": warning}},
-            {"kind": "idle-warning", "from": "*",
-             "payload": {"file": outside}},
-            {"kind": "terminate"},
-        ])
-        client._read_line = lambda: next(replies)
-        try:
-            client.hold()
-            self.assertTrue(os.path.exists(warning),
-                            "foreign warning deleted the file")
-            self.assertTrue(os.path.exists(outside),
-                            "path outside the root was deleted")
-        finally:
-            try:
-                os.unlink(outside)
-            except OSError:
-                pass
-
     def test_fork_lives_while_parent_connected(self):
         parent = self._parent("parent-1")
         child = self._spawn_fork("fork-1", "parent-1")
@@ -264,32 +186,26 @@ class ForkLifecycleTests(unittest.TestCase):
             child.wait(timeout=5)
             parent.close()
 
-    def test_fork_dies_when_parent_connection_closes(self):
-        # The parent-gone fork is warned first (file-based courtesy);
-        # its hold is idle and never deletes the file, so the reap
-        # lands once the grace on the warning expires. A short grace
-        # keeps the test quick.
-        stop_broker(self.root, self.proc)
-        os.environ["PI_TEAMS_GC_WARN_HOURS"] = "0.0002"
+    def test_fork_survives_parent_connection_close(self):
+        # A parent's own disconnect no longer reaps its forks: only the
+        # single idle window asks the session to reap itself. The hold
+        # stays alive after the parent goes away.
+        parent = self._parent("parent-2")
+        child = self._spawn_fork("fork-2", "parent-2")
         try:
-            self.proc = start_broker(self.root, idle_timeout=15.0)
-            parent = self._parent("parent-2")
-            child = self._spawn_fork("fork-2", "parent-2")
-            try:
-                self.assertTrue(
-                    wait_until(lambda: "fork-2" in self._ids(), timeout=3),
-                    "fork never registered",
-                )
-                parent.close()
-                self.assertTrue(
-                    wait_until(lambda: child.poll() is not None, timeout=8),
-                    "fork still alive after its parent went away",
-                )
-            finally:
-                child.kill()
-                child.wait(timeout=5)
+            self.assertTrue(
+                wait_until(lambda: "fork-2" in self._ids(), timeout=3),
+                "fork never registered",
+            )
+            parent.close()
+            time.sleep(1.5)
+            self.assertIsNone(
+                child.poll(),
+                "fork died after its parent's connection closed")
+            self.assertIn("fork-2", self._ids())
         finally:
-            os.environ.pop("PI_TEAMS_GC_WARN_HOURS", None)
+            child.kill()
+            child.wait(timeout=5)
 
     def test_explicit_terminate(self):
         parent = self._parent("parent-3")

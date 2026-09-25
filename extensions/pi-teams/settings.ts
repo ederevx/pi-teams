@@ -78,7 +78,7 @@ export class PackageSettings {
 
 	private coerce(raw: unknown, kind: SettingsKind): unknown {
 		// A number is finite and at or above zero, so 0 is a real value
-		// (an immediate reap, a disabled warning) and not "unset".
+		// (a disabled policy) and not "unset".
 		if (kind === "number") {
 			if (typeof raw === "boolean"
 				|| (typeof raw === "object" && raw !== null)) {
@@ -139,21 +139,15 @@ export class PackageSettings {
 
 	// Reaper windows are configured in hours (the settings keys end in
 	// "Hours") and are shown in the dock in those units.
-	forkIdleHours(): number {
+	gcIdleHours(): number {
 		return this.resolve(
-			"PI_TEAMS_FORK_IDLE_HOURS", "forkIdleHours", 6,
+			"PI_TEAMS_GC_IDLE_HOURS", "gcIdleHours", 3,
 			"number") as number;
 	}
 
 	busyGraceHours(): number {
 		return this.resolve(
 			"PI_TEAMS_BUSY_GRACE_HOURS", "busyGraceHours", 2,
-			"number") as number;
-	}
-
-	gcWarnGraceHours(): number {
-		return this.resolve(
-			"PI_TEAMS_GC_WARN_HOURS", "gcWarnGraceHours", 1,
 			"number") as number;
 	}
 

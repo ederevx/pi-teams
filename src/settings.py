@@ -72,7 +72,7 @@ class PackageSettings:
     @staticmethod
     def _coerce(raw, kind):
         # A number is a finite value at or above zero, so 0 is a real
-        # value (immediate reap, disabled warning) rather than unset.
+        # value (a disabled policy) rather than unset.
         if kind == "number":
             if isinstance(raw, bool):
                 return None
@@ -122,20 +122,15 @@ class PackageSettings:
     # Reaper windows are configured in hours: every GC setting key ends
     # in "Hours" and its value counts hours. The broker's clocks are all
     # seconds, so these accessors convert once, here. Zero keeps its
-    # meaning (immediate reap or disabled warning) after conversion.
-    def fork_idle(self):
+    # meaning (a disabled policy) after conversion.
+    def gc_idle(self):
         return self.resolve(
-            "PI_TEAMS_FORK_IDLE_HOURS", "forkIdleHours", 6,
+            "PI_TEAMS_GC_IDLE_HOURS", "gcIdleHours", 3,
             "number") * 3600.0
 
     def busy_grace(self):
         return self.resolve(
             "PI_TEAMS_BUSY_GRACE_HOURS", "busyGraceHours", 2,
-            "number") * 3600.0
-
-    def gc_warn_grace(self):
-        return self.resolve(
-            "PI_TEAMS_GC_WARN_HOURS", "gcWarnGraceHours", 1,
             "number") * 3600.0
 
     def restart_grace(self):

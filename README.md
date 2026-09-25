@@ -2,8 +2,8 @@
 
 Native cross-pi-agent communication for pi. Every pi session registers
 with a local broker and gains an endpoint other agents can reach
-directly; spawned teammates are persistent child sessions whose
-lifetime is tied to their parent. The extension surfaces the team at
+directly; spawned teammates are persistent child sessions that reap
+themselves once idle. The extension surfaces the team at
 session start, and spawns, waits on, messages, attaches, and reaps
 teammates through agent tools — so multiple pi agents coordinate
 natively, without a shared filesystem as the channel.
@@ -11,7 +11,7 @@ natively, without a shared filesystem as the channel.
 ## What it provides
 
 - **Broker** — `src/teamd.py`, composed from `team_broker.py`,
-  `team_root.py`, `peer_link.py`, `peer_tunnel.py`, `idle_warning.py`,
+  `team_root.py`, `peer_link.py`, `peer_tunnel.py`, `gc_reaper.py`,
   and `peer_transport.py`:
   - Loopback TCP registry and relay on `127.0.0.1`; ephemeral port and
     random token, published atomically at `TEAM_ROOT/endpoint`
@@ -37,6 +37,7 @@ natively, without a shared filesystem as the channel.
   | `team_attach` | Turn a live session into a teammate |
   | `team_detach` | Return an attached session to a main agent |
   | `team_kill` | Terminate an agent by id |
+  | `team_gc_reap` | Ack the broker's idle reap and shut down |
   | `team_ls` / `team_peer` / `team_tail` | List, link peers, tail chat |
 
   Sending and waiting are member-only; a teammate may only message its
@@ -85,28 +86,25 @@ natively, without a shared filesystem as the channel.
 
 ### Fork lifetime and GC
 
-Liveness is connection-based everywhere; only forks are ever
-signalled, never main agents.
+Liveness is connection-based everywhere: an agent is live while its
+hold connection is open. Reaping is a request the session answers
+itself, never a signal, and a main agent is never asked to reap.
 
-- **Idle GC**: with no work contact for `PI_TEAMS_FORK_IDLE_HOURS`
-  (default 6h), the broker warns before it kills. It leaves the
-  teammate a timestamped warning file under the team root
-  (`<id>.warn`) and steers it to delete the file. A running
-  teammate is interrupted at once — its turn aborted so a tool
-  blocked on it returns — and the warning then opens its own turn.
-  The fork is spared while `PI_TEAMS_GC_WARN_HOURS` (default 1h; 0
-  reaps immediately) is open; deleting the file is the working
-  answer and resets the idle clock, while leaving it past the grace
-  reaps the fork. A busy or waiting hold deletes the file itself. A
-  parent-gone fork is warned the same way and reaped when the
-  warning goes unanswered.
+- **Idle reap**: with no work contact for `PI_TEAMS_GC_IDLE_HOURS`
+  (default 3h; 0 disables the policy), the broker asks the reachable
+  session to reap itself. The request steers a turn that calls the
+  `team_gc_reap` tool, which acks the broker and requests an orderly
+  process shutdown. A session is asked once per idle episode: any
+  work contact resets the clock and earns a fresh request, while a
+  session that never answers is left alone — its connection liveness
+  still owns the eventual cleanup.
 - **Work keeps forks alive**: pi's lifecycle publishes busy state
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends
-  counts too, and clears an outstanding warning.
-- **Reaping** closes the endpoint, drops the entry, and signals the
-  owner pid. A spawned teammate's session file is removed with it;
-  attached sessions keep theirs in `/resume`.
+  counts too. A waiting fork is exempt from the idle reap.
+- **Reaping** drops the registration and, for a spawned teammate,
+  removes its session file; attached sessions keep theirs in
+  `/resume`. The session shuts itself down after the ack.
 - **Busy-file GC** clears stale `.busy` state: a file whose agent is
   unregistered and untouched past `PI_TEAMS_BUSY_GRACE_HOURS`
   (default 2h) is removed; registered agents keep theirs.
@@ -152,8 +150,9 @@ Two machines with SSH between them federate their brokers.
   mailbox instead: the broker delivers it when the target registers
   again, redeliveries carry the original envelope id, and parked
   messages expire after a ttl.
-- **Lifetime** — a remote-parented fork lives until its parent's link
-  drops, then its host reaps it. Pid signalling never crosses hosts.
+- **Lifetime** — a remote-parented fork obeys the same idle reap as a
+  local one, and its own host performs it; a departed parent no longer
+  reaps it. Reaping never crosses hosts.
 - **Password-only hosts** — a non-interactive SSH failure fails closed
   with the one-line setup command to run manually
   (`sh .../peer-ssh-setup.sh user@host`); after that `team_peer add`
@@ -175,9 +174,8 @@ agent-directory settings file, `<agent-dir>/settings.json`, where
 3. the built-in default.
 
 An injected constructor argument (used by tests) beats all three.
-`stallSeconds` and `gcWarnGraceHours` treat `0` as a real value, not
-"unset": 0 disables the stall nudge and reaps an idle fork at once.
-`forkIdleHours: 0` disables fork-idle GC entirely, while
+`stallSeconds` and `gcIdleHours` treat `0` as a real value, not
+"unset": 0 disables the stall nudge and the idle reap entirely, while
 `sessionSweepIntervalSeconds` must stay positive (it drives the whole
 disk sweep). The GC reaper windows are configured in hours (`Hours`
 keys); the broker converts them to seconds internally.
@@ -188,9 +186,8 @@ keys); the broker converts them to seconds internally.
 | `stateDir` | `$XDG_STATE_HOME` or `~/.local/state`, then `/pi-teams` | `TEAM_ROOT` |
 | `binDir` | `~/.local/bin` | `PI_TEAMS_BIN` |
 | `sessionsRoot` | `<agent-dir>/sessions` | `PI_TEAMS_SESSIONS_ROOT`; legacy `PI_SESSIONS_ROOT` |
-| `forkIdleHours` | `6` | `PI_TEAMS_FORK_IDLE_HOURS` |
+| `gcIdleHours` | `3` | `PI_TEAMS_GC_IDLE_HOURS` |
 | `busyGraceHours` | `2` | `PI_TEAMS_BUSY_GRACE_HOURS` |
-| `gcWarnGraceHours` | `1` | `PI_TEAMS_GC_WARN_HOURS` |
 | `restartGraceSeconds` | `60` | `PI_TEAMS_RESTART_GRACE` |
 | `peerGraceSeconds` | `15` | `PI_TEAMS_PEER_GRACE` |
 | `sessionGraceHours` | `72` | `PI_TEAMS_SESSION_GRACE_HOURS` |
@@ -238,10 +235,10 @@ never the system `/tmp`. It chains:
   zero semantics, and tolerance of a missing or invalid file.
 - **Broker protocol tests** (`broker_test.py`, `fork_test.py`,
   `attach_test.py`, `setup_script_test.py`) — handshake and token
-  rejection, registry and relay, idle sweep and the idle-warning
-  courtesy (spared when answered, reaped on silence), waiting-fork
-  exemption, orphan sweeps, fork lifecycle with the parent, and
-  two-broker federation including remote-parent reaping.
+  rejection, registry and relay, the idle reap request (once per
+  episode, reset by work), waiting-fork exemption, orphan sweeps,
+  fork survival across a parent disconnect, and two-broker federation
+  with the remote-parent link.
 
 ## Deployment
 
