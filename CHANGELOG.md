@@ -4,6 +4,22 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.30 - 2026-09-25
+
+- Replace the fork-idle warning/kill policy with one GC reaper: a
+  session idle for `gcIdleHours` (default 3h) is asked to reap itself
+  through the new `team_gc_reap` tool instead of being signalled, a
+  session is asked once per idle episode, and a parent's disconnect
+  no longer reaps its forks. `IdleWarnings`, the warning-file
+  bookkeeping, and the old fork-idle/gc-warn windows are gone;
+  `GcReaper` owns the single idle policy plus the orphan busy-file,
+  teammate-session, and scratch sweeps.
+- Add a "Restore default configuration" action to `/team-settings`
+  (and a `restore`/`reset` argument) that deletes the stored `piTeams`
+  namespace through the existing atomic write, returning every option
+  to its built-in default; environment-pinned values still win. The
+  action opens a confirmation before it writes.
+
 ## v0.4.29 - 2026-09-24
 
 - Wake an active `team_wait` when a direct message arrives, so a
