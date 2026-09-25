@@ -211,6 +211,10 @@ a corrupt file, which is reported instead. pi reloads extensions when
 that file changes, so extension-owned values take effect then, while
 broker-owned values apply on the next broker restart.
 
+The `Restore default configuration` row (or `/team-settings restore`)
+deletes the stored `piTeams` overrides and returns every option to its
+built-in default; environment-pinned values still win.
+
 ## Validation
 
 ```
