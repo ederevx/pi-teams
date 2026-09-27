@@ -781,7 +781,7 @@ export class TeamAgent {
 	 *  persistent, resumable RPC session. */
 	spawnTask(name: string, task: string, options: SpawnOptions = {}): TeammateRef {
 		const forkId = this.makeForkId();
-		const session = name || forkId;
+		const session = name || this.defaultSessionName(task);
 		const args = this.teammateArgs(session, options);
 		this.launchTeammate(forkId, session, args,
 			this.taskPrompt(session, task), options.parent);
@@ -811,6 +811,21 @@ export class TeamAgent {
 
 	private makeForkId(): string {
 		return this.makeId("fork");
+	}
+
+	/** The session name for a spawn that carried none: a short slug of
+	 *  the task. Falling back to the generated agent id (as it once did)
+	 *  left the session without a usable name - the dock hides a name
+	 *  equal to the id, and /resume shows the raw id. */
+	private defaultSessionName(task: string): string {
+		const slug = String(task || "")
+			.replace(/\s+/g, " ")
+			.trim()
+			.replace(/[^\w .:+-]+/g, "")
+			.trim()
+			.slice(0, 48)
+			.replace(/[ .:+-]+$/, "");
+		return slug || "teammate";
 	}
 
 	private taskPrompt(session: string, task: string): string {

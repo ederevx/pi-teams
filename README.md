@@ -102,8 +102,9 @@ itself, never a signal, and a main agent is never asked to reap.
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends
   counts too. A waiting fork is exempt from the idle reap.
-- **Reaping** drops the registration and, for a spawned teammate,
-  removes its session file; attached sessions keep theirs in
+- **Reaping** drops the registration; a spawned teammate's
+  transcript is removed once the session has exited, so pi cannot
+  recreate it mid-turn, while attached sessions keep theirs in
   `/resume`. The session shuts itself down after the ack.
 - **Busy-file GC** clears stale `.busy` state: a file whose agent is
   unregistered and untouched past `PI_TEAMS_BUSY_GRACE_HOURS`
