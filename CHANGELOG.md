@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.32 - 2026-09-26
+
+- Condemn a reaped teammate transcript and unlink it only once its
+  owning session has exited, so pi cannot recreate the file headerless
+  into a nameless stub mid-turn; a same-session re-registration no
+  longer unlinks the live transcript.
+- Name an unnamed `team_spawn` after a short slug of its task instead
+  of the generated fork id, so every spawned session has a usable name
+  in the dock and in `/resume`.
+
 ## v0.4.31 - 2026-09-25
 
 - Unlink the published broker pid file (`teamd.pid`) when the broker
