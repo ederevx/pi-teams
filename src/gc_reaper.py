@@ -51,6 +51,16 @@ class GcReaper:
         # Ids already asked to reap; kept until the session shows work
         # or leaves, so one idle episode earns exactly one request.
         self._requested = set()
+        # Teammate transcripts condemned when their registration was
+        # dropped, keyed by resolved path to (owner pid, condemned at).
+        # The unlink is deferred until the owning process is gone:
+        # unlinking while pi was still writing let its next append
+        # recreate the file headerless, leaving a nameless stub (and a
+        # same-session re-registration destroyed a live transcript).
+        self._condemned = {}
+        # A condemned path whose owner never exits is released after
+        # this window so the map cannot grow without bound.
+        self.condemned_ttl = 3600.0
 
     def request_idle_reaps(self, now):
         # The single idle policy: a reachable session with no work
@@ -163,15 +173,41 @@ class GcReaper:
             if not teammate_marked or self.is_teammate_session(path):
                 self.root.unlink_under(str(path), base)
 
-    def remove_session_file(self, entry):
+    def condemn_session_file(self, entry):
+        # A dropped teammate's transcript is broker-owned and marked for
+        # removal, but not unlinked here: the owning session may still be
+        # writing, and unlinking now let pi's next append recreate the
+        # file without its header. An attached session carries no spawn
+        # marker and must stay in /resume, so it is never condemned.
         if (entry or {}).get("role") != "fork":
             return
         path = (entry or {}).get("session")
-        # Only a spawned teammate's transcript is broker-owned and safe to
-        # remove. An attached session carries no spawn marker and must
-        # stay in /resume after the fork is reaped.
-        if path and self.is_teammate_session(path):
+        if not path or not self.is_teammate_session(path):
+            return
+        try:
+            owner_pid = int(entry.get("owner_pid"))
+        except (TypeError, ValueError):
+            owner_pid = None
+        with self.lock:
+            self._condemned[str(pathlib.Path(path).resolve())] = (
+                owner_pid, time.time())
+
+    def gc_condemned_sessions(self, now):
+        # The deferred unlink: remove a condemned transcript once its
+        # owner process is gone, so pi has stopped writing and the file
+        # is final. A record with no owner pid, or one older than the
+        # TTL, is released even if the probe still answers, so a reused
+        # pid can never pin it forever.
+        with self.lock:
+            pending = list(self._condemned.items())
+        for path, (owner_pid, condemned_at) in pending:
+            alive = owner_pid is not None and self.root._pid_alive(owner_pid)
+            if alive and now - condemned_at < self.condemned_ttl:
+                continue
             self.root.unlink_under(path, self.sessions_root)
+            with self.lock:
+                if self._condemned.get(path) == (owner_pid, condemned_at):
+                    del self._condemned[path]
 
     def is_teammate_session(self, path):
         # The marker sits in the first user turn; scan only the head so a

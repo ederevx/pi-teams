@@ -723,6 +723,23 @@ test("spawnTask builds the teammate template from a task alone", () => {
 	}
 });
 
+test("spawnTask names an unnamed spawn from its task", () => {
+	// An unnamed spawn used to take the generated agent id as its
+	// session name, which the dock hides as a duplicate and /resume
+	// shows as no name at all.
+	publishEndpoint(true);
+	const { agent, calls } = makeAgent();
+	agent.rememberSession(join(sessionDir, "sess.jsonl"));
+	const ref = agent.spawnTask("", "Summarize the   diff\nplease", {});
+	assert.equal(ref.session, "Summarize the diff please");
+	const nameIndex = calls[0].args.indexOf("--name");
+	assert.notEqual(nameIndex, -1);
+	assert.equal(calls[0].args[nameIndex + 1], "Summarize the diff please");
+	assert.equal(calls[0].options.env.TEAM_NAME,
+		"Summarize the diff please");
+	assert.equal(agent.spawnTask("", "   ").session, "teammate");
+});
+
 test("spawnTask resolves pi from the running runtime", () => {
 	// Windows wraps pi as a .cmd/.ps1 shim that child_process cannot
 	// execute without a shell; the runtime plus its entry script is
