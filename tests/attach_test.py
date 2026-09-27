@@ -145,11 +145,22 @@ class AttachCrossHostTests(unittest.TestCase):
             acker.send_token = "st-%s" % agent_id
             self.assertEqual(acker.gc_reap().get("op"), "ack")
             acker.close()
-            self.assertEqual(os.path.exists(session), kept, session)
             self.assertTrue(wait_until(
                 lambda a=agent_id: a not in self._ids_b()))
         self.assertIsNone(dummy.poll(),
                           "a voluntary reap signalled the owner process")
+        # A spawned teammate's transcript is broker-owned but its unlink
+        # waits for the owning session to stop writing, so pi cannot
+        # recreate it as a nameless stub; an attached session's
+        # transcript is never removed.
+        self.assertTrue(os.path.exists(spawned),
+                        "the spawned transcript was unlinked while its "
+                        "owner still ran")
+        self.assertTrue(os.path.exists(attached))
+        dummy.kill()
+        dummy.wait()
+        self.assertTrue(wait_until(lambda: not os.path.exists(spawned)))
+        self.assertTrue(os.path.exists(attached))
 
     def _ids_b(self):
         client = TeamClient(self.root_b)
