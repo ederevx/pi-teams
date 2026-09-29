@@ -63,6 +63,20 @@ class RecordingTunnelFactory:
         return tunnel
 
 
+class _AliveProc:
+    """A spawned ssh stand-in that is still running."""
+
+    def poll(self):
+        return None
+
+
+class _ExitedProc:
+    """A spawned ssh stand-in that already exited (with a failure)."""
+
+    def poll(self):
+        return 1
+
+
 class PeerTunnelTests(unittest.TestCase):
     def test_classifies_common_ssh_failures(self):
         tunnel = PeerTunnel("l", "user@host")
@@ -83,6 +97,30 @@ class PeerTunnelTests(unittest.TestCase):
         tunnel = PeerTunnel("l", "user@host")
         port = tunnel._reserve_port()
         self.assertGreater(port, 0)
+
+    def test_await_forward_returns_once_the_port_accepts(self):
+        tunnel = PeerTunnel("l", "user@host")
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        try:
+            port = listener.getsockname()[1]
+            self.assertTrue(tunnel._await_forward(_AliveProc(), port))
+        finally:
+            listener.close()
+
+    def test_await_forward_fails_when_ssh_already_exited(self):
+        tunnel = PeerTunnel("l", "user@host")
+        self.assertFalse(tunnel._await_forward(_ExitedProc(), 9))
+
+    def test_await_forward_times_out_when_the_port_never_opens(self):
+        tunnel = PeerTunnel("l", "user@host")
+        tunnel.READY_TIMEOUT = 0.3
+        tunnel.READY_POLL = 0.05
+        port = tunnel._reserve_port()
+        started = time.monotonic()
+        self.assertFalse(tunnel._await_forward(_AliveProc(), port))
+        self.assertLess(time.monotonic() - started, 2.0)
 
     def test_missing_ssh_is_unreachable(self):
         tunnel = PeerTunnel("l", "user@host", which=lambda _name: None)
