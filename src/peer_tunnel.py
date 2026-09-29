@@ -40,6 +40,11 @@ class PeerTunnel:
     testable; the coordinator test injects a whole tunnel.
     """
 
+    # Bound on waiting for ssh to authenticate and bind the forwarded
+    # port, and the interval between readiness probes.
+    READY_TIMEOUT = 5.0
+    READY_POLL = 0.1
+
     def __init__(self, label, ssh, ssh_bin=None, remote_state=None,
                  on_exit=None, popen=subprocess.Popen, which=shutil.which,
                  sleep=time.sleep, settings=None):
@@ -79,10 +84,11 @@ class PeerTunnel:
                 "name": self.host,
             }
         # ExitOnForwardFailure makes ssh leave at once when it cannot
-        # bind the forwarded port; surface that as a start failure,
-        # not a link that silently never connects.
-        self._sleep(0.2)
-        if proc.poll() is not None:
+        # bind the forwarded port. ssh also takes time to authenticate
+        # and bind, so wait for the forwarded port to accept rather
+        # than guessing with a fixed delay and racing the first connect.
+        if not self._await_forward(proc, port):
+            self._stop_ssh(proc)
             detail = self._drain_stderr(proc)
             with self._lock:
                 self._proc = None
@@ -102,6 +108,44 @@ class PeerTunnel:
                 proc.kill()
             except OSError:
                 pass
+
+    def _await_forward(self, proc, port):
+        # Ready once a connect to the reserved loopback port succeeds;
+        # an ssh that already exited (bad key, bind failure) fails at
+        # once, and a tunnel that never comes up fails at the deadline.
+        deadline = time.monotonic() + self.READY_TIMEOUT
+        while True:
+            if proc.poll() is not None:
+                return False
+            if self._port_open(port):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            self._sleep(self.READY_POLL)
+
+    def _port_open(self, port):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.5)
+            probe.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
+    def _stop_ssh(self, proc):
+        # A timed-out ssh is still running; end it so stderr reaches
+        # EOF and the classifier can read the failure reason.
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def _wait(self, proc):
         # Drain stderr so a noisy ssh cannot fill its pipe and block,
