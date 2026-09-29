@@ -4,6 +4,15 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.33 - 2026-09-28
+
+- Wait for the peer's ssh forward to accept before returning the
+  reserved loopback endpoint. `PeerTunnel.start()` no longer sleeps a
+  fixed 0.2 s and lets the broker's first connect race the forward with
+  a 2 s timeout, so a slow SSH authenticate/bind no longer makes
+  `team_peer add` report the peer unreachable; an ssh that exits early
+  still fails at once with the existing stderr classification.
+
 ## v0.4.32 - 2026-09-26
 
 - Condemn a reaped teammate transcript and unlink it only once its
