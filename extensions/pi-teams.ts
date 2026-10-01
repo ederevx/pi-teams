@@ -12,6 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { TeamAgent } from "./pi-teams/agent.ts";
 import { ChatTail } from "./pi-teams/chat-tail.ts";
+import { PreTeamsTool } from "./pi-teams/pre-teams.ts";
 import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
 	announceAgents,
@@ -66,6 +67,9 @@ export default async function (pi: ExtensionAPI) {
 
 	registerLogRenderer(pi);
 
+	// Onboarding: one `pre_teams` catalog call gates every team tool.
+	new PreTeamsTool().register(pi);
+
 	// -- agent-facing teammate spawn -------------------------------------
 	// The agent names a task and gets a resumable session back; no
 	// wrapper script or command line is needed.
@@ -74,14 +78,9 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_spawn",
 		label: "spawn teammate",
 		description:
-			"Spawn a teammate: a persistent, resumable pi session that " +
-			"reports back as a team message. One task each; wait with " +
-			"team_wait or let the report arrive on its own. The " +
-			"teammate starts with a clean context, receives only the " +
-			"task, and runs with the general teammate role (reports, " +
-			"messages, waits, leads its own sub-team, no memory).",
-		promptSnippet:
-			"Spawn a pi-teams teammate to do a task in its own session",
+			"Spawn a persistent, resumable pi-teams teammate to do one " +
+			"self-contained task in its own session. Call pre_teams for " +
+			"the team tool catalog, conventions, and feature summary.",
 		promptGuidelines: [
 			"Delegate bounded tasks: pass one self-contained task per " +
 				"team_spawn, then call team_wait to block for the report " +
@@ -143,12 +142,11 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_attach",
 		label: "attach a teammate",
 		description:
-			"Attach an existing live pi agent (by id) as your teammate. " +
-			"It re-registers as your fork, so team_wait blocks for its " +
-			"reports. One team per agent: " +
-			"a target with a parent is refused, and a teammate cannot " +
-			"attach (a root runs the attach). Use team_spawn for a new " +
-			"teammate instead.",
+			"Attach an existing live pi agent (by id) as your teammate; " +
+			"it re-registers as your fork, so team_wait blocks for its " +
+			"reports. One team per agent; a target with a parent is " +
+			"refused, and a teammate cannot attach. Call pre_teams for " +
+			"the catalog and conventions.",
 		parameters: Type.Object({
 			target: Type.String({
 				description: "Agent id to attach (from /team-ls)",
@@ -183,15 +181,9 @@ export default async function (pi: ExtensionAPI) {
 		label: "wait for teammates",
 		description:
 			"Wait for teammates to report; returns on the first report " +
-			"(details lists remaining ids, which keep running and " +
-			"report as messages). While waiting the agent stays " +
-			"interruptible, yields early on a queued or direct " +
-			"message, and the call shows live elapsed/pending status. " +
-			"A teammate silent " +
-			`past the stall bound is nudged once (PI_TEAMS_STALL or ` +
-			`${DEFAULT_STALL_SECONDS}s; 0 disables). Requires team ` +
-			"membership; ids come from team_spawn or team_attach.",
-		promptSnippet: "Wait for teammate reports; aborts on interrupt",
+			"and leaves the rest running. Requires team membership; ids " +
+			"come from team_spawn or team_attach. Call pre_teams for the " +
+			"catalog and conventions.",
 		promptGuidelines: [
 			"team_wait returns the first report; re-call it with " +
 				"details.remaining to keep blocking. Silent teammates " +
@@ -398,11 +390,10 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_peer",
 		label: "link a peer host",
 		description:
-			"Link another host's pi-teams broker over an existing SSH " +
-			"session (add links it and owns the ssh tunnel; remove " +
-			"drops the link) so agents can message across hosts. The " +
-			"peer host must already run pi-teams.",
-		promptSnippet: "Link another host's pi-teams broker over SSH",
+			"Link or unlink another host's pi-teams broker over an " +
+			"existing SSH session (add links it and owns the tunnel; " +
+			"remove drops the link). Call pre_teams for the catalog and " +
+			"conventions.",
 		promptGuidelines: [
 			"team_peer add <ssh-host> once enables cross-host teammates " +
 				"(team_spawn host=<label>); if SSH is not usable " +
@@ -540,7 +531,6 @@ export default async function (pi: ExtensionAPI) {
 			"Terminate a pi-teams agent by id, local or peer-hosted " +
 			"(routed through the link): its process is signalled and " +
 			"its session file removed. Requires team membership.",
-		promptSnippet: "Terminate a teammate by id",
 		parameters: Type.Object({
 			target: Type.String({
 				description: "Agent id to terminate",
@@ -572,10 +562,10 @@ export default async function (pi: ExtensionAPI) {
 		label: "reap this session",
 		description:
 			"Voluntarily reap this session after the broker's idle " +
-			"request: acknowledge the reap to the broker (it drops the " +
-			"registration and, for a spawned teammate, the transcript) " +
-			"and request an orderly process shutdown. Call it only when " +
-			"the broker asks or when this session should end itself.",
+			"request: acknowledge the reap (dropping the registration " +
+			"and a spawned teammate's transcript) and request an " +
+			"orderly shutdown. Call pre_teams for the catalog and " +
+			"conventions.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			await app.reap();
