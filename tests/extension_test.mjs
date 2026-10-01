@@ -1843,11 +1843,6 @@ function makeOnboardingPi() {
 	return pi;
 }
 
-const onboardingTheme = {
-	fg: (_tag, text) => text,
-	bold: (text) => text,
-};
-
 test("pre_teams catalog covers every team tool, conventions, features", async () => {
 	const pi = makeOnboardingPi();
 	new PreTeamsTool().register(pi);
@@ -1886,31 +1881,20 @@ test("pre_teams gate blocks its own tools only, until acknowledged", async () =>
 	assert.equal(allowed, undefined);
 });
 
-test("pre_teams session_start resets the gate and collapses tools", async () => {
+test("pre_teams session_start resets the gate", async () => {
 	const pi = makeOnboardingPi();
 	new PreTeamsTool().register(pi);
 	await pi.emit("tool_call", { toolName: "pre_teams" });
 
-	const calls = [];
-	await pi.emit("session_start", { reason: "new" }, {
-		hasUI: true,
-		ui: { setToolsExpanded: (value) => calls.push(value) },
-	});
-	assert.deepEqual(calls, [false]);
+	await pi.emit("session_start", { reason: "new" });
 
 	const [blocked] = await pi.emit("tool_call", { toolName: "team_wait" });
 	assert.equal(blocked.block, true);
 });
 
-test("pre_teams renderResult is collapsed by default", async () => {
+test("pre_teams defines no custom renderer, so pi collapses natively", () => {
 	const pi = makeOnboardingPi();
 	new PreTeamsTool().register(pi);
-	const result = await pi.tool.execute("call-1", {}, undefined, undefined,
-		{});
-	const collapsed = pi.tool.renderResult(result, { expanded: false },
-		onboardingTheme).render(200).join("\n");
-	assert.match(collapsed, /Ctrl\+O to expand/);
-	const expanded = pi.tool.renderResult(result, { expanded: true },
-		onboardingTheme).render(200).join("\n");
-	assert.match(expanded, /team_spawn/);
+	assert.equal(pi.tool.renderResult, undefined);
+	assert.equal(pi.tool.renderCall, undefined);
 });

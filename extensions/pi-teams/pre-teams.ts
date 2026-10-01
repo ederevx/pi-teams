@@ -10,20 +10,15 @@
  * It is also the gate: until `pre_teams` has been called in a session,
  * every other tool this extension registers is blocked with a reason
  * pointing here. Non-extension tools are never touched. The gate resets
- * on each session start, and `session_start` collapses all tool rows by
- * default (Ctrl+O still expands).
+ * on each session start. Tool rows use pi's native collapsed rendering,
+ * so the extension blends in; Ctrl+O expands.
  */
 
 import type {
-	AgentToolResult,
 	ExtensionAPI,
-	ExtensionContext,
-	Theme,
 	ToolCallEvent,
 	ToolCallEventResult,
-	ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 /** The name of this extension's onboarding tool. */
@@ -146,18 +141,9 @@ export class PreTeamsTool {
 					},
 				};
 			},
-			renderCall: (_args, theme) =>
-				new Text(
-					theme.fg("toolTitle", theme.bold(TOOL_NAME)) +
-						theme.fg("muted", " catalog"),
-					0,
-					0,
-				),
-			renderResult: (result, options, theme) =>
-				this.renderResult(result, options, theme),
 		});
-		pi.on("session_start", async (_event, ctx) => {
-			this.beginSession(ctx);
+		pi.on("session_start", async () => {
+			this.beginSession();
 		});
 		pi.on("tool_call", (event) => this.gate(event));
 	}
@@ -186,10 +172,9 @@ export class PreTeamsTool {
 		return this.owned.has(name);
 	}
 
-	/** Reset per-session acknowledgement and collapse tool rows. */
-	private beginSession(ctx?: ExtensionContext): void {
+	/** Reset per-session acknowledgement. */
+	private beginSession(): void {
 		this.acknowledged = false;
-		if (ctx?.hasUI) ctx.ui.setToolsExpanded(false);
 	}
 
 	/** Block this extension's tools until `pre_teams` has been called;
@@ -209,25 +194,5 @@ export class PreTeamsTool {
 			};
 		}
 		return undefined;
-	}
-
-	/** Collapsed rows show a one-line hint; Ctrl+O shows the catalog. */
-	private renderResult(
-		result: AgentToolResult<unknown>,
-		{ expanded }: ToolRenderResultOptions,
-		theme: Theme,
-	): Text {
-		if (!expanded) {
-			return new Text(
-				theme.fg("muted", "pre_teams catalog (Ctrl+O to expand)"),
-				0,
-				0,
-			);
-		}
-		const lines: string[] = [];
-		for (const part of result.content) {
-			if (part.type === "text") lines.push(part.text);
-		}
-		return new Text(lines.join("\n"), 0, 0);
 	}
 }
