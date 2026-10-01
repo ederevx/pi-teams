@@ -82,8 +82,8 @@ export function registerLogRenderer(pi: ExtensionAPI): void {
 	});
 }
 
-/** The pre-turn awareness note: live team plus the calls to reach or
- *  spawn teammates, labeled with its broker root. */
+/** The pre-turn awareness note: the live team plus a pointer to the
+ *  `pre_teams` catalog, labeled with its broker root. */
 export function announceAgents(
 	agents: AgentInfo[],
 ): { customType: string; content: string; display: boolean } | null {
@@ -96,9 +96,7 @@ export function announceAgents(
 	const content =
 		`## pi-teams teammates (broker: ${stateRoot})\n` +
 		`${lines.join("\n") || "- none live yet"}\n` +
-		`Reach or spawn teammates by tool call (team_send, team_wait, ` +
-		`team_attach, team_detach, team_kill, team_spawn; team_peer ` +
-		`links a peer host; /team-ls opens the dock). Teammates ` +
-		`message only their own team.`;
+		`Call pre_teams for the team tool catalog, conventions, and ` +
+		`feature summary. Teammates message only their own team.`;
 	return { customType: "pi-teams", content, display: false };
 }
