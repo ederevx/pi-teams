@@ -67,6 +67,8 @@ const { TeamSettingsView } =
 	await import("../extensions/pi-teams/settings-view.ts");
 const { formatReport } =
 	await import("../extensions/pi-teams/messages.ts");
+const { PreTeamsTool } =
+	await import("../extensions/pi-teams/pre-teams.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -684,8 +686,8 @@ test("spawnTask builds the teammate template from a task alone", () => {
 		// one constant for every teammate launch.
 		const roleIndex = call.args.indexOf("--append-system-prompt");
 		assert.notEqual(roleIndex, -1, "teammate launches with its role");
-		assert.match(call.args[roleIndex + 1], /capabilities as a teammate/);
-		assert.match(call.args[roleIndex + 1], /team leader yourself/);
+		assert.match(call.args[roleIndex + 1], /Call pre_teams/);
+		assert.match(call.args[roleIndex + 1], /delegate bounded units/);
 		assert.match(call.args[roleIndex + 1], /Do not write memory/);
 		assert.deepEqual(call.options.stdio, ["pipe", "ignore", "ignore"]);
 		assert.equal(call.stdinWrites.length, 1);
@@ -1816,4 +1818,99 @@ test("the extension wires team_gc_reap to ack and shut down", async () => {
 		if (previous === undefined) delete globalThis.__piTeamsAgent;
 		else globalThis.__piTeamsAgent = previous;
 	}
+});
+
+/** A minimal ExtensionAPI double for driving PreTeamsTool. */
+function makeOnboardingPi() {
+	const handlers = new Map();
+	const pi = {
+		on(name, handler) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
+		},
+		registerTool(definition) {
+			pi.tool = definition;
+		},
+		async emit(name, event, ctx) {
+			const results = [];
+			for (const handler of handlers.get(name) ?? []) {
+				results.push(await handler(event, ctx));
+			}
+			return results;
+		},
+	};
+	return pi;
+}
+
+const onboardingTheme = {
+	fg: (_tag, text) => text,
+	bold: (text) => text,
+};
+
+test("pre_teams catalog covers every team tool, conventions, features", async () => {
+	const pi = makeOnboardingPi();
+	new PreTeamsTool().register(pi);
+	assert.equal(pi.tool.name, "pre_teams");
+	const result = await pi.tool.execute("call-1", {}, undefined, undefined,
+		{});
+	const text = result.content[0].text;
+	assert.match(text, /Conventions:/);
+	assert.match(text, /Features:/);
+	assert.match(text, /pre_teams/);
+	const names = [
+		"team_spawn", "team_attach", "team_wait", "team_send",
+		"team_ls", "team_tail", "team_peer", "team_detach",
+		"team_kill", "team_gc_reap",
+	];
+	assert.deepEqual(result.details.tools, names);
+	for (const name of names) {
+		assert.match(text, new RegExp(`- ${name}: `),
+			`${name} has a one-line purpose in the catalog`);
+	}
+});
+
+test("pre_teams gate blocks its own tools only, until acknowledged", async () => {
+	const pi = makeOnboardingPi();
+	new PreTeamsTool().register(pi);
+
+	const [blocked] = await pi.emit("tool_call", { toolName: "team_spawn" });
+	assert.equal(blocked.block, true);
+	assert.match(blocked.reason, /pre_teams/);
+
+	const [foreign] = await pi.emit("tool_call", { toolName: "read" });
+	assert.equal(foreign, undefined);
+
+	await pi.emit("tool_call", { toolName: "pre_teams" });
+	const [allowed] = await pi.emit("tool_call", { toolName: "team_spawn" });
+	assert.equal(allowed, undefined);
+});
+
+test("pre_teams session_start resets the gate and collapses tools", async () => {
+	const pi = makeOnboardingPi();
+	new PreTeamsTool().register(pi);
+	await pi.emit("tool_call", { toolName: "pre_teams" });
+
+	const calls = [];
+	await pi.emit("session_start", { reason: "new" }, {
+		hasUI: true,
+		ui: { setToolsExpanded: (value) => calls.push(value) },
+	});
+	assert.deepEqual(calls, [false]);
+
+	const [blocked] = await pi.emit("tool_call", { toolName: "team_wait" });
+	assert.equal(blocked.block, true);
+});
+
+test("pre_teams renderResult is collapsed by default", async () => {
+	const pi = makeOnboardingPi();
+	new PreTeamsTool().register(pi);
+	const result = await pi.tool.execute("call-1", {}, undefined, undefined,
+		{});
+	const collapsed = pi.tool.renderResult(result, { expanded: false },
+		onboardingTheme).render(200).join("\n");
+	assert.match(collapsed, /Ctrl\+O to expand/);
+	const expanded = pi.tool.renderResult(result, { expanded: true },
+		onboardingTheme).render(200).join("\n");
+	assert.match(expanded, /team_spawn/);
 });

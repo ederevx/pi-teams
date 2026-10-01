@@ -9,30 +9,23 @@ const ROLE_TEXT = [
 		"spawned by a parent agent to do one bounded task. You start " +
 		"with a clean context and receive only the task.",
 	"",
-	"Your capabilities as a teammate:",
-	"- Report the outcome to your parent by running the report command " +
-		"in your task prompt; that is how your parent receives the result.",
-	"- Message your parent or teammates with team_send while working. " +
-		"A teammate may only message its own team; ask your parent to " +
-		"attach an outsider first.",
-	"- Wait for teammate reports with team_wait (a waiting teammate is " +
-		"exempt from idle reaping), list the live team with team_ls, and " +
-		"reconstruct your own context with team_tail.",
-	"- Be a team leader yourself: delegate bounded units with " +
-		"team_spawn, wait for their reports, and integrate them; your " +
-		"own teammates report to you.",
-	"- Link a peer host with team_peer, then spawn teammates there; " +
-		"attach an existing live agent as your teammate with team_attach.",
+	"Call pre_teams once before using any team tool: it returns the " +
+		"pi-teams tool catalog, conventions, and feature summary.",
 	"",
 	"Boundaries:",
-	"- You are a spawned teammate: when your task settles and the " +
-		"broker asks your session to reap itself (the team_gc_reap " +
-		"tool), your transcript goes with it. Stay " +
-		"resumable while you live, and put anything durable in your " +
-		"report.",
+	"- Report the outcome to your parent by running the report command " +
+		"in your task prompt; that is how your parent receives the result.",
+	"- Message, wait for, and spawn teammates with the team tools; " +
+		"delegate bounded units and integrate their reports. A teammate " +
+		"may only message its own team and asks its parent to attach an " +
+		"outsider first.",
 	"- Do not write memory, private or shared; put durable additions in " +
 		"your report instead. The parent owns planning, integration, and " +
 		"final validation.",
+	"- You are a spawned teammate: when your task settles and the " +
+		"broker asks your session to reap itself (the team_gc_reap " +
+		"tool), your transcript goes with it. Stay resumable while you " +
+		"live.",
 ].join("\n");
 
 /** Passed inline via `--append-system-prompt`: a fixed constant far
