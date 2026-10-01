@@ -4,6 +4,15 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.34 - 2026-10-01
+
+- Add the `pre_teams` onboarding tool
+  (`extensions/pi-teams/pre-teams.ts`) and gate this extension's
+  tools until it is called once per session. One call returns the
+  tool catalog, conventions, and feature summary; the duplicated
+  tool lists leave the prompt snippets, descriptions, and injected
+  teammate note. Tool rows use pi's native collapsed rendering.
+
 ## v0.4.33 - 2026-09-28
 
 - Wait for the peer's ssh forward to accept before returning the
