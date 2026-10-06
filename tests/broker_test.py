@@ -80,6 +80,13 @@ class _ExitedProc:
         return 1
 
 
+class _NullConn:
+    """A connection stand-in that discards the broker's replies."""
+
+    def sendall(self, data):
+        return None
+
+
 class PeerTunnelTests(unittest.TestCase):
     def test_classifies_common_ssh_failures(self):
         tunnel = PeerTunnel("l", "user@host")
@@ -441,6 +448,38 @@ class BrokerProtocolTests(unittest.TestCase):
         broker.version = broker._source_version()
         self.assertFalse(broker._should_restart(now + 11),
                          "a matching source must not restart")
+
+    def test_read_only_polls_do_not_hold_the_restart_clock(self):
+        # A dock's registry poll and an idle hold's keepalive must not
+        # defeat adoption: the stale broker still self-exits while they
+        # continue, because only work-bearing contact resets the clock.
+        broker = TeamBroker(self.root, restart_grace=5)
+        broker.version = "older-source"
+        conn = _NullConn()
+        now = time.time()
+        broker.last_active = now - 6
+        for op, msg in (("ls", {"op": "ls"}),
+                        ("peer-list", {"op": "peer-list"}),
+                        ("ping-idle", {"op": "ping", "busy": False})):
+            broker._handle(conn, msg, None)
+            self.assertEqual(broker.last_active, now - 6,
+                             "%s refreshed the idle clock" % op)
+            self.assertTrue(broker._should_restart(time.time()),
+                            "%s must not hold adoption open" % op)
+        broker._running = True
+        broker._maybe_restart(time.time())
+        self.assertFalse(
+            broker._running,
+            "a stale broker idle past grace must self-exit while polled")
+
+    def test_work_bearing_contact_holds_the_restart_clock(self):
+        broker = TeamBroker(self.root, restart_grace=5)
+        broker.version = "older-source"
+        conn = _NullConn()
+        broker.last_active = time.time() - 6
+        broker._handle(conn, {"op": "ping", "busy": True}, None)
+        self.assertFalse(broker._should_restart(time.time()),
+                         "a busy agent must not be restarted mid-work")
 
     def test_register_and_discover(self):
         self._agent("alpha", role="main")
