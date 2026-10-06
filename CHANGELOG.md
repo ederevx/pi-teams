@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.40 - 2026-10-06
+
+- Stop a peer spawn from inheriting the requester's `cwd`. A cwd names
+  a directory on the spawning host only, so a cross-host spawn (a
+  Windows path sent to a Linux peer) made the remote host hang and the
+  client report the opaque `spawn failed: no id returned`. The broker
+  no longer forwards `cwd` to a peer, the extension omits it for a peer
+  target, and the CLI reports a spawn timeout as a reason instead of an
+  empty reply.
+
 ## v0.4.39 - 2026-10-06
 
 - Run a suffixless pi entry through its named runtime: the recorded
