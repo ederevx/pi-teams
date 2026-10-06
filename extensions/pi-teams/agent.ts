@@ -1,8 +1,8 @@
 /**
  * TeamAgent: the pi session's live identity and every team operation. It
- * owns the hold connection, the launched teammates, the spawn/attach
- * spawn/attach request bookkeeping, the waiter inbox, and lifecycle
- * cleanup. Identity is read from the environment once, then owned here.
+ * owns the hold connection, the spawn/attach request bookkeeping, the
+ * waiter inbox, and lifecycle cleanup. Identity is read from the
+ * environment once, then owned here.
  */
 
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
@@ -10,7 +10,6 @@ import { connect as netConnect } from "node:net";
 import { basename, dirname, join } from "node:path";
 
 import {
-	piInvocation,
 	stateRoot,
 	teamBin,
 	teamdBin,
@@ -25,7 +24,7 @@ import {
 	type InterpreterResolver,
 } from "./interpreter.ts";
 import { BrokerOps, type PeerInfo } from "./broker-ops.ts";
-import { AgentDirectory, type AgentInfo } from "./directory.ts";
+import type { AgentInfo } from "./directory.ts";
 import {
 	SpawnService,
 	type SpawnOptions,
@@ -39,7 +38,6 @@ import {
 	type DeliverFn,
 	type TeamMessage,
 } from "./protocol.ts";
-import { TEAM_ROLE_PROMPT } from "./roles.ts";
 
 export class TeamAgent {
 	private readonly runner: ProcessHost;
@@ -50,7 +48,7 @@ export class TeamAgent {
 	private role: string;
 	/** This session's send credential for gated broker ops (see
 	 *  send_gate.py). The hold registers with it; transient sends and
-	 *  spawned teammates' environments carry it. */
+	 *  the spawn op present it. */
 	private sendToken: string;
 	private parent = "";
 	private attachedName = "";
@@ -67,8 +65,6 @@ export class TeamAgent {
 	private holdProc: SpawnedProcess | null = null;
 	private holdStartedAt = 0;
 	private holdRestarts = 0;
-	private readonly teammates = new Set<SpawnedProcess>();
-	private readonly directory: AgentDirectory;
 	private readonly brokerOps: BrokerOps;
 	private readonly pending = new PendingRequests();
 	private readonly spawns: SpawnService;
@@ -100,16 +96,14 @@ export class TeamAgent {
 		this.id = process.env.TEAM_ID || "";
 		this.role = process.env.TEAM_ID ? "fork" : "main";
 		this.parent = process.env.TEAM_PARENT_ID || "";
-		// One send token per session: the hold registers with it, the
-		// transient sends present it, and spawned teammates inherit a
-		// fresh one through their environment (see teammateEnv).
+		// One send token per session: the hold registers with it and the
+		// gated broker ops (send, spawn) present it.
 		this.sendToken = process.env.TEAM_SEND_TOKEN || mintSendToken();
-		this.directory = new AgentDirectory(() => this.snapshot(), this.host);
 		this.brokerOps = new BrokerOps(runner, this.python);
 		this.brokerOps.sendToken = this.sendToken;
 		this.spawns = new SpawnService(
-			this.host, this.directory, this.brokerOps, this.pending,
-			(name, task, options) => this.spawnTask(name, task, options));
+			this.host, this.brokerOps,
+			() => this.id, () => this.cwd || process.cwd());
 		this.waits = new WaitController(
 			this.inbox,
 			(to, kind, text) => this.send(to, kind, text),
@@ -290,7 +284,8 @@ export class TeamAgent {
 		// new failure, not a repeat of the previous one.
 		if (Date.now() - this.holdStartedAt > 60000) this.holdRestarts = 0;
 		this.holdRestarts += 1;
-		if (this.holdRestarts > 5) return;
+		// No retry cap: a restarted broker must always be able to bring
+		// the session back, so the bounded backoff keeps retrying.
 		const delay = Math.min(30000, 1000 * 2 ** this.holdRestarts);
 		const timer = setTimeout(() => {
 			if (this.closed || this.holdProc) return;
@@ -358,14 +353,6 @@ export class TeamAgent {
 				const oldest = this.seenMessageIds.values().next().value;
 				if (oldest !== undefined) this.seenMessageIds.delete(oldest);
 			}
-		}
-		if (message.kind === "spawn-ack" || message.kind === "spawn-error") {
-			this.pending.settle(message, "spawn-ack");
-			return;
-		}
-		if (message.kind === "spawn") {
-			this.handleSpawnRequest(message);
-			return;
 		}
 		if (message.kind === "attach-ack" || message.kind === "attach-error") {
 			this.pending.settle(message, "attach-ack");
@@ -604,45 +591,24 @@ export class TeamAgent {
 	}
 
 	/** Spawns a teammate on `host` (empty or this host = local) behind a
-	 *  single interface; the service addresses the local process or the
-	 *  peer host's main agent. */
+	 *  single interface; the broker owns the spawn contract and routes a
+	 *  peer host over its link. */
 	async spawn(
 		host: string,
 		name: string,
 		task: string,
 		options: SpawnOptions = {},
-	): Promise<TeammateRef | null> {
-		const ref = await this.spawns.spawn(host, name, task, options);
+	): Promise<TeammateRef> {
+		this.ensureBroker();
+		const session = name || this.defaultSessionName(task);
+		const ref = await this.spawns.spawn(host, session, task, {
+			...options,
+			parent: options.parent || this.id,
+		});
 		// Spawning a teammate makes this session a team member too, so it
 		// can message and wait without a separate attach.
-		if (ref) this.teamOwner = true;
+		this.teamOwner = true;
 		return ref;
-	}
-
-	/** A peer host asked this agent to spawn a teammate: this host owns
-	 *  the process and session and reports the new id back. */
-	private handleSpawnRequest(message: TeamMessage): void {
-		const payload = (message.payload ?? {}) as {
-			task?: string; name?: string; requestId?: string;
-			provider?: string; model?: string; thinking?: string;
-		};
-		if (!payload.task) return;
-		try {
-			const ref = this.spawnTask(payload.name || "", payload.task, {
-				parent: message.from,
-				provider: payload.provider,
-				model: payload.model,
-				thinking: payload.thinking,
-			});
-			void this.send(message.from, "spawn-ack", JSON.stringify({
-				requestId: payload.requestId, id: ref.id,
-				session: ref.session,
-			}));
-		} catch {
-			void this.send(message.from, "spawn-error", JSON.stringify({
-				requestId: payload.requestId,
-			}));
-		}
 	}
 
 	/** Re-registers this running session as a teammate of `parent`. The
@@ -663,8 +629,8 @@ export class TeamAgent {
 		this.role = "fork";
 		this.parent = parent;
 		this.attachedName = session;
-		// A spawned fork gets its shell identity from teammateEnv at
-		// launch; an attached session is already running, so its shell
+		// A spawned fork gets its shell identity from the broker's spawn
+		// contract; an attached session is already running, so its shell
 		// tools would otherwise expand an empty $TEAM_PARENT_ID in the
 		// report command. Apply the fork identity to this process's env.
 		this.applyAttachEnv(forkId, session);
@@ -774,41 +740,6 @@ export class TeamAgent {
 		await this.brokerOps.terminate(agentId);
 	}
 
-	/** The common teammate template: the caller supplies only the task and
-	 *  an optional name; session, model, and the report-back instruction
-	 *  are supplied here. Like a subagent delegation, the teammate gets
-	 *  the task alone and a clean context; unlike a subagent it stays a
-	 *  persistent, resumable RPC session. */
-	spawnTask(name: string, task: string, options: SpawnOptions = {}): TeammateRef {
-		const forkId = this.makeForkId();
-		const session = name || this.defaultSessionName(task);
-		const args = this.teammateArgs(session, options);
-		this.launchTeammate(forkId, session, args,
-			this.taskPrompt(session, task), options.parent);
-		return { id: forkId, session };
-	}
-
-	/** The spawn argv for a teammate: a headless RPC session, not a
-	 *  one-shot `pi -p`, that inherits the parent's session directory,
-	 *  provider, model, and thinking level. The context itself is never
-	 *  inherited: like a subagent, a teammate starts clean. Every
-	 *  teammate carries the general teammate role as its appended
-	 *  system prompt, independent of its task. */
-	private teammateArgs(
-		session: string,
-		options: SpawnOptions,
-	): string[] {
-		return [
-			"--mode", "rpc",
-			...(this.sessionDir ? ["--session-dir", this.sessionDir] : []),
-			"--name", session,
-			"--append-system-prompt", TEAM_ROLE_PROMPT,
-			...(options.provider ? ["--provider", options.provider] : []),
-			...(options.model ? ["--model", options.model] : []),
-			...(options.thinking ? ["--thinking", options.thinking] : []),
-		];
-	}
-
 	private makeForkId(): string {
 		return this.makeId("fork");
 	}
@@ -828,114 +759,17 @@ export class TeamAgent {
 		return slug || "teammate";
 	}
 
-	private taskPrompt(session: string, task: string): string {
-		// The marker phrase here is the broker's teammate-session stamp; keep
-		// it in sync with TEAMMATE_MARKER in src/team_root.py. The role itself
-		// rides in the appended system prompt; this prompt carries only the
-		// session identity, the report mechanics, and the task. Call the
-		// interpreter on the absolute client path instead of a
-		// `team` name on PATH: a shebang script is not executable on
-		// Windows, and binDir may not be on PATH. The teammate runs this
-		// through its shell tool, where the $TEAM_* variables expand.
-		const send = this.reportCommand();
-		return (
-			`You are "${session}", a teammate spawned by a parent pi session ` +
-			`to do one task. Report the outcome to your parent by running ` +
-			`this command:\n  ${send}\n` +
-			`Task:\n${task}`
-		);
-	}
-
 	/** The report-back command, run through the interpreter on the
 	 *  absolute client path (a shebang script is not executable on
-	 *  Windows, and binDir may not be on PATH). Shared by the spawn
-	 *  prompt and an attached teammate. Paths are single-quoted with
-	 *  embedded quotes escaped, so no character in them can break out
-	 *  of the teammate's shell command. */
+	 *  Windows, and binDir may not be on PATH). Shared by an attached
+	 *  teammate. Paths are single-quoted with embedded quotes escaped,
+	 *  so no character in them can break out of the teammate's shell
+	 *  command. */
 	private reportCommand(): string {
 		const quote = (value: string): string =>
 			`'${value.replace(/'/g, "'\\''")}'`;
 		return `${quote(this.python)} ${quote(teamBin)} --root "$TEAM_ROOT" ` +
 			`send "$TEAM_PARENT_ID" result "<report>"`;
-	}
-
-	private launchTeammate(
-		forkId: string,
-		session: string,
-		args: string[],
-		prompt: string,
-		parent?: string,
-	): void {
-		const invocation = piInvocation();
-		const env = this.teammateEnv(forkId, session, parent);
-		this.ensureBroker();
-		// The extension holds the teammate's RPC stdin open: the teammate
-		// stays alive for messages and exits when this pi goes away (the
-		// pipe closes) or the broker GC signals it.
-		const child = this.launch(
-			"detached",
-			invocation.command,
-			[...invocation.args, ...args],
-			{ env, stdio: ["pipe", "ignore", "ignore"] },
-		);
-		if (!child) return;
-		this.teammates.add(child);
-		child.on("exit", () => this.teammates.delete(child));
-		child.on("error", () => this.teammates.delete(child));
-		if (child.stdin) {
-			try {
-				child.stdin.write(
-					JSON.stringify({ type: "prompt", message: prompt }) + "\n");
-			} catch {
-				// The teammate died before the prompt landed; the broker GC
-				// reaps the entry.
-			}
-		}
-		child.unref();
-	}
-
-	/** A teammate's environment: drop every inherited variable that binds
-	 *  a process to a parent session or host, whichever layer set it,
-	 *  then set the fork's own identity. Pi removes its session variables
-	 *  for child shells the same way. */
-	private teammateEnv(
-		forkId: string,
-		session: string,
-		parent?: string,
-	): Record<string, string | undefined> {
-		const env: Record<string, string | undefined> = { ...process.env };
-		for (const key of Object.keys(env)) {
-			if (/^(PI_(SESSION|HOST)|TEAM_(ATTACHED|SESSION|HOST))/.test(key)) {
-				delete env[key];
-			}
-		}
-		Object.assign(env, {
-			TEAM_ID: forkId,
-			TEAM_NAME: session,
-			TEAM_ROLE: "fork",
-			TEAM_PARENT_ID: parent || this.id,
-			TEAM_ROOT: stateRoot,
-			// The teammate's own send credential: its hold registers with
-			// it and its report-back shell command presents it.
-			TEAM_SEND_TOKEN: mintSendToken(),
-		});
-		return env;
-	}
-
-	private stopTeammates(): void {
-		for (const child of this.teammates) {
-			try {
-				child.stdin?.end();
-			} catch {
-				// already closed
-			}
-			try {
-				child.kill();
-			} catch {
-				// already gone
-			}
-		}
-		this.teammates.clear();
 	}
 
 	/** Links a peer host's broker. The broker owns the ssh tunnel and
@@ -994,12 +828,11 @@ export class TeamAgent {
 
 	deregister(): void {
 		// A surrendered instance handed its identity to a reload's
-		// replacement: touching state or teammates here would tear down
-		// the registration the fresh instance now owns.
+		// replacement: touching state here would tear down the
+		// registration the fresh instance now owns.
 		if (this.surrendered) return;
 		this.cancelWaits();
 		this.stopHold();
-		this.stopTeammates();
 		this.clearState();
 	}
 

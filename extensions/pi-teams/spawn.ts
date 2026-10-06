@@ -1,18 +1,12 @@
 /**
- * Spawn routing. One service owns the single spawn path: a host-less or
- * this-host spawn launches the teammate's process here, any other host
- * asks that host's main agent through the broker. Only the address
- * differs, so no separate per-host backend exists.
+ * Spawn routing. One service owns the single spawn path: it asks the
+ * broker, which owns the spawn contract, for a teammate on this host or
+ * on a linked peer host. Only the target host differs, so no separate
+ * per-host backend exists.
  */
 
-import type { AgentDirectory } from "./directory.ts";
 import type { BrokerOps } from "./broker-ops.ts";
-import {
-	requestId,
-	spawnWindowMs,
-	type TeammateRef,
-} from "./protocol.ts";
-import type { PendingRequests } from "./pending.ts";
+import type { TeammateRef } from "./protocol.ts";
 
 export type { TeammateRef } from "./protocol.ts";
 
@@ -25,35 +19,23 @@ export interface SpawnOptions {
 	parent?: string;
 }
 
-/** The single spawn path: local launch here, or a request to a peer
- *  host's main agent over the broker's existing link. */
+/** The single spawn path: one broker op, local or peer-hosted. */
 export class SpawnService {
 	private readonly host: string;
-	private readonly directory: AgentDirectory;
 	private readonly broker: BrokerOps;
-	private readonly pending: PendingRequests;
-	private readonly launch: (
-		name: string,
-		task: string,
-		options: SpawnOptions,
-	) => TeammateRef;
+	private readonly requester: () => string;
+	private readonly cwd: () => string;
 
 	constructor(
 		host: string,
-		directory: AgentDirectory,
 		broker: BrokerOps,
-		pending: PendingRequests,
-		launch: (
-			name: string,
-			task: string,
-			options: SpawnOptions,
-		) => TeammateRef,
+		requester: () => string,
+		cwd: () => string,
 	) {
 		this.host = host;
-		this.directory = directory;
 		this.broker = broker;
-		this.pending = pending;
-		this.launch = launch;
+		this.requester = requester;
+		this.cwd = cwd;
 	}
 
 	async spawn(
@@ -61,41 +43,16 @@ export class SpawnService {
 		name: string,
 		task: string,
 		options: SpawnOptions,
-	): Promise<TeammateRef | null> {
-		if (!host || host === this.host) {
-			return this.launch(name, task, options);
-		}
-		return this.remote(host, name, task, options);
-	}
-
-	private async remote(
-		host: string,
-		name: string,
-		task: string,
-		options: SpawnOptions,
-	): Promise<TeammateRef | null> {
-		const candidates = await this.directory.mainAgents(host);
-		if (candidates.length === 0) return null;
-		// One request window per candidate: a timeout or spawn-error
-		// fails only that target, so the next live main is tried.
-		for (const target of candidates) {
-			const id = requestId("spawn");
-			const wait = this.pending.register(id, spawnWindowMs());
-			try {
-				await this.broker.send(target.id, "spawn", JSON.stringify({
-					task,
-					name,
-					requestId: id,
-					provider: options.provider,
-					model: options.model,
-					thinking: options.thinking,
-				}));
-			} catch {
-				continue;
-			}
-			const ref = await wait;
-			if (ref) return ref;
-		}
-		return null;
+	): Promise<TeammateRef> {
+		return this.broker.spawn(this.requester(), {
+			name,
+			task,
+			cwd: this.cwd(),
+			host: host && host !== this.host ? host : undefined,
+			provider: options.provider,
+			model: options.model,
+			thinking: options.thinking,
+			parent: options.parent,
+		});
 	}
 }
