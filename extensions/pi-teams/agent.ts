@@ -10,6 +10,7 @@ import { connect as netConnect } from "node:net";
 import { basename, dirname, join } from "node:path";
 
 import {
+	piInvocationEnv,
 	stateRoot,
 	teamBin,
 	teamdBin,
@@ -227,7 +228,10 @@ export class TeamAgent {
 			"persistent",
 			interpreter,
 			[teamdBin, "--root", stateRoot, "start"],
-			{ stdio: "ignore" },
+			{
+				stdio: "ignore",
+				env: { ...process.env, ...piInvocationEnv() },
+			},
 		);
 		child?.unref();
 	}

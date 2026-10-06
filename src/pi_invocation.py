@@ -3,13 +3,19 @@
 The TypeScript counterpart lives in extensions/pi-teams/paths.ts
 (piInvocation) and resolves the running runtime's entry so a Windows
 launcher shim is never executed directly. A Python daemon has no pi
-entry in its own argv, so this resolves the same intent from the
-environment instead: an explicit entry replayed through this
-interpreter, then a configured command, then the bare `pi` name.
+entry in its own argv, so the loader that does know it passes the entry
+through the environment instead; failing that, a configured command is
+used, and only then the bare `pi` name.
 """
 
 import os
+import shutil
 import sys
+
+# A JS entry is run by the runtime that owns it: npm's pi.cmd shim
+# cannot be executed directly on Windows, and routing an argument list
+# through the command shell would break on the multi-line prompt.
+JS_SUFFIXES = (".js", ".mjs", ".cjs")
 
 
 class PiInvocation:
@@ -20,8 +26,17 @@ class PiInvocation:
         env = os.environ if environ is None else environ
         entry = entry or env.get("PI_TEAMS_PI_ENTRY")
         if entry and os.path.isfile(entry):
-            return sys.executable, [entry]
+            return PiInvocation._entry(entry, env)
         command = env.get("PI_TEAMS_PI_COMMAND")
         if command:
             return command, list((env.get("PI_TEAMS_PI_ARGS") or "").split())
         return "pi", []
+
+    @staticmethod
+    def _entry(entry, env):
+        """The runtime that runs `entry`, with the entry as its argument."""
+        if entry.lower().endswith(JS_SUFFIXES):
+            node = (env.get("PI_TEAMS_PI_NODE") or shutil.which("node")
+                    or "node")
+            return node, [entry]
+        return sys.executable, [entry]
