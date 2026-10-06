@@ -4,6 +4,26 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.39 - 2026-10-06
+
+- Run a suffixless pi entry through its named runtime: the recorded
+  `PI_TEAMS_PI_NODE` always wins, and the JS fallback follows a symlink.
+  An npm `.bin/pi` launcher — a suffixless symlink to `cli.js` — no
+  longer runs pi under `python3`, so a spawn on Linux succeeds instead
+  of the teammate dying as "provider started no session".
+
+## v0.4.38 - 2026-10-06
+
+- Make the Python suite's path expectations and the extension
+  settings-mode assertion valid on Windows.
+
+## v0.4.37 - 2026-10-06
+
+- Persist the pi launch entry under the team root, so a broker without
+  the extension's launch environment still resolves the runtime.
+- Reset the broker's idle restart clock only on work-bearing contact.
+- Read the broker reply before closing the stop socket.
+
 ## v0.4.36 - 2026-10-06
 
 - Resolve a runnable pi runtime on Windows: the extension passes the
