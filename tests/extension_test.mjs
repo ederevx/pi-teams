@@ -1506,6 +1506,17 @@ test("team-settings opens the custom view and renders every row", async () => {
 	assert.match(lines, /Peer setup command/);
 });
 
+// chmod on Windows only toggles the read-only bit, so the exact POSIX
+// mode bits cannot be observed there; assert the meaningful property
+// instead, that the file is still writable by its owner.
+function assertSettingsMode(file) {
+	if (process.platform === "win32") {
+		assert.notEqual(statSync(file).mode & 0o200, 0);
+	} else {
+		assert.equal(statSync(file).mode & 0o777, 0o640);
+	}
+}
+
 test("team-settings writes piTeams atomically, keeping keys and mode", () => {
 	const dir = mkdtempSync(join(scratch, "settings-store-"));
 	const file = join(dir, "settings.json");
@@ -1527,7 +1538,7 @@ test("team-settings writes piTeams atomically, keeping keys and mode", () => {
 		assert.equal(saved.piTeams.ssh, "old-ssh");
 		assert.equal(saved.theme, "dark");
 		assert.deepEqual(saved.packages, ["git:x"]);
-		assert.equal(statSync(file).mode & 0o777, 0o640);
+		assertSettingsMode(file);
 		assert.deepEqual(
 			readdirSync(dir).filter((name) => name.startsWith("settings.json.tmp")),
 			[]);
@@ -1586,7 +1597,7 @@ test("SettingsStore.reset drops only the piTeams namespace", () => {
 		assert.equal("piTeams" in saved, false);
 		assert.equal(saved.theme, "dark");
 		assert.deepEqual(saved.packages, ["git:x"]);
-		assert.equal(statSync(file).mode & 0o777, 0o640);
+		assertSettingsMode(file);
 		assert.deepEqual(
 			readdirSync(dir).filter(
 				(name) => name.startsWith("settings.json.tmp")),
