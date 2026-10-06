@@ -4,6 +4,20 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.35 - 2026-10-06
+
+- Spawn a teammate through a generic **session-hosting** capability
+  instead of launching a child of the spawning pi or messaging a peer's
+  main agent. The broker resolves a provider by discovery, activates it
+  when it is present but down, and otherwise self-provisions a detached
+  keeper; a peer host is carried over the existing link. A teammate is
+  now an independent session that survives its parent and a broker
+  restart, and a remote spawn no longer needs a live agent there.
+- Never reap a teammate because a peer link dropped; only an explicit
+  terminate or the teammate's own idle window ends it. A provider
+  persists only non-secret identity: the send token travels as a
+  non-persisted `env_once` and a revived session mints a fresh one.
+
 ## v0.4.34 - 2026-10-01
 
 - Add the `pre_teams` onboarding tool
