@@ -34,7 +34,8 @@ class ProcessRunner:
 
     def spawn_child(self, argv, env=None, cwd=None):
         # The pi RPC child reads its prompt from this pipe; the keeper
-        # keeps the write end open for the child's lifetime.
+        # keeps the write end open for the child's lifetime. The pipe is
+        # text because that protocol is one JSON object per line.
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(
@@ -42,4 +43,5 @@ class ProcessRunner:
         return subprocess.Popen(
             list(argv), env=env, cwd=cwd,
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, **kwargs)
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            **kwargs)
