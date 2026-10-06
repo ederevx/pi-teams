@@ -1641,6 +1641,7 @@ class SpawnOpTests(unittest.TestCase):
             self.assertEqual(reply.get("session"), "t1")
             self.assertTrue(reply.get("id"))
             self.assertEqual(fake.calls[0][0], "alpha:parent")
+            self.assertEqual(fake.calls[0][2].get("cwd"), "/tmp")
             client.close()
             # A spawn speaks for an agent and must present its token.
             bad = TeamClient(root, heartbeat=None)
@@ -1686,10 +1687,14 @@ class SpawnOpTests(unittest.TestCase):
             self.assertTrue(
                 broker_a.link_peer("beta", broker_b.root.read_endpoint()))
             self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
-            reply = client.spawn("remote thing", name="t2", host="beta")
+            reply = client.spawn("remote thing", name="t2", host="beta",
+                                 cwd="/local/only")
             self.assertEqual(reply.get("op"), "ack")
             self.assertEqual(reply.get("session"), "t2")
             self.assertEqual(fake_b.calls[0][0], "alpha:parent")
+            # A local cwd names no directory on the peer, so it is not
+            # forwarded; the peer uses its own default instead.
+            self.assertIsNone(fake_b.calls[0][2].get("cwd"))
             client.close()
         finally:
             broker_a.stop()
