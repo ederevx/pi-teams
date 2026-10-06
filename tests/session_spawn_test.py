@@ -19,9 +19,9 @@ class FakeClient:
         self.ok = ok
         self.calls = []
 
-    def start(self, session, cwd, argv, env):
+    def start(self, session, cwd, argv, env, env_once=None):
         self.calls.append({"session": session, "cwd": cwd, "argv": argv,
-                           "env": env})
+                           "env": env, "env_once": env_once})
         if not self.ok:
             return {"ok": False, "error": "refused"}
         return {"ok": True, "name": session}
@@ -78,7 +78,9 @@ class TeamSpawnerTests(unittest.TestCase):
         self.assertEqual(call["env"]["TEAM_ID"], ref["id"])
         self.assertEqual(call["env"]["TEAM_PARENT_ID"], "alpha:parent")
         self.assertEqual(call["env"]["TEAM_ROLE"], "fork")
-        self.assertTrue(call["env"]["TEAM_SEND_TOKEN"])
+        # The secret is never in the persisted env the provider stores.
+        self.assertNotIn("TEAM_SEND_TOKEN", call["env"])
+        self.assertTrue(call["env_once"]["TEAM_SEND_TOKEN"])
         self.assertEqual(fake_self.spawns, [])
 
     def test_no_provider_self_provisions(self):
