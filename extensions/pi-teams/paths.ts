@@ -87,3 +87,18 @@ export function piInvocation(): { command: string; args: string[] } {
 	}
 	return { command: "pi", args: [] };
 }
+
+/**
+ * The same launch, as environment entries for the Python broker. The
+ * broker has no runtime entry in its own argv, so it cannot resolve a
+ * pi the way piInvocation does, and a bare `pi` name names no
+ * executable on Windows (npm installs only pi.cmd/pi.ps1 shims there).
+ */
+export function piInvocationEnv(): Record<string, string> {
+	const { command, args } = piInvocation();
+	if (args.length > 0) {
+		return { PI_TEAMS_PI_ENTRY: args[0], PI_TEAMS_PI_NODE: command };
+	}
+	if (command !== "pi") return { PI_TEAMS_PI_COMMAND: command };
+	return {};
+}

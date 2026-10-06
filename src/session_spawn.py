@@ -80,9 +80,8 @@ class TeamSpawner:
                        )[:24].strip("-").lower()
         return "task-%s-%s" % (slug or "teammate", secrets.token_hex(3))
 
-    @staticmethod
-    def _argv(session, prompt, session_dir, provider, model, thinking):
-        command, base = PiInvocation.resolve()
+    def _argv(self, session, prompt, session_dir, provider, model, thinking):
+        command, base = PiInvocation.resolve(self.environ)
         argv = [command] + list(base)
         if session_dir:
             argv += ["--session-dir", session_dir]
