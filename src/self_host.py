@@ -101,10 +101,20 @@ class SelfSessionHost:
         record = self.root.read_keeper_state(key)
         if not record:
             return None
-        if self._keeper_alive(record):
+        if self._alive(record, "keeper_pid", "keeper_start"):
             return record
         self.root.remove_keeper_state(key)
         return None
+
+    def hosted(self, key):
+        """The keeper state for `key` while the teammate still runs: the
+        keeper and the child it launched are both the recorded live
+        processes, so a keeper whose child died is not a hosted one."""
+        record = self.find(key)
+        if not record or not self._alive(record, "child_pid",
+                                         "child_start"):
+            return None
+        return record
 
     def stop(self, key, why="requested"):
         """Stop the keeper for `key` and drop its state."""
@@ -124,13 +134,19 @@ class SelfSessionHost:
         self.root.remove_keeper_state(key)
         return True
 
+    def abandon(self, key):
+        """Reclaim a teammate this host started but did not confirm: stop
+        its keeper, then drop its state and any unconsumed spec."""
+        self.stop(key, why="unconfirmed")
+        self.root.remove_keeper_spec(key)
+
     def gc(self, now=None, spec_grace=SPEC_GRACE):
         """Reclaim dead keepers' state and abandoned specs; return the
         removed paths. Only this root's byproducts are touched."""
         now = time.time() if now is None else now
         removed = []
         for path, record in self.root.keeper_states():
-            if self._keeper_alive(record):
+            if self._alive(record, "keeper_pid", "keeper_start"):
                 continue
             self.root.unlink_under(str(path), self.root.base)
             removed.append(str(path))
@@ -144,17 +160,17 @@ class SelfSessionHost:
             removed.append(str(path))
         return removed
 
-    def _keeper_alive(self, record):
-        # A pid alone cannot prove the keeper still lives: a reused pid
-        # would pin its state forever, so the recorded start mark is
-        # compared when both sides have one.
+    def _alive(self, record, pid_key, start_key):
+        # A pid alone cannot prove the recorded process still lives: a
+        # reused pid would pin its state forever, so the recorded start
+        # mark is compared when both sides have one.
         try:
-            pid = int(record.get("keeper_pid"))
+            pid = int(record.get(pid_key))
         except (TypeError, ValueError):
             return False
         if not self.root.process_alive(pid):
             return False
-        recorded = record.get("keeper_start")
+        recorded = record.get(start_key)
         live = TeamRoot.process_start_mark(pid)
         if recorded and live and str(recorded) != str(live):
             return False

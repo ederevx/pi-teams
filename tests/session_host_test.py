@@ -99,7 +99,9 @@ class FakeHostServer:
             self.sessions.pop(request.get("name"), None)
             return {"ok": True}
         if cmd == "list":
-            return {"ok": True, "sessions": sorted(self.sessions)}
+            return {"ok": True,
+                    "sessions": [{"name": name, "state": "idle"}
+                                 for name in sorted(self.sessions)]}
         return {"ok": False, "error": "bad-request"}
 
 
@@ -204,6 +206,12 @@ class ClientTests(DirectoryCase):
         listing = self.client.list()
         self.assertTrue(listing["ok"])
         self.assertEqual(listing["sessions"], [])
+
+    def test_state_reports_one_session_record(self):
+        self.client.start("s1", str(self.base), ["pi"])
+        self.client.start("s2", str(self.base), ["pi"])
+        self.assertEqual(self.client.state("s2").get("name"), "s2")
+        self.assertIsNone(self.client.state("absent"))
 
     def test_bad_endpoint_reads_as_oserror(self):
         broken = SessionHostClient(

@@ -117,6 +117,48 @@ class SelfHostTest(unittest.TestCase):
         # A dead key is reclaimed by find's liveness check.
         self.assertIsNone(host.find("h:fork-absent"))
 
+    def test_hosted_requires_the_child_to_live(self):
+        root = harness.make_root()
+        team_root = TeamRoot(root)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        mark = TeamRoot.process_start_mark(os.getpid())
+        team_root.write_keeper_state(
+            "h:fork-childless",
+            {"key": "h:fork-childless", "keeper_pid": os.getpid(),
+             "keeper_start": mark, "child_pid": dead.pid,
+             "child_start": None})
+        team_root.write_keeper_state(
+            "h:fork-hosted",
+            {"key": "h:fork-hosted", "keeper_pid": os.getpid(),
+             "keeper_start": mark, "child_pid": os.getpid(),
+             "child_start": mark})
+        host = SelfSessionHost(root, runner=FakeRunner())
+
+        self.assertIsNone(host.hosted("h:fork-childless"))
+        self.assertIsNotNone(host.hosted("h:fork-hosted"))
+
+    def test_abandon_reclaims_the_keeper_state_and_spec(self):
+        root = harness.make_root()
+        team_root = TeamRoot(root)
+        keeper = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(keeper.kill)
+        team_root.write_keeper_state(
+            "h:fork-stuck",
+            {"key": "h:fork-stuck", "keeper_pid": keeper.pid,
+             "keeper_start": TeamRoot.process_start_mark(keeper.pid)})
+        team_root.write_keeper_spec("h:fork-stuck", {"key": "h:fork-stuck"})
+        host = SelfSessionHost(root, runner=FakeRunner())
+
+        host.abandon("h:fork-stuck")
+
+        self.assertFalse(
+            team_root.keeper_state_path("h:fork-stuck").exists())
+        self.assertFalse(
+            team_root.keeper_spec_path("h:fork-stuck").exists())
+        keeper.wait(timeout=30)
+
 
 if __name__ == "__main__":
     unittest.main()
