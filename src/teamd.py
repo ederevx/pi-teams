@@ -8,13 +8,16 @@ logic in TeamRoot.
 """
 
 import argparse
+import json
+import os
 import socket
 import sys
 
 from peer_link import PeerLink
+from pi_invocation import PiInvocation
 from team_broker import TeamBroker
 from team_root import DEFAULT_ROOT, TEAMMATE_MARKER, TeamRoot
-from wire import dump_line
+from wire import LineStream, dump_line
 
 # Existing importers name teamd for these; keep re-exporting them so the
 # entry point stays the stable surface even though ownership moved.
@@ -23,18 +26,49 @@ from wire import dump_line
 class BrokerCli:
     """The teamd command-line surface, separate from broker behavior."""
 
+    TIMEOUT = 2.0
+
     @staticmethod
-    def _shutdown_via_endpoint(root):
+    def _read_reply(sock, stream):
+        """One JSON reply from the broker, or None at a clean EOF."""
+        while True:
+            line = stream.next_line()
+            if line is None:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return None
+                stream.push(chunk)
+                continue
+            if not line.strip():
+                continue
+            try:
+                return json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise OSError("malformed broker reply")
+
+    @classmethod
+    def _shutdown_via_endpoint(cls, root):
         endpoint = root.read_endpoint()
         if not endpoint:
             raise SystemExit("teamd: no endpoint at %s" % root.base)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
+        sock.settimeout(cls.TIMEOUT)
+        stream = LineStream()
         try:
             sock.connect((endpoint["host"], endpoint["port"]))
             sock.sendall(dump_line(
                 {"op": "hello", "token": endpoint["token"]}))
+            # Read the handshake reply before sending shutdown: closing
+            # with the ack still unread discards queued data (a TCP RST
+            # on Windows), and `shutdown` would be dropped on the floor.
+            reply = cls._read_reply(sock, stream)
+            if not reply or reply.get("op") != "ack":
+                raise OSError("broker handshake rejected: %r" % (reply,))
             sock.sendall(dump_line({"op": "shutdown"}))
+            reply = cls._read_reply(sock, stream)
+            if not reply or reply.get("op") != "ack":
+                raise OSError(
+                    "broker did not acknowledge shutdown: %r" % (reply,))
         except OSError as exc:
             print("teamd: %s" % exc)
             raise SystemExit(1)
@@ -59,6 +93,10 @@ class BrokerCli:
         if args.command == "stop":
             self._shutdown_via_endpoint(root)
             return 0
+        # A broker that inherited the launch entry refreshes the durable
+        # record, repairing a lost extension write; a broker started by
+        # an older extension has nothing to persist and leaves the file.
+        PiInvocation.persist(root, os.environ)
         TeamBroker(args.root, idle_timeout=args.idle_timeout,
                    sweep_interval=args.sweep_interval,
                    gc_idle=args.gc_idle, busy_grace=args.busy_grace,

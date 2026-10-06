@@ -134,7 +134,7 @@ class TeamSpawner:
         return "task-%s-%s" % (slug or "teammate", secrets.token_hex(3))
 
     def _argv(self, session, prompt, session_dir, provider, model, thinking):
-        command, base = PiInvocation.resolve(self.environ)
+        command, base = PiInvocation.resolve(self.environ, root=self.root)
         argv = [command] + list(base)
         if session_dir:
             argv += ["--session-dir", session_dir]
