@@ -189,6 +189,14 @@ class ClientTests(DirectoryCase):
                                      env={"PI_STATE": "/x"})
         self.assertTrue(with_env["ok"])
         self.assertEqual(self.server.requests[-1]["env"], {"PI_STATE": "/x"})
+        once = self.client.start("s3", str(self.base), ["pi"],
+                                 env={"TEAM_ID": "f"},
+                                 env_once={"TEAM_SEND_TOKEN": "s"})
+        self.assertTrue(once["ok"])
+        self.assertEqual(self.server.requests[-1]["env"],
+                         {"TEAM_ID": "f"})
+        self.assertEqual(self.server.requests[-1]["env_once"],
+                         {"TEAM_SEND_TOKEN": "s"})
 
     def test_stop_and_list(self):
         self.client.start("s1", str(self.base), ["pi"])

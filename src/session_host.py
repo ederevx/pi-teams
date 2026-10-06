@@ -87,13 +87,17 @@ class SessionHostClient:
             raise OSError("session-host closed without a response")
         return reply
 
-    def start(self, session, cwd, argv, env=None):
+    def start(self, session, cwd, argv, env=None, env_once=None):
         """Start a session; maps to the daemon's `start` command and
-        returns its {"ok": ..., "error"?} response. `env` is optional."""
+        returns its {"ok": ..., "error"?} response. `env` is persisted
+        by the provider; `env_once` reaches the child but is never
+        stored, so a consumer's secret stays out of the provider."""
         req = {"cmd": "start", "name": session, "dir": cwd,
                "argv": list(argv)}
         if env is not None:
             req["env"] = dict(env)
+        if env_once is not None:
+            req["env_once"] = dict(env_once)
         return self.request(req)
 
     def stop(self, session):

@@ -48,7 +48,8 @@ class TeamSpawner:
                 session, cwd,
                 self._argv(session, prompt, session_dir, provider, model,
                            thinking),
-                self._env(fork_id, session, parent, token))
+                self._identity(fork_id, session, parent),
+                {"TEAM_SEND_TOKEN": token})
             if not isinstance(reply, dict) or reply.get("ok") is not True:
                 raise OSError(
                     "provider refused: %s"
@@ -96,12 +97,14 @@ class TeamSpawner:
         argv += [prompt]
         return argv
 
-    def _env(self, fork_id, session, parent, token):
+    def _identity(self, fork_id, session, parent):
+        # Only non-secret identity is persisted by the provider; the send
+        # token rides env_once and is re-minted by the teammate when a
+        # revived session starts without it.
         return {
             "TEAM_ID": fork_id,
             "TEAM_NAME": session,
             "TEAM_ROLE": "fork",
             "TEAM_PARENT_ID": parent,
             "TEAM_ROOT": str(self.root.base),
-            "TEAM_SEND_TOKEN": token,
         }
