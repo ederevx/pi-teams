@@ -212,6 +212,23 @@ class TeamClient:
             send_token=self.send_token or "", ts=time.time(),
         )
 
+    def spawn(self, task, name=None, cwd=None, host=None, provider=None,
+              model=None, thinking=None, parent=None):
+        # One spawn request into the capability: the broker selects a
+        # provider (or self-provisions) and returns the teammate identity.
+        fields = {
+            "from": self.id,
+            "send_token": self.send_token or "",
+            "task": task,
+            "ts": time.time(),
+        }
+        for key, value in (("name", name), ("cwd", cwd), ("host", host),
+                           ("provider", provider), ("model", model),
+                           ("thinking", thinking), ("parent", parent)):
+            if value:
+                fields[key] = value
+        return self.request("spawn", expected=("ack", "error"), **fields)
+
     def ls(self):
         return self.request("ls", expected=("registry", "error"))
 

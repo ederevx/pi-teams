@@ -1554,5 +1554,77 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root.base, ignore_errors=True)
 
 
+class FakeSpawner:
+    """Records spawn calls and returns a deterministic identity."""
+
+    def __init__(self):
+        self.calls = []
+
+    def spawn(self, parent, task, **kw):
+        self.calls.append((parent, task, kw))
+        return {"id": "fork-%s-0001" % parent, "session": kw.get("name")}
+
+
+class SpawnOpTests(unittest.TestCase):
+    def _start(self, root, host):
+        sessions = os.path.join(root, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
+                            sweep_interval=0.1, host=host,
+                            sessions_root=sessions)
+        threading.Thread(target=broker.run, daemon=True).start()
+        wait_endpoint(root)
+        return broker
+
+    def test_spawn_op_returns_the_spawner_identity(self):
+        root = make_root()
+        broker = self._start(root, "alpha")
+        try:
+            fake = FakeSpawner()
+            broker.spawner = fake
+            client = TeamClient(root, heartbeat=None)
+            client.id = "alpha:parent"
+            client.send_token = "st-spawn"
+            self.assertEqual(client.register().get("op"), "ack")
+            reply = client.spawn("do the thing", name="t1", cwd="/tmp")
+            self.assertEqual(reply.get("op"), "ack")
+            self.assertEqual(reply.get("session"), "t1")
+            self.assertTrue(reply.get("id"))
+            self.assertEqual(fake.calls[0][0], "alpha:parent")
+            client.close()
+            # A spawn speaks for an agent and must present its token.
+            bad = TeamClient(root, heartbeat=None)
+            bad.id = "alpha:impostor"
+            bad.send_token = "wrong"
+            self.assertEqual(bad.spawn("x").get("op"), "error")
+            self.assertEqual(len(fake.calls), 1)
+        finally:
+            broker.stop()
+
+    def test_spawn_op_routes_a_peer_host(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a = self._start(root_a, "alpha")
+        broker_b = self._start(root_b, "beta")
+        try:
+            fake_b = FakeSpawner()
+            broker_b.spawner = fake_b
+            client = TeamClient(root_a, heartbeat=None)
+            client.id = "alpha:parent"
+            client.send_token = "st-spawn2"
+            client.register()
+            self.assertTrue(
+                broker_a.link_peer("beta", broker_b.root.read_endpoint()))
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            reply = client.spawn("remote thing", name="t2", host="beta")
+            self.assertEqual(reply.get("op"), "ack")
+            self.assertEqual(reply.get("session"), "t2")
+            self.assertEqual(fake_b.calls[0][0], "alpha:parent")
+            client.close()
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

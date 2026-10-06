@@ -72,6 +72,17 @@ class ClientCli:
         p_send.add_argument("to")
         p_send.add_argument("kind", nargs="?", default="text")
         p_send.add_argument("payload", nargs="?", default="")
+        p_spawn = sub.add_parser("spawn")
+        p_spawn.add_argument("--id")
+        p_spawn.add_argument("--send-token")
+        p_spawn.add_argument("--task", required=True)
+        p_spawn.add_argument("--name")
+        p_spawn.add_argument("--cwd")
+        p_spawn.add_argument("--host")
+        p_spawn.add_argument("--provider")
+        p_spawn.add_argument("--model")
+        p_spawn.add_argument("--thinking")
+        p_spawn.add_argument("--parent")
         p_term = sub.add_parser("terminate")
         p_term.add_argument("to")
         p_term.add_argument("why", nargs="?", default="requested")
@@ -111,6 +122,20 @@ class ClientCli:
             print(json.dumps(client.send_msg(
                 args.to, args.kind, self.parse_payload(args.payload)
             )))
+        elif args.command == "spawn":
+            client.set_identity(args.id, send_token=args.send_token)
+            reply = client.spawn(
+                args.task, name=args.name, cwd=args.cwd, host=args.host,
+                provider=args.provider, model=args.model,
+                thinking=args.thinking, parent=args.parent)
+            if reply.get("op") == "ack":
+                print(json.dumps({"ok": True, "id": reply.get("id"),
+                                  "session": reply.get("session")}))
+            else:
+                print(json.dumps({
+                    "ok": False,
+                    "error": reply.get("error") or "spawn-failed",
+                    "detail": reply.get("detail") or ""}))
         elif args.command == "terminate":
             print(json.dumps(client.terminate(args.to, args.why)))
         elif args.command == "peer":
