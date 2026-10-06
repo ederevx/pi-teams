@@ -102,3 +102,39 @@ export function piInvocationEnv(): Record<string, string> {
 	if (command !== "pi") return { PI_TEAMS_PI_COMMAND: command };
 	return {};
 }
+
+/** The durable launch record's file name under the state root. The
+ *  Python owner of the path and field names is src/pi_invocation.py
+ *  (ENTRY_FILE/ENTRY_VERSION and its record/read logic); keep these in
+ *  sync. */
+export const piEntryFile = "pi-entry.json";
+export const piEntryVersion = 1;
+
+/**
+ * The launch record for the running runtime, or null when only the
+ * bare `pi` name resolved. It mirrors piInvocationEnv: entry/node
+ * mirror PI_TEAMS_PI_ENTRY/PI_TEAMS_PI_NODE and command/args mirror
+ * PI_TEAMS_PI_COMMAND/PI_TEAMS_PI_ARGS.
+ */
+function piInvocationRecord() {
+	const { command, args } = piInvocation();
+	if (args.length > 0) {
+		return { version: piEntryVersion, entry: args[0], node: command };
+	}
+	if (command !== "pi") {
+		return { version: piEntryVersion, command, args: [] as string[] };
+	}
+	return null;
+}
+
+/**
+ * Persist the launch record under the state root so a broker started
+ * without the environment (a pre-v0.4.36 extension) resolves the same
+ * runtime. The bare `pi` fallback is never written: it cannot launch
+ * on Windows and must not clobber a usable record from an earlier run.
+ */
+export function persistPiInvocation(): void {
+	const record = piInvocationRecord();
+	if (!record) return;
+	writeStateFile(piEntryFile, JSON.stringify(record) + "\n");
+}

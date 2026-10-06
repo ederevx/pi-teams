@@ -68,8 +68,22 @@ const { formatReport } =
 	await import("../extensions/pi-teams/messages.ts");
 const { PreTeamsTool } =
 	await import("../extensions/pi-teams/pre-teams.ts");
+const { persistPiInvocation, piEntryFile } =
+	await import("../extensions/pi-teams/paths.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
+
+test("persistPiInvocation writes the durable launch record", () => {
+	const path = join(stateRoot, piEntryFile);
+	if (existsSync(path)) unlinkSync(path);
+	persistPiInvocation();
+	const record = JSON.parse(readFileSync(path, "utf8"));
+	assert.equal(record.version, 1);
+	assert.ok(record.entry, "no runtime entry was recorded");
+	assert.ok(record.node, "no runtime command was recorded");
+	assert.equal(existsSync(record.entry), true);
+	assert.equal(record.args, undefined);
+});
 
 function spawnStub(calls, file, args, options) {
 	const record = {
