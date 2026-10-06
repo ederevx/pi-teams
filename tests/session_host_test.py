@@ -139,13 +139,13 @@ class DirectoryRootTests(unittest.TestCase):
     def test_root_precedence(self):
         override = SessionHostDirectory(env={"PI_SERVICES_DIR": "/svc",
                                              "XDG_RUNTIME_DIR": "/xdg"})
-        self.assertEqual(str(override.root), "/svc")
+        self.assertEqual(override.root, pathlib.Path("/svc"))
         xdg = SessionHostDirectory(env={"XDG_RUNTIME_DIR": "/xdg"})
-        self.assertEqual(str(xdg.root), os.path.join("/xdg", "pi-services"))
+        self.assertEqual(xdg.root, pathlib.Path("/xdg", "pi-services"))
         temp = SessionHostDirectory(env={})
         self.assertEqual(
-            str(temp.root),
-            os.path.join(tempfile.gettempdir(), "pi-services"))
+            temp.root,
+            pathlib.Path(tempfile.gettempdir(), "pi-services"))
 
 
 class DirectoryParseTests(DirectoryCase):
