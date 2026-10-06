@@ -1095,7 +1095,7 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root_a, ignore_errors=True)
             shutil.rmtree(root_b, ignore_errors=True)
 
-    def test_peer_down_reaps_remote_parent_forks(self):
+    def test_peer_down_spares_remote_parent_forks(self):
         root_a = make_root()
         root_b = make_root()
         broker_a, thread_a = self._start_broker(root_a, "alpha")
@@ -1126,12 +1126,12 @@ class BrokerProtocolTests(unittest.TestCase):
                               "remote-parent fork reaped while peer is up")
             broker_a.stop()
             thread_a.join(timeout=3)
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "remote fork not reaped when its peer went down")
-            self.assertTrue(wait_until(
-                lambda: "beta:fork-remote" not in self._ids_via(root_b)),
-                "reaped remote fork still in the registry")
+            # A link loss is a partition: the teammate is independent and
+            # keeps running with its registration intact.
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "peer down must not end a teammate")
+            self.assertIn("beta:fork-remote", self._ids_via(root_b))
         finally:
             broker_b.stop()
             thread_b.join(timeout=3)
@@ -1224,7 +1224,7 @@ class BrokerProtocolTests(unittest.TestCase):
                               "a stale link drop reaped a live fork")
             self.assertIn("beta:fork-keep", self._ids_via(root_b))
             # Pending relays for the host are purged when the live link
-            # finally drops, and its forks are reaped.
+            # finally drops, but its independent teammates are spared.
             probe = TeamClient(root_b, heartbeat=None)
             probe.id = "beta:probe"
             probe.send_token = "st-27"
@@ -1236,9 +1236,10 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertTrue(wait_until(
                 lambda: "rid-x" not in broker_b._peer_pending),
                 "pending relay leaked past peer down")
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "remote fork not reaped on peer down")
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "a peer link loss must not end a teammate")
+            self.assertIn("beta:fork-keep", self._ids_via(root_b))
         finally:
             broker_b.stop()
             thread_b.join(timeout=3)
@@ -1252,7 +1253,7 @@ class BrokerProtocolTests(unittest.TestCase):
 
     def test_remote_fork_survives_parent_disconnect(self):
         # A parent agent's own disconnect no longer reaps its forks:
-        # only the single idle window (or a peer link loss) does.
+        # only the single idle window does.
         root_a = make_root()
         root_b = make_root()
         broker_a, thread_a = self._start_broker(root_a, "alpha")

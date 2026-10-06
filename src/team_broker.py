@@ -859,11 +859,12 @@ class TeamBroker:
         return True
 
     def _remove_peer(self, host, reap=False):
+        # `reap` is retained for callers but no longer kills: unlinking
+        # a peer must not end an independent teammate. Only an explicit
+        # terminate or the teammate's own idle window ends it.
         with self._lock:
             peer = self._peers.get(host)
         if peer is not None:
-            # Drop in place so _peer_down still sees it as current and
-            # reaps that host's forks and pending relays.
             peer.drop_in_place()
         else:
             with self._lock:
@@ -871,7 +872,6 @@ class TeamBroker:
         if reap:
             with self._lock:
                 self._peer_down_at.pop(host, None)
-            self._reap_peer(host)
         self._persist_peers()
 
     # -- broker-owned ssh transport ----------------------------------
@@ -1021,19 +1021,18 @@ class TeamBroker:
                 self._peer_down_at[peer.host] = time.time()
 
     def _reap_expired_peers(self, now):
-        # A dropped peer link defers reaping for the reconnect grace;
-        # a host that never returns has its remote-parented forks
-        # reaped here once the grace passes.
+        # A dropped peer link is a partition, not a death sentence: a
+        # teammate parented across it is an independent session and
+        # keeps running. Prune the marker once the grace passes; never
+        # reap on a link loss.
         with self._lock:
             expired = [
                 host for host, down_at in self._peer_down_at.items()
                 if host not in self._peers
                 and now - down_at >= self.peer_grace
             ]
-        for host in expired:
-            with self._lock:
+            for host in expired:
                 self._peer_down_at.pop(host, None)
-            self._reap_peer(host)
 
     def _expire_peer_relays(self):
         # A silent peer must not leak its pending relay or hang the
@@ -1049,23 +1048,6 @@ class TeamBroker:
                 self._peer_pending.pop(rid, None)
         for _rid, entry in stale:
             self._reply(entry[0], op="error", error="undeliverable")
-
-    def _reap_peer(self, host):
-        # A dropped peer link owns its remote-parented forks: they
-        # cannot outlive the host that spawned them. Only a link loss
-        # reaches here; a local parent's own disconnect does not reap
-        # its forks (the single idle window does).
-        doomed = []
-        with self._lock:
-            for agent_id, entry in list(self._registry.items()):
-                if entry.get("role") != "fork":
-                    continue
-                if self._parent_host(entry.get("parent")) == host:
-                    doomed.append(agent_id)
-        for agent_id in doomed:
-            self._evict(agent_id, "peer-down")
-        if doomed:
-            self._persist_and_notify()
 
     def _load_peers(self):
         def try_restore(label, ssh):
