@@ -5,6 +5,7 @@
  */
 
 import type { AgentInfo } from "./directory.ts";
+import type { TeammateRef } from "./protocol.ts";
 import { stateRoot, teamBin } from "./paths.ts";
 import type { ProcessHost } from "./process-runner.ts";
 
@@ -16,6 +17,19 @@ export interface PeerInfo {
 	ssh: string;
 }
 
+/** The broker-owned spawn contract's request fields. The broker owns
+ *  the session, so the client names only the work and the target. */
+export interface SpawnFields {
+	name: string;
+	task: string;
+	cwd?: string;
+	host?: string;
+	provider?: string;
+	model?: string;
+	thinking?: string;
+	parent?: string;
+}
+
 interface BrokerReply {
 	op?: string;
 	label?: string;
@@ -23,6 +37,9 @@ interface BrokerReply {
 	detail?: string;
 	setup?: string;
 	error?: string;
+	ok?: boolean;
+	id?: string;
+	session?: string;
 	agents?: AgentInfo[];
 	peers?: PeerInfo[];
 }
@@ -78,6 +95,34 @@ export class BrokerOps {
 		const result = await this.run(
 			[...args, to, kind, text]);
 		return String(result.stdout).trim();
+	}
+
+	/** The broker-owned spawn: one op for local and peer hosts, routed
+	 *  by the broker's own link. Resolves the new teammate's id and
+	 *  session, or throws the broker's error. */
+	async spawn(
+		id: string,
+		fields: SpawnFields,
+		timeout = 20000,
+	): Promise<TeammateRef> {
+		const args = [
+			"spawn", "--id", id, "--task", fields.task,
+			"--name", fields.name,
+		];
+		if (this.sendToken) args.push("--send-token", this.sendToken);
+		if (fields.cwd) args.push("--cwd", fields.cwd);
+		if (fields.host) args.push("--host", fields.host);
+		if (fields.provider) args.push("--provider", fields.provider);
+		if (fields.model) args.push("--model", fields.model);
+		if (fields.thinking) args.push("--thinking", fields.thinking);
+		if (fields.parent) args.push("--parent", fields.parent);
+		const reply = this.parse((await this.run(args, timeout)).stdout);
+		if (reply.error) {
+			const detail = reply.detail ? `: ${reply.detail}` : "";
+			throw new Error(`${reply.error}${detail}`);
+		}
+		if (!reply.id) throw new Error("spawn failed: no id returned");
+		return { id: reply.id, session: reply.session || reply.id };
 	}
 
 	async terminate(agentId: string): Promise<void> {

@@ -28,6 +28,7 @@ from send_gate import SendGate
 from peer_transport import PeerTransport
 from wire import LineStream, dump_line
 from peer_tunnel import PeerTunnel, PeerUnreachable
+from session_spawn import TeamSpawner
 from settings import PackageSettings
 from team_root import (
     ENDPOINT_NAME,
@@ -115,6 +116,9 @@ class TeamBroker:
         # Store-and-forward owner: messages for a target whose hold is
         # restarting are parked on disk, replayed on re-register.
         self.delivery = MailboxDelivery(Mailbox(self.root))
+        # Spawning is a client of the session-host capability, never the
+        # host itself: it binds to a provider or self-provisions.
+        self.spawner = TeamSpawner(self.root, environ=os.environ)
         # The registry's derived views (online snapshot, mirror).
         self.mirror = RegistryMirror(
             self.root, self._registry, self.idle_timeout)
@@ -376,6 +380,8 @@ class TeamBroker:
         elif op == "terminate":
             self.terminate(msg.get("to"), msg.get("why") or "requested",
                            conn)
+        elif op == "spawn":
+            self._handle_spawn(conn, msg)
         elif op == "deregister":
             if agent_id:
                 self._drop_entry(agent_id)
@@ -398,6 +404,68 @@ class TeamBroker:
         else:
             self._reply(conn, op="error", error="unknown-op")
         return agent_id
+
+    def _handle_spawn(self, conn, msg):
+        # The requester's own credential, like send: a spawn speaks for
+        # an agent and must present its token. A peer host is carried to
+        # that host's broker; this side owns no process either way.
+        requester = str(msg.get("from") or "")
+        if not self._send_gate.check(requester, msg.get("send_token")):
+            self._reply(conn, op="error", error="send-token",
+                        detail=SendGate.refused_reason())
+            return
+        task = msg.get("task")
+        if not (isinstance(task, str) and task):
+            self._reply(conn, op="error", error="bad-request")
+            return
+        host = str(msg.get("host") or "")
+        if host and host != self.host:
+            self._spawn_remote(conn, msg, requester, host)
+            return
+        entry = self._registry.get(requester) or {}
+        try:
+            ref = self.spawner.spawn(
+                parent=requester, parent_pid=entry.get("owner_pid"),
+                task=task, name=msg.get("name"),
+                cwd=str(msg.get("cwd") or entry.get("cwd") or os.getcwd()),
+                provider=msg.get("provider"), model=msg.get("model"),
+                thinking=msg.get("thinking"),
+                session_dir=self._session_dir(entry))
+        except OSError as exc:
+            self._reply(conn, op="error", error="spawn-failed",
+                        detail=str(exc))
+            return
+        self._touch(requester, work=True)
+        self._reply(conn, op="ack", id=ref["id"], session=ref["session"])
+
+    @staticmethod
+    def _session_dir(entry):
+        session = (entry or {}).get("session")
+        return os.path.dirname(session) if session else None
+
+    def _spawn_remote(self, conn, msg, requester, host):
+        # The peer's broker owns the process; this side only carries the
+        # request and returns the host-side identity to the requester.
+        with self._lock:
+            peer = self._peers.get(host)
+        if peer is None or not peer.connected:
+            self._reply(conn, op="error", error="undeliverable",
+                        detail="peer %s is not linked" % host)
+            return
+        rid = secrets.token_hex(8)
+        with self._lock:
+            self._peer_pending[rid] = (conn, peer, time.time())
+        sent = peer.send({
+            "op": "peer-control", "id": rid, "action": "spawn",
+            "from": requester, "task": msg.get("task"),
+            "name": msg.get("name"), "cwd": msg.get("cwd"),
+            "provider": msg.get("provider"), "model": msg.get("model"),
+            "thinking": msg.get("thinking"),
+        })
+        if not sent:
+            with self._lock:
+                self._peer_pending.pop(rid, None)
+            self._reply(conn, op="error", error="undeliverable")
 
     # -- registry primitives ----------------------------------------
 
@@ -791,11 +859,12 @@ class TeamBroker:
         return True
 
     def _remove_peer(self, host, reap=False):
+        # `reap` is retained for callers but no longer kills: unlinking
+        # a peer must not end an independent teammate. Only an explicit
+        # terminate or the teammate's own idle window ends it.
         with self._lock:
             peer = self._peers.get(host)
         if peer is not None:
-            # Drop in place so _peer_down still sees it as current and
-            # reaps that host's forks and pending relays.
             peer.drop_in_place()
         else:
             with self._lock:
@@ -803,7 +872,6 @@ class TeamBroker:
         if reap:
             with self._lock:
                 self._peer_down_at.pop(host, None)
-            self._reap_peer(host)
         self._persist_peers()
 
     # -- broker-owned ssh transport ----------------------------------
@@ -871,13 +939,30 @@ class TeamBroker:
     def _apply_peer_control(self, peer, msg):
         # A broker-level action from a peer, never addressed through an
         # agent: act only on our own agents, then ack.
-        ok = False
-        if msg.get("action") == "terminate":
+        action = msg.get("action")
+        if action == "terminate":
+            ok = False
             target = msg.get("to")
             if self._parent_host(target) == self.host:
                 self._terminate(target, msg.get("why") or "requested")
                 ok = True
-        peer.send({"op": "peer-ack", "id": msg.get("id"), "ok": ok})
+            peer.send({"op": "peer-ack", "id": msg.get("id"), "ok": ok})
+            return
+        if action == "spawn":
+            result = {}
+            error = ""
+            try:
+                result = self.spawner.spawn(
+                    parent=str(msg.get("from") or peer.host),
+                    task=msg.get("task") or "", name=msg.get("name"),
+                    cwd=msg.get("cwd"), provider=msg.get("provider"),
+                    model=msg.get("model"), thinking=msg.get("thinking"))
+            except OSError as exc:
+                error = str(exc)
+            peer.send({"op": "peer-ack", "id": msg.get("id"),
+                       "ok": not error, "result": result, "error": error})
+            return
+        peer.send({"op": "peer-ack", "id": msg.get("id"), "ok": False})
 
     def _deliver_peer(self, peer, msg):
         target = msg.get("to")
@@ -902,10 +987,13 @@ class TeamBroker:
                 return
             del self._peer_pending[rid]
         sender = entry[0]
+        result = msg.get("result") if msg.get("ok") else None
         if msg.get("ok"):
-            self._reply(sender, op="ack")
+            self._reply(sender, op="ack",
+                        **(result if isinstance(result, dict) else {}))
         else:
-            self._reply(sender, op="error", error="undeliverable")
+            self._reply(sender, op="error",
+                        error=msg.get("error") or "undeliverable")
 
     def _peer_down(self, peer):
         # A replaced link must not reap live forks: only the current
@@ -933,19 +1021,18 @@ class TeamBroker:
                 self._peer_down_at[peer.host] = time.time()
 
     def _reap_expired_peers(self, now):
-        # A dropped peer link defers reaping for the reconnect grace;
-        # a host that never returns has its remote-parented forks
-        # reaped here once the grace passes.
+        # A dropped peer link is a partition, not a death sentence: a
+        # teammate parented across it is an independent session and
+        # keeps running. Prune the marker once the grace passes; never
+        # reap on a link loss.
         with self._lock:
             expired = [
                 host for host, down_at in self._peer_down_at.items()
                 if host not in self._peers
                 and now - down_at >= self.peer_grace
             ]
-        for host in expired:
-            with self._lock:
+            for host in expired:
                 self._peer_down_at.pop(host, None)
-            self._reap_peer(host)
 
     def _expire_peer_relays(self):
         # A silent peer must not leak its pending relay or hang the
@@ -961,23 +1048,6 @@ class TeamBroker:
                 self._peer_pending.pop(rid, None)
         for _rid, entry in stale:
             self._reply(entry[0], op="error", error="undeliverable")
-
-    def _reap_peer(self, host):
-        # A dropped peer link owns its remote-parented forks: they
-        # cannot outlive the host that spawned them. Only a link loss
-        # reaches here; a local parent's own disconnect does not reap
-        # its forks (the single idle window does).
-        doomed = []
-        with self._lock:
-            for agent_id, entry in list(self._registry.items()):
-                if entry.get("role") != "fork":
-                    continue
-                if self._parent_host(entry.get("parent")) == host:
-                    doomed.append(agent_id)
-        for agent_id in doomed:
-            self._evict(agent_id, "peer-down")
-        if doomed:
-            self._persist_and_notify()
 
     def _load_peers(self):
         def try_restore(label, ssh):

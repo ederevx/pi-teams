@@ -1095,7 +1095,7 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root_a, ignore_errors=True)
             shutil.rmtree(root_b, ignore_errors=True)
 
-    def test_peer_down_reaps_remote_parent_forks(self):
+    def test_peer_down_spares_remote_parent_forks(self):
         root_a = make_root()
         root_b = make_root()
         broker_a, thread_a = self._start_broker(root_a, "alpha")
@@ -1126,12 +1126,12 @@ class BrokerProtocolTests(unittest.TestCase):
                               "remote-parent fork reaped while peer is up")
             broker_a.stop()
             thread_a.join(timeout=3)
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "remote fork not reaped when its peer went down")
-            self.assertTrue(wait_until(
-                lambda: "beta:fork-remote" not in self._ids_via(root_b)),
-                "reaped remote fork still in the registry")
+            # A link loss is a partition: the teammate is independent and
+            # keeps running with its registration intact.
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "peer down must not end a teammate")
+            self.assertIn("beta:fork-remote", self._ids_via(root_b))
         finally:
             broker_b.stop()
             thread_b.join(timeout=3)
@@ -1224,7 +1224,7 @@ class BrokerProtocolTests(unittest.TestCase):
                               "a stale link drop reaped a live fork")
             self.assertIn("beta:fork-keep", self._ids_via(root_b))
             # Pending relays for the host are purged when the live link
-            # finally drops, and its forks are reaped.
+            # finally drops, but its independent teammates are spared.
             probe = TeamClient(root_b, heartbeat=None)
             probe.id = "beta:probe"
             probe.send_token = "st-27"
@@ -1236,9 +1236,10 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertTrue(wait_until(
                 lambda: "rid-x" not in broker_b._peer_pending),
                 "pending relay leaked past peer down")
-            self.assertTrue(
-                wait_until(lambda: dummy.poll() is not None, timeout=6),
-                "remote fork not reaped on peer down")
+            time.sleep(1.0)
+            self.assertIsNone(dummy.poll(),
+                              "a peer link loss must not end a teammate")
+            self.assertIn("beta:fork-keep", self._ids_via(root_b))
         finally:
             broker_b.stop()
             thread_b.join(timeout=3)
@@ -1252,7 +1253,7 @@ class BrokerProtocolTests(unittest.TestCase):
 
     def test_remote_fork_survives_parent_disconnect(self):
         # A parent agent's own disconnect no longer reaps its forks:
-        # only the single idle window (or a peer link loss) does.
+        # only the single idle window does.
         root_a = make_root()
         root_b = make_root()
         broker_a, thread_a = self._start_broker(root_a, "alpha")
@@ -1552,6 +1553,78 @@ class BrokerProtocolTests(unittest.TestCase):
             self.assertEqual(list(root.base.glob("*.tmp.*")), [])
         finally:
             shutil.rmtree(root.base, ignore_errors=True)
+
+
+class FakeSpawner:
+    """Records spawn calls and returns a deterministic identity."""
+
+    def __init__(self):
+        self.calls = []
+
+    def spawn(self, parent, task, **kw):
+        self.calls.append((parent, task, kw))
+        return {"id": "fork-%s-0001" % parent, "session": kw.get("name")}
+
+
+class SpawnOpTests(unittest.TestCase):
+    def _start(self, root, host):
+        sessions = os.path.join(root, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
+                            sweep_interval=0.1, host=host,
+                            sessions_root=sessions)
+        threading.Thread(target=broker.run, daemon=True).start()
+        wait_endpoint(root)
+        return broker
+
+    def test_spawn_op_returns_the_spawner_identity(self):
+        root = make_root()
+        broker = self._start(root, "alpha")
+        try:
+            fake = FakeSpawner()
+            broker.spawner = fake
+            client = TeamClient(root, heartbeat=None)
+            client.id = "alpha:parent"
+            client.send_token = "st-spawn"
+            self.assertEqual(client.register().get("op"), "ack")
+            reply = client.spawn("do the thing", name="t1", cwd="/tmp")
+            self.assertEqual(reply.get("op"), "ack")
+            self.assertEqual(reply.get("session"), "t1")
+            self.assertTrue(reply.get("id"))
+            self.assertEqual(fake.calls[0][0], "alpha:parent")
+            client.close()
+            # A spawn speaks for an agent and must present its token.
+            bad = TeamClient(root, heartbeat=None)
+            bad.id = "alpha:impostor"
+            bad.send_token = "wrong"
+            self.assertEqual(bad.spawn("x").get("op"), "error")
+            self.assertEqual(len(fake.calls), 1)
+        finally:
+            broker.stop()
+
+    def test_spawn_op_routes_a_peer_host(self):
+        root_a = make_root()
+        root_b = make_root()
+        broker_a = self._start(root_a, "alpha")
+        broker_b = self._start(root_b, "beta")
+        try:
+            fake_b = FakeSpawner()
+            broker_b.spawner = fake_b
+            client = TeamClient(root_a, heartbeat=None)
+            client.id = "alpha:parent"
+            client.send_token = "st-spawn2"
+            client.register()
+            self.assertTrue(
+                broker_a.link_peer("beta", broker_b.root.read_endpoint()))
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            reply = client.spawn("remote thing", name="t2", host="beta")
+            self.assertEqual(reply.get("op"), "ack")
+            self.assertEqual(reply.get("session"), "t2")
+            self.assertEqual(fake_b.calls[0][0], "alpha:parent")
+            client.close()
+        finally:
+            broker_a.stop()
+            broker_b.stop()
 
 
 if __name__ == "__main__":
