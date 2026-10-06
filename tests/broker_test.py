@@ -1566,6 +1566,13 @@ class FakeSpawner:
         return {"id": "fork-%s-0001" % parent, "session": kw.get("name")}
 
 
+class FailingSpawner:
+    """A spawner that hosted nobody, so it raises like the real one."""
+
+    def spawn(self, parent, task, **kw):
+        raise OSError("no hosting path started a teammate")
+
+
 class SpawnOpTests(unittest.TestCase):
     def _start(self, root, host):
         sessions = os.path.join(root, "sessions")
@@ -1599,6 +1606,26 @@ class SpawnOpTests(unittest.TestCase):
             bad.send_token = "wrong"
             self.assertEqual(bad.spawn("x").get("op"), "error")
             self.assertEqual(len(fake.calls), 1)
+        finally:
+            broker.stop()
+
+    def test_a_spawn_that_hosted_nobody_is_an_error(self):
+        # The broker must report the failure, never ack a phantom
+        # teammate: the client would otherwise wait for a report that
+        # no session can produce.
+        root = make_root()
+        broker = self._start(root, "alpha")
+        try:
+            broker.spawner = FailingSpawner()
+            client = TeamClient(root, heartbeat=None)
+            client.id = "alpha:parent"
+            client.send_token = "st-spawn3"
+            client.register()
+            reply = client.spawn("do the thing", name="t3")
+            self.assertEqual(reply.get("op"), "error")
+            self.assertEqual(reply.get("error"), "spawn-failed")
+            self.assertIn("no hosting path", reply.get("detail") or "")
+            client.close()
         finally:
             broker.stop()
 

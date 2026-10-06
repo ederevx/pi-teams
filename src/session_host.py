@@ -107,3 +107,11 @@ class SessionHostClient:
     def list(self):
         """List sessions; returns the daemon's response."""
         return self.request({"cmd": "list"})
+
+    def state(self, session):
+        """The provider's record for one session, or None when it does
+        not list it: a session that died as it started is not listed."""
+        for record in (self.list().get("sessions") or []):
+            if isinstance(record, dict) and record.get("name") == session:
+                return record
+        return None
