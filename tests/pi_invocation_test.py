@@ -34,6 +34,18 @@ class PiInvocationTest(unittest.TestCase):
         with open(self._record_path(), "w", encoding="utf-8") as handle:
             handle.write(json.dumps(record))
 
+    def _symlinked_js_entry(self):
+        """A suffixless launcher symlink to a real .js file, as npm
+        installs it (`node_modules/.bin/pi`)."""
+        target = _entry(".js")
+        self.addCleanup(os.unlink, target)
+        link = os.path.join(self.root, "pi")
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available")
+        return link
+
     def _read_record(self):
         with open(self._record_path(), "r", encoding="utf-8") as handle:
             return handle.read()
@@ -64,6 +76,19 @@ class PiInvocationTest(unittest.TestCase):
             PiInvocation.resolve(environ={"PI_TEAMS_PI_ENTRY": entry}),
             (sys.executable, [entry]))
 
+    def test_a_symlinked_js_entry_runs_under_the_named_runtime(self):
+        link = self._symlinked_js_entry()
+        env = {"PI_TEAMS_PI_ENTRY": link, "PI_TEAMS_PI_NODE": "node"}
+        self.assertEqual(PiInvocation.resolve(environ=env),
+                         ("node", [link]))
+
+    def test_a_suffixless_js_entry_is_detected_by_its_target(self):
+        link = self._symlinked_js_entry()
+        runtime, args = PiInvocation.resolve(
+            environ={"PI_TEAMS_PI_ENTRY": link})
+        self.assertNotEqual(runtime, sys.executable)
+        self.assertEqual(args, [link])
+
     def test_a_missing_entry_falls_through_to_the_command(self):
         env = {"PI_TEAMS_PI_ENTRY": os.path.join(tempfile.gettempdir(),
                                                 "absent-pi-entry.js"),
@@ -79,6 +104,12 @@ class PiInvocationTest(unittest.TestCase):
                             "node": "C:/node/node.exe"})
         self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
                          ("C:/node/node.exe", [entry]))
+
+    def test_a_persisted_suffixless_entry_runs_under_its_node(self):
+        link = self._symlinked_js_entry()
+        self._write_record({"version": 1, "entry": link, "node": "node"})
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("node", [link]))
 
     def test_a_persisted_command_resolves_without_the_env(self):
         self._write_record({"version": 1, "command": "/opt/pi/bin",
