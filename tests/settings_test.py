@@ -57,7 +57,7 @@ class DefaultTests(SettingsCase):
 
     def test_xdg_state_home_shapes_the_default_root(self):
         s = self.settings({"XDG_STATE_HOME": "/xdg/state"})
-        self.assertEqual(s.state_dir(), "/xdg/state/pi-teams")
+        self.assertEqual(s.state_dir(), os.path.join("/xdg/state", "pi-teams"))
 
 
 class SettingsValueTests(SettingsCase):
@@ -188,7 +188,7 @@ class BrokerWiringTests(SettingsCase):
         self.assertEqual(broker.peer_grace, 55)
         self.assertEqual(broker.session_grace, 66 * 3600.0)
         self.assertEqual(broker.gc.session_sweep_interval, 77)
-        self.assertEqual(str(broker.sessions_root), "/set/sessions")
+        self.assertEqual(broker.sessions_root, pathlib.Path("/set/sessions"))
 
     def test_injected_values_beat_env_and_settings(self):
         self.write_settings({"piTeams": {"gcIdleHours": 11}})
