@@ -46,6 +46,18 @@ class SelfHostTest(unittest.TestCase):
         else:
             self.assertTrue(kwargs["start_new_session"])
 
+    def test_the_child_prompt_pipe_carries_text(self):
+        # The keeper writes the RPC prompt as text; a byte pipe fails
+        # that write and kills the teammate before it registers.
+        child = ProcessRunner().spawn_child(
+            [sys.executable, "-c", "import sys; sys.stdin.readline()"])
+        try:
+            child.stdin.write('{"type": "prompt", "message": "hi"}\n')
+            child.stdin.flush()
+        finally:
+            child.stdin.close()
+            child.wait(timeout=60)
+
     def test_spawn_launches_a_detached_keeper(self):
         root = harness.make_root()
         runner = FakeRunner()
