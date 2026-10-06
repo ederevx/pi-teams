@@ -124,9 +124,28 @@ class PiInvocation:
 
     @staticmethod
     def _entry(entry, env):
-        """The runtime that runs `entry`, with the entry as its argument."""
-        if entry.lower().endswith(JS_SUFFIXES):
-            node = (env.get("PI_TEAMS_PI_NODE") or shutil.which("node")
-                    or "node")
-            return node, [entry]
+        """The runtime that runs `entry`, with the entry as its argument.
+
+        A named runtime wins: the record's `node` is the command that
+        already runs this pi, while npm installs the launcher as a
+        suffixless symlink (`node_modules/.bin/pi`) whose own name does
+        not reveal that it is JavaScript.
+        """
+        runtime = env.get("PI_TEAMS_PI_NODE")
+        if isinstance(runtime, str) and runtime:
+            return runtime, [entry]
+        if PiInvocation._is_javascript(entry):
+            return (shutil.which("node") or "node"), [entry]
         return sys.executable, [entry]
+
+    @staticmethod
+    def _is_javascript(entry):
+        """Whether `entry` names a JS file, following a symlink whose
+        own name may carry no suffix (the npm launcher shim)."""
+        if entry.lower().endswith(JS_SUFFIXES):
+            return True
+        try:
+            target = os.path.realpath(entry)
+        except OSError:
+            return False
+        return target.lower().endswith(JS_SUFFIXES)
