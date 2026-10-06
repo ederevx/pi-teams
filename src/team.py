@@ -124,10 +124,19 @@ class ClientCli:
             )))
         elif args.command == "spawn":
             client.set_identity(args.id, send_token=args.send_token)
-            reply = client.spawn(
-                args.task, name=args.name, cwd=args.cwd, host=args.host,
-                provider=args.provider, model=args.model,
-                thinking=args.thinking, parent=args.parent)
+            try:
+                reply = client.spawn(
+                    args.task, name=args.name, cwd=args.cwd, host=args.host,
+                    provider=args.provider, model=args.model,
+                    thinking=args.thinking, parent=args.parent)
+            except TimeoutError:
+                # A broker that never answers (a hung peer spawn) must
+                # report a reason, not an empty stdout the caller reads
+                # as a missing id.
+                print(json.dumps({
+                    "ok": False, "error": "spawn-timeout",
+                    "detail": "no broker reply before the client timeout"}))
+                return 1
             if reply.get("op") == "ack":
                 print(json.dumps({"ok": True, "id": reply.get("id"),
                                   "session": reply.get("session")}))

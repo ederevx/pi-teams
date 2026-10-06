@@ -475,10 +475,13 @@ class TeamBroker:
         rid = secrets.token_hex(8)
         with self._lock:
             self._peer_pending[rid] = (conn, peer, time.time())
+        # The requester's `cwd` names a directory on *this* host only;
+        # it is inert (or invalid) on the peer, so the peer spawns in
+        # its own default directory instead of inheriting it.
         sent = peer.send({
             "op": "peer-control", "id": rid, "action": "spawn",
             "from": requester, "task": msg.get("task"),
-            "name": msg.get("name"), "cwd": msg.get("cwd"),
+            "name": msg.get("name"),
             "provider": msg.get("provider"), "model": msg.get("model"),
             "thinking": msg.get("thinking"),
         })

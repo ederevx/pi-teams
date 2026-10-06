@@ -44,11 +44,14 @@ export class SpawnService {
 		task: string,
 		options: SpawnOptions,
 	): Promise<TeammateRef> {
+		const remote = Boolean(host && host !== this.host);
 		return this.broker.spawn(this.requester(), {
 			name,
 			task,
-			cwd: this.cwd(),
-			host: host && host !== this.host ? host : undefined,
+			// A session's cwd names a directory on *this* host; a peer
+			// spawn runs in the peer's own default directory.
+			cwd: remote ? undefined : this.cwd(),
+			host: remote ? host : undefined,
 			provider: options.provider,
 			model: options.model,
 			thinking: options.thinking,
