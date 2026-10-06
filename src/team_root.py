@@ -21,6 +21,11 @@ REGISTRY_NAME = "registry.json"
 PID_NAME = "teamd.pid"
 PEERS_NAME = "peers.json"
 BUSY_SUFFIX = ".busy"
+# Self-host keepers: one state file per living keeper and one spec file
+# consumed at its launch, both under a hosts/ subdirectory of the root.
+HOSTS_DIRNAME = "hosts"
+KEEPER_STATE_SUFFIX = ".keeper.json"
+KEEPER_SPEC_SUFFIX = ".spec.json"
 # The extension's spawn prompt marks a forked teammate session; the
 # broker tells teammate sessions from a user's own by it. Keep in sync
 # with taskPrompt() in extensions/pi-teams.ts.
@@ -112,6 +117,66 @@ class TeamRoot:
 
     def write_peers(self, peers):
         self.write_atomic(PEERS_NAME, json.dumps(peers, indent=2) + "\n")
+
+    # -- self-host keepers -------------------------------------------
+
+    def hosts_dir(self):
+        return self.base / HOSTS_DIRNAME
+
+    def keeper_state_path(self, key):
+        return self.hosts_dir() / (
+            self.safe_component(key) + KEEPER_STATE_SUFFIX)
+
+    def keeper_spec_path(self, key):
+        return self.hosts_dir() / (
+            self.safe_component(key) + KEEPER_SPEC_SUFFIX)
+
+    def write_keeper_file(self, path, record):
+        # The spec carries the child's identity env (including a send
+        # token), so keeper files are owner-only and written with the
+        # same scratch-then-rename durability as every other root file.
+        self.hosts_dir().mkdir(parents=True, exist_ok=True)
+        data = json.dumps(record) + "\n"
+        self.write_atomic(
+            str(path.relative_to(self.base)), data, mode=0o600)
+
+    def read_keeper_file(self, path):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return record if isinstance(record, dict) else {}
+
+    def write_keeper_state(self, key, record):
+        self.write_keeper_file(self.keeper_state_path(key), record)
+
+    def read_keeper_state(self, key):
+        return self.read_keeper_file(self.keeper_state_path(key))
+
+    def write_keeper_spec(self, key, record):
+        self.write_keeper_file(self.keeper_spec_path(key), record)
+
+    def read_keeper_spec(self, key):
+        return self.read_keeper_file(self.keeper_spec_path(key))
+
+    def remove_keeper_state(self, key):
+        self.unlink_under(str(self.keeper_state_path(key)), self.base)
+
+    def remove_keeper_spec(self, key):
+        self.unlink_under(str(self.keeper_spec_path(key)), self.base)
+
+    def keeper_states(self):
+        return self._keeper_records(KEEPER_STATE_SUFFIX)
+
+    def keeper_specs(self):
+        return self._keeper_records(KEEPER_SPEC_SUFFIX)
+
+    def _keeper_records(self, suffix):
+        try:
+            paths = sorted(self.hosts_dir().glob("*" + suffix))
+        except OSError:
+            return []
+        return [(path, self.read_keeper_file(path)) for path in paths]
 
     # -- busy files --------------------------------------------------
 
@@ -317,6 +382,10 @@ class TeamRoot:
             return (created.dwHighDateTime << 32) | created.dwLowDateTime
         finally:
             kernel32.CloseHandle(handle)
+
+    def process_alive(self, pid):
+        """Whether `pid` still names a live process (see _pid_alive)."""
+        return self._pid_alive(pid)
 
     def _pid_alive(self, pid):
         if pid is None or pid <= 0:
