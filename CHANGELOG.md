@@ -4,6 +4,21 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.36 - 2026-10-06
+
+- Resolve a runnable pi runtime on Windows: the extension passes the
+  JS entry and the node that owns it through `PI_TEAMS_PI_ENTRY` and
+  `PI_TEAMS_PI_NODE`, the spawner runs a JS entry through node, and the
+  keeper's prompt pipe is opened as UTF-8 text. A spawn there used to
+  launch a bare `pi`, fail instantly, and still be acked.
+- Report only a teammate that proved it is hosted: the provider through
+  the session record the client lists, the self-hosted path through
+  keeper state whose keeper and child are both the recorded live
+  processes. A path that cannot prove itself is reclaimed — the session
+  stopped, the keeper stopped, its state and any unconsumed spec
+  dropped — and a spawn no path can host raises, which the broker
+  reports as `spawn-failed` instead of a phantom teammate.
+
 ## v0.4.35 - 2026-10-06
 
 - Spawn a teammate through a generic **session-hosting** capability
