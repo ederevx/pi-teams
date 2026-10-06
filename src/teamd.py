@@ -9,10 +9,12 @@ logic in TeamRoot.
 
 import argparse
 import json
+import os
 import socket
 import sys
 
 from peer_link import PeerLink
+from pi_invocation import PiInvocation
 from team_broker import TeamBroker
 from team_root import DEFAULT_ROOT, TEAMMATE_MARKER, TeamRoot
 from wire import LineStream, dump_line
@@ -91,6 +93,10 @@ class BrokerCli:
         if args.command == "stop":
             self._shutdown_via_endpoint(root)
             return 0
+        # A broker that inherited the launch entry refreshes the durable
+        # record, repairing a lost extension write; a broker started by
+        # an older extension has nothing to persist and leaves the file.
+        PiInvocation.persist(root, os.environ)
         TeamBroker(args.root, idle_timeout=args.idle_timeout,
                    sweep_interval=args.sweep_interval,
                    gc_idle=args.gc_idle, busy_grace=args.busy_grace,

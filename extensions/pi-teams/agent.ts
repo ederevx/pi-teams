@@ -10,6 +10,7 @@ import { connect as netConnect } from "node:net";
 import { basename, dirname, join } from "node:path";
 
 import {
+	persistPiInvocation,
 	piInvocationEnv,
 	stateRoot,
 	teamBin,
@@ -171,6 +172,10 @@ export class TeamAgent {
 	}
 
 	ensureBroker(): void {
+		// Persist the launch entry before anything else: a broker started
+		// by an older extension is already up without it and can only
+		// learn the runtime from this file.
+		persistPiInvocation();
 		// The broker owns its restart policy (it exits once idle after
 		// a source change and the next start adopts the new code), so
 		// a reload never kills live work. Start one only when nothing

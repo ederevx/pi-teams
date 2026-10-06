@@ -91,7 +91,7 @@ class SelfSessionHost:
     def _invocation(self, pi_command, pi_args):
         if pi_command:
             return pi_command, list(pi_args)
-        return PiInvocation.resolve(self.environ)
+        return PiInvocation.resolve(self.environ, root=self.root)
 
     # -- lifecycle ---------------------------------------------------
 
