@@ -8,11 +8,10 @@
  * option, so the extension must own that launch:
  *   - hold keeps a stdin pipe owned by this process (EOF == pi gone)
  *     and forwards the agent identity through the environment;
- *   - spawn forwards the fork identity (parent/role) in the environment
- *     and detaches the teammate;
- *   - spawnTask builds the common teammate template (session, model,
- *     and the report-back instruction) from a task alone, and no
- *     custom spawn path exists.
+ *   - spawn asks the broker's spawn op, which owns the session
+ *     contract for local and peer hosts; the extension launches no pi
+ *     child for a teammate, and there is no peer main-agent relay;
+ *   - attached sessions keep their own identity and report mechanics.
  *
  * Runs on Node's built-in test runner; the extension is imported with
  * Node's TypeScript stripping. No broker or pi process is started.
@@ -194,6 +193,33 @@ test("hold replaces a previous held connection", () => {
 	assert.equal(calls[1].killed, false);
 	agent.stopHold();
 	assert.equal(calls[1].killed, true);
+});
+
+test("a dead hold re-holds without a retry cap", () => {
+	const { agent } = makeAgent();
+	agent.hold("/work");
+	const proc = agent.holdProc;
+	assert.ok(proc, "hold registered a child");
+	// A long outage has exhausted the old five-retry cap; the next
+	// expiry must still schedule the re-hold.
+	agent.holdRestarts = 6;
+	const scheduled = [];
+	const realSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = (fn, delay) => {
+		scheduled.push({ fn, delay });
+		return 0;
+	};
+	try {
+		agent.holdDied(proc);
+	} finally {
+		globalThis.setTimeout = realSetTimeout;
+	}
+	assert.equal(agent.holdProc, null, "holdDied kept the dead hold");
+	assert.equal(agent.holdRestarts, 7, "restart count did not advance");
+	assert.equal(scheduled.length, 1,
+		"an exhausted session must still schedule a re-hold");
+	assert.ok(scheduled[0].delay <= 30000, "backoff stays bounded");
+	agent.stopHold();
 });
 
 test("logTeamMessage records a truncated sent/received log entry", () => {
@@ -651,128 +677,77 @@ test("setState publishes busy, waiting, and idle to the busy file", () => {
 	assert.equal(readFileSync(busy, "utf8"), "0");
 });
 
-test("spawning goes through one interface with no custom argv", () => {
+test("spawning is one broker op with no local launch path", () => {
 	const { agent } = makeAgent();
-	assert.equal(typeof agent.spawnTask, "function");
 	assert.equal(typeof agent.spawn, "function");
+	assert.equal(typeof agent.spawnTask, "undefined",
+		"the local launch entry point is gone");
 	assert.equal(typeof agent.parseSpawn, "undefined", "no argv parser");
 });
 
-test("spawnTask builds the teammate template from a task alone", () => {
+test("spawn asks the broker's spawn op with session and options", async () => {
 	publishEndpoint(true);
-	process.env.PI_SESSION_BINDING = "1";
-	process.env.PI_HOST_BINDING = "pi-parent";
-	process.env.TEAM_SESSION = "parent-session";
-	try {
-		const { agent, calls } = makeAgent();
-		agent.rememberSession(join(sessionDir, "sess.jsonl"));
-		const ref = agent.spawnTask("worker", "summarize the diff", {
-			provider: "openrouter", model: "m", thinking: "low",
-		});
-		assert.equal(ref.session, "worker");
-		assert.ok(ref.id.startsWith(`${agent.host}:fork-`));
-		const call = calls[0];
-		assert.equal(call.file, process.execPath);
-		assert.equal(call.args[0], process.argv[1]);
-		assert.deepEqual(call.args.slice(1, 3), ["--mode", "rpc"]);
-		assert.ok(call.args.includes("--session-dir"));
-		assert.ok(call.args.includes("--name"));
-		assert.ok(call.args.includes("--provider"));
-		assert.ok(call.args.includes("--model"));
-		assert.ok(call.args.includes("--thinking"));
-		// The task is delivered as an RPC prompt, never as a -p task.
-		assert.ok(!call.args.includes("-p"));
-		// The general teammate role rides in the appended system prompt,
-		// one constant for every teammate launch.
-		const roleIndex = call.args.indexOf("--append-system-prompt");
-		assert.notEqual(roleIndex, -1, "teammate launches with its role");
-		assert.match(call.args[roleIndex + 1], /Call pre_teams/);
-		assert.match(call.args[roleIndex + 1], /delegate bounded units/);
-		assert.match(call.args[roleIndex + 1], /Do not write memory/);
-		assert.deepEqual(call.options.stdio, ["pipe", "ignore", "ignore"]);
-		assert.equal(call.stdinWrites.length, 1);
-		const sent = JSON.parse(call.stdinWrites[0].trim());
-		assert.equal(sent.type, "prompt");
-		assert.match(sent.message, /summarize the diff/);
-		assert.match(sent.message, /TEAM_PARENT_ID/);
-		assert.match(sent.message, /TEAM_ROOT/);
-		// The spawn prompt keeps the broker's teammate marker and carries
-		// only identity and report mechanics; the role is in the system
-		// prompt, not duplicated here.
-		assert.match(sent.message, /a teammate spawned by a parent pi session/);
-		assert.ok(!sent.message.includes("capabilities as a teammate"),
-			"role stays out of the task prompt");
-		// Report-back names the interpreter and the absolute client path,
-		// never a bare `team` that needs a shebang or PATH.
-		assert.ok(sent.message.includes(process.env.PYTHON));
-		assert.ok(sent.message.includes(join(binDir, "team")));
-		assert.equal(call.options.env.TEAM_ROOT, stateRoot);
-		assert.equal(call.options.env.TEAM_PARENT_ID, "parent-1");
-		assert.ok(call.options.env.TEAM_SEND_TOKEN,
-			"teammate env must carry its own send token");
-		assert.notEqual(call.options.env.TEAM_SEND_TOKEN, agent.sendToken,
-			"each teammate mints its own token");
-		// The teammate must not inherit the parent's session or host
-		// binding, whichever layer set it; its own identity is set fresh.
-		assert.equal(call.options.env.PI_SESSION_BINDING, undefined);
-		assert.equal(call.options.env.PI_HOST_BINDING, undefined);
-		assert.equal(call.options.env.PI_SESSION_FILE, undefined);
-		assert.equal(call.options.env.TEAM_SESSION, undefined);
-	} finally {
-		delete process.env.PI_SESSION_BINDING;
-		delete process.env.PI_HOST_BINDING;
-		delete process.env.TEAM_SESSION;
-	}
+	const runs = [];
+	const { calls, runner } = makeRunner((file, args) => {
+		runs.push(args);
+		return Promise.resolve({ stdout: JSON.stringify({
+			ok: true, id: "fork-1", session: "worker",
+		}), stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	const ref = await agent.spawn("", "worker", "do it", {
+		provider: "openrouter", model: "m", thinking: "low",
+	});
+	assert.equal(ref.id, "fork-1");
+	assert.equal(ref.session, "worker");
+	const sent = runs.find((a) => a.includes("spawn"));
+	assert.ok(sent, "no spawn op was sent to the broker");
+	assert.equal(sent[sent.indexOf("--task") + 1], "do it");
+	assert.equal(sent[sent.indexOf("--name") + 1], "worker");
+	assert.equal(sent[sent.indexOf("--id") + 1], agent.id);
+	assert.equal(sent[sent.indexOf("--send-token") + 1], agent.sendToken);
+	assert.equal(sent[sent.indexOf("--parent") + 1], agent.id);
+	assert.equal(sent[sent.indexOf("--provider") + 1], "openrouter");
+	assert.equal(sent[sent.indexOf("--model") + 1], "m");
+	assert.equal(sent[sent.indexOf("--thinking") + 1], "low");
+	assert.ok(!sent.includes("--host"), "a local spawn carries no host");
+	// The broker owns the launch: no pi child is started here.
+	assert.equal(calls.length, 1, "spawn must not launch a pi child");
+	agent.stopHold();
 });
 
-test("spawnTask names an unnamed spawn from its task", () => {
-	// An unnamed spawn used to take the generated agent id as its
-	// session name, which the dock hides as a duplicate and /resume
-	// shows as no name at all.
+test("spawn names an unnamed spawn from its task", async () => {
 	publishEndpoint(true);
-	const { agent, calls } = makeAgent();
+	const runs = [];
+	const { runner } = makeRunner((_file, args) => {
+		runs.push(args);
+		return Promise.resolve({ stdout: JSON.stringify({
+			ok: true, id: "fork-2", session: "Summarize the diff please",
+		}), stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
 	agent.rememberSession(join(sessionDir, "sess.jsonl"));
-	const ref = agent.spawnTask("", "Summarize the   diff\nplease", {});
+	const ref = await agent.spawn("", "", "Summarize the   diff\nplease");
 	assert.equal(ref.session, "Summarize the diff please");
-	const nameIndex = calls[0].args.indexOf("--name");
-	assert.notEqual(nameIndex, -1);
-	assert.equal(calls[0].args[nameIndex + 1], "Summarize the diff please");
-	assert.equal(calls[0].options.env.TEAM_NAME,
-		"Summarize the diff please");
-	assert.equal(agent.spawnTask("", "   ").session, "teammate");
+	const sent = runs.find((a) => a.includes("spawn"));
+	assert.equal(
+		sent[sent.indexOf("--name") + 1], "Summarize the diff please");
 });
 
-test("spawnTask resolves pi from the running runtime", () => {
-	// Windows wraps pi as a .cmd/.ps1 shim that child_process cannot
-	// execute without a shell; the runtime plus its entry script is
-	// spawnable everywhere.
+test("spawn falls back to a generic name for a blank task", async () => {
 	publishEndpoint(true);
-	const { agent, calls } = makeAgent();
-	agent.rememberSession(join(sessionDir, "sess.jsonl"));
-	agent.spawnTask("worker", "do it");
-	assert.equal(calls.length, 1);
-	const call = calls[0];
-	assert.equal(call.file, process.execPath);
-	assert.equal(call.args[0], process.argv[1]);
-	assert.deepEqual(call.args.slice(1, 3), ["--mode", "rpc"]);
-	assert.ok(!call.args.includes("--no-session"));
-});
-
-test("a teammate starts clean: never a parent-session fork", () => {
-	// Mirrors subagent delegation: the teammate gets the task alone, not
-	// the parent's transcript, however recent or small that transcript is.
-	publishEndpoint(true);
-	mkdirSync(sessionDir, { recursive: true });
-	const { agent, calls } = makeAgent();
-	const session = join(sessionDir, "warm.jsonl");
-	writeFileSync(session, "{}\n");
-	agent.rememberSession(session);
-	// Warm, small, and fresh: still no fork, no context option handled.
-	agent.spawnTask("warm", "task", { provider: "anthropic" });
-	assert.ok(!calls[0].args.includes("--fork"), "never forks");
-	assert.deepEqual(calls[0].args.slice(1, 3), ["--mode", "rpc"]);
-	assert.ok(calls[0].args.includes("--session-dir"),
-		"still lands in the parent's session directory");
+	const runs = [];
+	const { runner } = makeRunner((_file, args) => {
+		runs.push(args);
+		return Promise.resolve({ stdout: JSON.stringify({
+			ok: true, id: "fork-3", session: "teammate",
+		}), stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	await agent.spawn("", "", "   ");
+	const sent = runs.find((a) => a.includes("spawn"));
+	assert.equal(sent[sent.indexOf("--name") + 1], "teammate");
 });
 
 test("AgentDirectory resolves local and peer main agents", async () => {
@@ -790,122 +765,58 @@ test("AgentDirectory resolves local and peer main agents", async () => {
 	assert.equal((await directory.mainAgent("beta")).id, "beta:pi-2");
 });
 
-test("spawn routes a peer host over the broker and returns the id", async () => {
-	const sends = [];
+test("spawn routes a peer host through the broker op", async () => {
+	publishEndpoint(true);
+	const runs = [];
 	const { calls, runner } = makeRunner((file, args) => {
-		if (args.includes("ls")) {
-			return Promise.resolve({ stdout: JSON.stringify({ agents: [{
-				id: "beta:main", name: "peer", role: "main", pid: 1,
-				parent: null, session: null, online: false, origin: "beta",
-				remote: true,
-			}] }), stderr: "", code: 0 });
-		}
-		sends.push(args);
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+		runs.push(args);
+		return Promise.resolve({ stdout: JSON.stringify({
+			ok: true, id: "beta:fork-1", session: "worker",
+		}), stderr: "", code: 0 });
 	});
 	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	const pending = agent.spawn("beta", "worker", "do it");
-	await new Promise((r) => setTimeout(r, 20));
-	const sent = sends.find((a) => a.includes("spawn"));
-	assert.ok(sent, "spawn request was not sent");
-	const request = JSON.parse(sent[sent.length - 1]);
-	onData(JSON.stringify({
-		from: "beta:main", to: agent.id, kind: "spawn-ack",
-		payload: { requestId: request.requestId, id: "beta:fork-1",
-			session: "worker" },
-	}) + "\n");
-	const ref = await pending;
+	const ref = await agent.spawn("beta", "worker", "do it");
 	assert.equal(ref.id, "beta:fork-1");
 	assert.equal(ref.session, "worker");
+	const sent = runs.find((a) => a.includes("spawn"));
+	assert.ok(sent, "no spawn op was sent to the broker");
+	assert.equal(sent[sent.indexOf("--host") + 1], "beta");
+	// A peer spawn is still only a broker op: no main-agent relay and
+	// no child process of ours.
+	assert.equal(calls.length, 1, "peer spawn must not launch a child");
+	assert.ok(!runs.some((a) => a.includes("ls")),
+		"spawn must not enumerate peer main agents");
 	agent.stopHold();
 });
 
-test("spawn falls back to the next main when one times out", async () => {
-	process.env.PI_TEAMS_SPAWN_WINDOW = "50";
-	try {
-		const sends = [];
-		const { calls, runner } = makeRunner((file, args) => {
-			if (args.includes("ls")) {
-				return Promise.resolve({ stdout: JSON.stringify({ agents: [
-					{ id: "beta:pi-1", name: "stale", role: "main", pid: 1,
-						parent: null, session: null, online: false,
-						origin: "beta", remote: true },
-					{ id: "beta:pi-2", name: "live", role: "main", pid: 2,
-						parent: null, session: null, online: false,
-						origin: "beta", remote: true },
-				] }), stderr: "", code: 0 });
-			}
-			sends.push(args);
-			return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+test("spawn reports the broker's error", async () => {
+	publishEndpoint(true);
+	const { runner } = makeRunner(() => Promise.resolve({
+		stdout: JSON.stringify({
+			ok: false, error: "no-session-host",
+			detail: "no host answered on beta",
+		}), stderr: "", code: 0,
+	}));
+	const agent = new TeamAgent(runner, () => {});
+	agent.hold("/work");
+	await assert.rejects(() => agent.spawn("beta", "worker", "do it"),
+		(err) => {
+			assert.match(err.message, /no-session-host/);
+			assert.match(err.message, /no host answered on beta/);
+			return true;
 		});
-		const agent = new TeamAgent(runner, () => {});
-		agent.hold("/work");
-		const onData = calls[0]["stdout:data"];
-		const pending = agent.spawn("beta", "worker", "do it");
-		await new Promise((r) => setTimeout(r, 20));
-		// The first main in registry order is asked first.
-		let sent = sends.find((a) => a.includes("spawn"));
-		assert.ok(sent, "no spawn request was sent");
-		assert.ok(sent.includes("beta:pi-1"), "first main was not tried first");
-		// No reply comes back: the window expires and the next main is
-		// tried.
-		let second = null;
-		for (let i = 0; i < 40 && !second; i++) {
-			await new Promise((r) => setTimeout(r, 10));
-			second = sends.find((a) =>
-				a.includes("spawn") && a.includes("beta:pi-2")) ?? null;
-		}
-		assert.ok(second, "spawn did not fall back to the next main after a " +
-			"timeout");
-		const request = JSON.parse(second[second.length - 1]);
-		onData(JSON.stringify({
-			from: "beta:pi-2", to: agent.id, kind: "spawn-ack",
-			payload: { requestId: request.requestId, id: "beta:fork-2",
-				session: "worker" },
-		}) + "\n");
-		const ref = await pending;
-		assert.equal(ref.id, "beta:fork-2");
-		agent.stopHold();
-	} finally {
-		delete process.env.PI_TEAMS_SPAWN_WINDOW;
-	}
+	agent.stopHold();
 });
 
-test("spawn routes a host-less target to the local backend", async () => {
-	const { calls, runner } = makeRunner(() =>
+test("spawn fails when the broker returns no id", async () => {
+	publishEndpoint(true);
+	const { runner } = makeRunner(() =>
 		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
 	const agent = new TeamAgent(runner, () => {});
 	agent.hold("/work");
-	const ref = await agent.spawn("", "local-kid", "do it");
-	assert.ok(ref.id.includes(":fork-"), "not a locally spawned fork id");
-	assert.equal(ref.session, "local-kid");
-	// A local spawn launches a process; no broker send was needed.
-	assert.ok(calls.length >= 2, "no local teammate process was spawned");
-	agent.stopHold();
-});
-
-test("an inbound spawn request is spawned locally and acked", async () => {
-	publishEndpoint(true);
-	const sends = [];
-	const { calls, runner } = makeRunner((file, args) => {
-		sends.push(args);
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	onData(JSON.stringify({
-		from: "alpha:main", to: agent.id, kind: "spawn",
-		payload: { requestId: "r1", name: "kid", task: "do x" },
-	}) + "\n");
-	await new Promise((r) => setTimeout(r, 20));
-	// The request spawned a local teammate and acked the requester.
-	assert.ok(calls.length >= 2, "no teammate process was spawned");
-	const ack = sends.find((a) => a.includes("spawn-ack"));
-	assert.ok(ack, "no spawn-ack was sent");
-	assert.ok(ack.includes("alpha:main"));
+	await assert.rejects(() => agent.spawn("", "worker", "do it"),
+		/spawn failed/);
 	agent.stopHold();
 });
 
@@ -1284,15 +1195,21 @@ test("attaching makes a session a teammate that passes the gate", async () => {
 test("spawning makes the spawner a teammate", async () => {
 	const savedId = process.env.TEAM_ID;
 	delete process.env.TEAM_ID;
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const { runner } = makeRunner((file, args) => {
+		if (args.includes("spawn")) {
+			return Promise.resolve({ stdout: JSON.stringify({
+				ok: true, id: "kid-fork", session: "kid",
+			}), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
 	const agent = new TeamAgent(runner, () => {});
 	if (savedId !== undefined) process.env.TEAM_ID = savedId;
 	agent.hold("/work");
 	// The empty snapshot means only the spawn itself can grant membership.
 	assert.equal(await agent.isTeammate(), false);
 	const ref = await agent.spawn("", "kid", "do it");
-	assert.ok(ref, "local spawn returned no ref");
+	assert.equal(ref.id, "kid-fork");
 	assert.equal(await agent.isTeammate(), true);
 	await assert.doesNotReject(() => agent.requireTeammate("team_send"));
 	agent.stopHold();

@@ -13,6 +13,7 @@ import json
 import sys
 
 from team_client import TeamClient
+from session_keeper import SessionKeeper
 from team_root import DEFAULT_ROOT
 
 # Existing importers name team for the client class; keep re-exporting it.
@@ -58,6 +59,8 @@ class ClientCli:
         self.add_identity_args(p_register)
         sub.add_parser("ls")
         sub.add_parser("deregister")
+        p_keeper = sub.add_parser("keeper")
+        p_keeper.add_argument("key")
         p_reap = sub.add_parser("reap")
         self.add_identity_args(p_reap)
         p_follow = sub.add_parser("follow")
@@ -69,6 +72,17 @@ class ClientCli:
         p_send.add_argument("to")
         p_send.add_argument("kind", nargs="?", default="text")
         p_send.add_argument("payload", nargs="?", default="")
+        p_spawn = sub.add_parser("spawn")
+        p_spawn.add_argument("--id")
+        p_spawn.add_argument("--send-token")
+        p_spawn.add_argument("--task", required=True)
+        p_spawn.add_argument("--name")
+        p_spawn.add_argument("--cwd")
+        p_spawn.add_argument("--host")
+        p_spawn.add_argument("--provider")
+        p_spawn.add_argument("--model")
+        p_spawn.add_argument("--thinking")
+        p_spawn.add_argument("--parent")
         p_term = sub.add_parser("terminate")
         p_term.add_argument("to")
         p_term.add_argument("why", nargs="?", default="requested")
@@ -85,6 +99,10 @@ class ClientCli:
         if args.command is None:
             parser.print_help()
             return 0
+        if args.command == "keeper":
+            # The detached per-session keeper consumes its spec and hosts
+            # one self-provisioned teammate; no broker connection here.
+            return SessionKeeper(args.root, args.key).run()
         client = TeamClient(args.root)
         if args.command in ("register", "follow", "hold", "send", "reap"):
             self.apply_identity(client, args)
@@ -104,6 +122,20 @@ class ClientCli:
             print(json.dumps(client.send_msg(
                 args.to, args.kind, self.parse_payload(args.payload)
             )))
+        elif args.command == "spawn":
+            client.set_identity(args.id, send_token=args.send_token)
+            reply = client.spawn(
+                args.task, name=args.name, cwd=args.cwd, host=args.host,
+                provider=args.provider, model=args.model,
+                thinking=args.thinking, parent=args.parent)
+            if reply.get("op") == "ack":
+                print(json.dumps({"ok": True, "id": reply.get("id"),
+                                  "session": reply.get("session")}))
+            else:
+                print(json.dumps({
+                    "ok": False,
+                    "error": reply.get("error") or "spawn-failed",
+                    "detail": reply.get("detail") or ""}))
         elif args.command == "terminate":
             print(json.dumps(client.terminate(args.to, args.why)))
         elif args.command == "peer":
