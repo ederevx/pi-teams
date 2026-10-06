@@ -2,6 +2,7 @@
 
 import json
 import os
+import select
 import shutil
 import socket
 import subprocess
@@ -10,11 +11,13 @@ import threading
 import time
 import unittest
 
-from harness import make_root, read_endpoint, wait_endpoint, wait_until
+from harness import (TEAMD, make_root, read_endpoint, start_broker,
+                     wait_endpoint, wait_until)
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from team import TeamClient
 from team_root import TeamRoot
 from teamd import TEAMMATE_MARKER, PeerLink, TeamBroker
+from wire import LineStream, dump_line
 
 IDLE_ROOMY = 30.0
 
@@ -1652,6 +1655,136 @@ class SpawnOpTests(unittest.TestCase):
         finally:
             broker_a.stop()
             broker_b.stop()
+
+
+class SlowHelloBroker:
+    """A one-shot broker stand-in that withholds the hello ack, so a
+    client which pipelines `shutdown` before reading it is caught."""
+
+    def __init__(self):
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(1)
+        self.host, self.port = self.listener.getsockname()
+        self.early_shutdown = None
+        self.ops = []
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def join(self, timeout=5.0):
+        self.thread.join(timeout=timeout)
+
+    def _serve(self):
+        try:
+            conn, _ = self.listener.accept()
+            conn.settimeout(2.0)
+            stream = LineStream()
+            while True:
+                line = stream.next_line()
+                if line is None:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    stream.push(chunk)
+                    continue
+                msg = json.loads(line.decode("utf-8"))
+                self.ops.append(msg.get("op"))
+                if msg.get("op") == "hello":
+                    # Wait for a pipelined shutdown before answering; a
+                    # client that reads the ack sends nothing here.
+                    ready, _, _ = select.select([conn], [], [], 0.5)
+                    self.early_shutdown = bool(ready)
+                    conn.sendall(dump_line({"op": "ack", "srv": "teamd"}))
+                elif msg.get("op") == "shutdown":
+                    conn.sendall(dump_line({"op": "ack"}))
+                    break
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            self.listener.close()
+
+
+def _write_endpoint(root, host, port, token="tok"):
+    with open(os.path.join(root, "endpoint"), "w") as fh:
+        fh.write(json.dumps({"host": host, "port": port,
+                             "token": token}))
+
+
+class BrokerCliTests(unittest.TestCase):
+    def _stop(self, root):
+        return subprocess.run(
+            [sys.executable, str(TEAMD), "--root", root, "stop"],
+            capture_output=True, timeout=10)
+
+    def test_stop_reads_the_hello_ack_before_sending_shutdown(self):
+        # Regression: closing the socket with the hello ack unread lets
+        # Windows discard the queued shutdown as an RST; the CLI must
+        # consume the reply first and is then not heard from until the
+        # ack arrives.
+        root = make_root()
+        fake = SlowHelloBroker()
+        fake.start()
+        try:
+            _write_endpoint(root, fake.host, fake.port)
+            result = self._stop(root)
+            self.assertEqual(result.returncode, 0,
+                             result.stderr.decode("utf-8", "replace"))
+            fake.join(timeout=3)
+            self.assertFalse(
+                fake.early_shutdown,
+                "shutdown was pipelined before the hello ack was read")
+            self.assertEqual(fake.ops, ["hello", "shutdown"])
+        finally:
+            fake.join(timeout=3)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_stop_terminates_an_isolated_broker(self):
+        root = make_root()
+        proc = start_broker(root, idle_timeout=IDLE_ROOMY)
+        try:
+            self.assertIsNone(proc.poll())
+            result = self._stop(root)
+            self.assertEqual(result.returncode, 0,
+                             result.stderr.decode("utf-8", "replace"))
+            self.assertTrue(
+                wait_until(lambda: proc.poll() is not None, timeout=5),
+                "teamd stop returned but the broker is still running")
+            self.assertFalse((TeamRoot(root)).pidfile.exists(),
+                             "shutdown must remove the broker pid file")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_stop_reports_a_silent_broker_without_a_traceback(self):
+        root = make_root()
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        host, port = listener.getsockname()
+
+        def serve():
+            conn, _ = listener.accept()
+            try:
+                conn.recv(65536)
+            finally:
+                conn.close()
+                listener.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            _write_endpoint(root, host, port)
+            result = self._stop(root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(b"Traceback", result.stderr)
+        finally:
+            thread.join(timeout=3)
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":
