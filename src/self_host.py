@@ -64,7 +64,7 @@ class SelfSessionHost:
         self.gc()
         session = session or fork_id
         parent_id = parent_id or self.environ.get("TEAM_ID") or ""
-        send_token = send_token or self._mint_token()
+        send_token = send_token or self.mint_token()
         command, base_args = self._invocation(pi_command, pi_args)
         argv = [command] + base_args + self._teammate_args(
             session, session_dir, provider, model, thinking)
@@ -75,7 +75,7 @@ class SelfSessionHost:
             "env": self._teammate_env(
                 fork_id, session, parent_id, send_token, extra_env),
             "cwd": cwd or os.getcwd(),
-            "prompt": self._task_prompt(session, task),
+            "prompt": self.task_prompt(session, task),
             "created": time.time(),
         }
         self.root.write_keeper_spec(fork_id, spec)
@@ -193,7 +193,7 @@ class SelfSessionHost:
                         if value is not None})
         return env
 
-    def _task_prompt(self, session, task):
+    def task_prompt(self, session, task):
         send = self._report_command()
         return (
             'You are "%s", a teammate spawned by a parent pi session '
@@ -210,7 +210,7 @@ class SelfSessionHost:
         return "'" + str(value).replace("'", "'\\''") + "'"
 
     @staticmethod
-    def _mint_token():
+    def mint_token():
         # Mirrors mintSendToken in extensions/pi-teams/protocol.ts.
         return "stk-%x-%s%s" % (
             int(time.time() * 1000), secrets.token_hex(4),
