@@ -104,24 +104,12 @@ export default async function (pi: ExtensionAPI) {
 				provider: model?.provider,
 				model: model?.id,
 				thinking: ctx?.thinkingLevel,
+			}).catch((error) => {
+				const why = error instanceof Error
+					? error.message
+					: String(error);
+				throw new Error(`spawn failed: ${why}`);
 			});
-			if (!ref) {
-				if (!host) throw new Error("spawn failed");
-				const agents = await app.snapshot();
-				const advertised = agents.filter((a) =>
-					a.remote && (!a.origin || a.origin === host)).length;
-				if (advertised === 0) {
-					throw new Error(
-						`no peer agent on ${host}: the link is up but that ` +
-						`host advertises no agents. Start its pi session ` +
-						`with pi-teams so one registers, then retry.`);
-				}
-				throw new Error(
-					`spawn on ${host} timed out or was refused by all ` +
-					`${advertised} advertised agent(s) (no answer within ` +
-					`15s, or spawn-error). Check that the host's main pi ` +
-					`session is responsive, then retry.`);
-			}
 			const where = host ? ` on ${host}` : ` as session "${ref.session}"`;
 			return {
 				content: [{
