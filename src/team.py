@@ -13,6 +13,7 @@ import json
 import sys
 
 from team_client import TeamClient
+from session_keeper import SessionKeeper
 from team_root import DEFAULT_ROOT
 
 # Existing importers name team for the client class; keep re-exporting it.
@@ -58,6 +59,8 @@ class ClientCli:
         self.add_identity_args(p_register)
         sub.add_parser("ls")
         sub.add_parser("deregister")
+        p_keeper = sub.add_parser("keeper")
+        p_keeper.add_argument("key")
         p_reap = sub.add_parser("reap")
         self.add_identity_args(p_reap)
         p_follow = sub.add_parser("follow")
@@ -85,6 +88,10 @@ class ClientCli:
         if args.command is None:
             parser.print_help()
             return 0
+        if args.command == "keeper":
+            # The detached per-session keeper consumes its spec and hosts
+            # one self-provisioned teammate; no broker connection here.
+            return SessionKeeper(args.root, args.key).run()
         client = TeamClient(args.root)
         if args.command in ("register", "follow", "hold", "send", "reap"):
             self.apply_identity(client, args)
