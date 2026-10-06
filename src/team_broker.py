@@ -37,6 +37,16 @@ from team_root import (
 )
 
 
+# Ops that mean an agent is doing work; only these hold the restart
+# clock open. A read-only registry poll or an idle heartbeat must not,
+# or a connected-but-idle session would block code adoption forever.
+_WORK_OPS = frozenset({
+    "register", "deregister", "send", "broadcast", "spawn",
+    "terminate", "gc-reap", "peer-add", "peer-remove",
+    "peer-control", "peer-relay",
+})
+
+
 class TeamBroker:
     """Registry + relay for connected agents on one loopback endpoint."""
 
@@ -315,11 +325,21 @@ class TeamBroker:
         self._reply(conn, op="ack", srv="teamd")
         return True
 
+    def _bears_work(self, op, msg):
+        # The hold's ping carries its run-state: only a busy or waiting
+        # agent is doing something. An idle ping is a keepalive, like a
+        # registry poll, and must not refresh the restart clock.
+        if op == "ping":
+            return msg.get("busy") is True \
+                or msg.get("waiting") is True
+        return op in _WORK_OPS
+
     def _handle(self, conn, msg, agent_id):
-        # Any handled message is broker activity; the restart policy waits
-        # for an idle window before adopting new code.
-        self.last_active = time.time()
         op = msg.get("op")
+        # Only work-bearing contact holds the restart clock open; the
+        # policy waits for an idle window before adopting new code.
+        if self._bears_work(op, msg):
+            self.last_active = time.time()
         if op == "register":
             agent_id = self._register(conn, msg)
         elif op == "send":

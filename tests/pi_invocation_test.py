@@ -1,12 +1,17 @@
 """PiInvocation tests: the launch a Python daemon resolves for pi."""
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 
 import harness  # noqa: F401 - inserts src/ on sys.path
 from pi_invocation import PiInvocation
+from team_root import TeamRoot
+
+ENTRY_NAME = "pi-entry.json"
 
 
 def _entry(name):
@@ -17,6 +22,23 @@ def _entry(name):
 
 
 class PiInvocationTest(unittest.TestCase):
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="pi-invocation-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def _record_path(self):
+        return os.path.join(self.root, ENTRY_NAME)
+
+    def _write_record(self, record):
+        with open(self._record_path(), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(record))
+
+    def _read_record(self):
+        with open(self._record_path(), "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    # -- environment precedence (unchanged) --------------------------
 
     def test_unconfigured_resolves_the_bare_name(self):
         self.assertEqual(PiInvocation.resolve(environ={}), ("pi", []))
@@ -47,6 +69,85 @@ class PiInvocationTest(unittest.TestCase):
                                                 "absent-pi-entry.js"),
                "PI_TEAMS_PI_COMMAND": "node"}
         self.assertEqual(PiInvocation.resolve(environ=env), ("node", []))
+
+    # -- persisted launch record -------------------------------------
+
+    def test_a_persisted_entry_resolves_without_the_env(self):
+        entry = _entry(".js")
+        self.addCleanup(os.unlink, entry)
+        self._write_record({"version": 1, "entry": entry,
+                            "node": "C:/node/node.exe"})
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("C:/node/node.exe", [entry]))
+
+    def test_a_persisted_command_resolves_without_the_env(self):
+        self._write_record({"version": 1, "command": "/opt/pi/bin",
+                            "args": ["--x"]})
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("/opt/pi/bin", ["--x"]))
+
+    def test_an_unknown_version_and_fields_are_ignored(self):
+        entry = _entry(".js")
+        self.addCleanup(os.unlink, entry)
+        self._write_record({"version": 99, "entry": entry,
+                            "node": "node", "future": {"a": 1}})
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("node", [entry]))
+
+    def test_the_env_beats_the_persisted_record(self):
+        persisted = _entry(".js")
+        self.addCleanup(os.unlink, persisted)
+        live = _entry(".js")
+        self.addCleanup(os.unlink, live)
+        self._write_record({"version": 1, "entry": persisted, "node": "old"})
+        env = {"PI_TEAMS_PI_ENTRY": live, "PI_TEAMS_PI_NODE": "new"}
+        self.assertEqual(PiInvocation.resolve(environ=env, root=self.root),
+                         ("new", [live]))
+
+    def test_an_absent_record_falls_back_to_bare(self):
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("pi", []))
+
+    def test_a_malformed_record_falls_back_to_bare(self):
+        with open(self._record_path(), "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("pi", []))
+
+    def test_a_record_naming_no_live_entry_falls_back_to_bare(self):
+        self._write_record({"version": 1,
+                            "entry": os.path.join(self.root, "gone.js")})
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("pi", []))
+
+    def test_a_persisted_bare_name_is_not_used(self):
+        self._write_record({"version": 1, "command": "pi"})
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("pi", []))
+
+    # -- persist guard -----------------------------------------------
+
+    def test_persist_writes_a_record_and_reads_it_back(self):
+        entry = _entry(".js")
+        self.addCleanup(os.unlink, entry)
+        env = {"PI_TEAMS_PI_ENTRY": entry, "PI_TEAMS_PI_NODE": "node"}
+        self.assertTrue(PiInvocation.persist(TeamRoot(self.root), env))
+        self.assertEqual(PiInvocation.resolve(environ={}, root=self.root),
+                         ("node", [entry]))
+
+    def test_a_bare_fallback_does_not_overwrite_the_record(self):
+        entry = _entry(".js")
+        self.addCleanup(os.unlink, entry)
+        root = TeamRoot(self.root)
+        env = {"PI_TEAMS_PI_ENTRY": entry, "PI_TEAMS_PI_NODE": "node"}
+        self.assertTrue(PiInvocation.persist(root, env))
+        kept = self._read_record()
+        self.assertFalse(PiInvocation.persist(root, environ={}))
+        self.assertEqual(self._read_record(), kept)
+
+    def test_persist_needs_a_root_that_can_write(self):
+        env = {"PI_TEAMS_PI_COMMAND": "node"}
+        self.assertFalse(PiInvocation.persist(self.root, env))
 
 
 if __name__ == "__main__":
