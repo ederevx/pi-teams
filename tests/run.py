@@ -78,7 +78,8 @@ def main():
     suite = unittest.TestSuite()
     for module in ("broker_test", "fork_test", "attach_test",
                    "settings_test", "setup_script_test", "install_test",
-                   "session_host_test", "self_host_test"):
+                   "session_host_test", "self_host_test",
+                   "session_spawn_test"):
         suite.addTests(loader.loadTestsFromName(module))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 1
