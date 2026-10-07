@@ -102,17 +102,19 @@ itself, never a signal, and a main agent is never asked to reap.
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends
   counts too. A waiting fork is exempt from the idle reap.
-- **Reaping** drops the registration; a spawned teammate's
-  transcript is removed once the session has exited, so pi cannot
-  recreate it mid-turn, while attached sessions keep theirs in
-  `/resume`. The session shuts itself down after the ack.
+- **Reaping** drops the registration, not the conversation: a
+  reaped teammate's transcript stays in `/resume`, so its work can be
+  resumed later, exactly as an attached session's does. The session
+  shuts itself down after the ack.
 - **Busy-file GC** clears stale `.busy` state: a file whose agent is
   unregistered and untouched past `PI_TEAMS_BUSY_GRACE_HOURS`
   (default 2h) is removed; registered agents keep theirs.
-- **Session GC** removes teammate-marked transcripts whose agent is
-  not live and whose mtime is past `PI_TEAMS_SESSION_GRACE_HOURS`
-  (default 72h; `PI_TEAMS_SESSIONS_ROOT` overrides the root).
-  Deletions are guarded to the sessions root.
+- **Session GC** reclaims only abandoned teammate transcripts: a
+  teammate-marked file no live process backs and whose mtime is past
+  `PI_TEAMS_SESSION_GRACE_HOURS` (default 72h;
+  `PI_TEAMS_SESSIONS_ROOT` overrides the root). A registration drop
+  never deletes a conversation. Deletions are guarded to the sessions
+  root.
 - **Self-restart**: the broker stamps its endpoint with a source hash
   and exits once idle for `PI_TEAMS_RESTART_GRACE` (default 60s) after
   the on-disk source changes, never while agents are live; the next
@@ -123,8 +125,8 @@ itself, never a signal, and a main agent is never asked to reap.
 `team_attach` re-registers a running session under the requester's
 fork id. An agent belongs to one team: a target that already has a
 parent is refused, and a teammate cannot attach. `team_detach` reverses
-it. A spawned teammate's transcript goes with its process; an attached
-session stays in `/resume`.
+it. A spawned teammate's conversation outlives its process and stays
+in `/resume`, just as an attached session's does.
 
 ### Awareness
 
