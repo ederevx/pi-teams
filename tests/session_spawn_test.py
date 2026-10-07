@@ -74,13 +74,33 @@ class FakeSelfHost:
 
 
 class TeamSpawnerTests(unittest.TestCase):
-    def _spawner(self, client=None, error=None, self_host=None):
+    def _spawner(self, client=None, error=None, self_host=None, host=None):
         fake_self = self_host or FakeSelfHost()
         spawner = TeamSpawner(
             TeamRoot(make_root()), environ={},
             resolver_factory=lambda fallback: FakeResolver(client, error),
-            self_host=fake_self, confirm_timeout=0.0)
+            self_host=fake_self, confirm_timeout=0.0, host=host)
         return spawner, fake_self
+
+    def test_host_prefixes_the_minted_id(self):
+        # Peers route by the id's host prefix, so a spawned teammate
+        # must carry its host label; the teammate adopts this id as
+        # TEAM_ID, and a bare id reads as local on the wrong host.
+        client = FakeClient()
+        spawner, _ = self._spawner(client=client, host="alpha")
+        ref = spawner.spawn("alpha:parent", "do it", parent_pid="1234",
+                            name="t4")
+        self.assertTrue(ref["id"].startswith("alpha:fork-1234-"), ref["id"])
+        self.assertEqual(client.calls[0]["env"]["TEAM_ID"], ref["id"])
+
+    def test_no_host_mints_a_bare_id(self):
+        # The standalone spawner (no host label known) keeps the bare
+        # form rather than a dangling ':'.
+        client = FakeClient()
+        spawner, _ = self._spawner(client=client)
+        ref = spawner.spawn("alpha:parent", "do it", parent_pid="1234",
+                            name="t5")
+        self.assertTrue(ref["id"].startswith("fork-1234-"), ref["id"])
 
     def test_provider_path_carries_identity_and_task(self):
         client = FakeClient()
