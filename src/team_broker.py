@@ -128,7 +128,8 @@ class TeamBroker:
         self.delivery = MailboxDelivery(Mailbox(self.root))
         # Spawning is a client of the session-host capability, never the
         # host itself: it binds to a provider or self-provisions.
-        self.spawner = TeamSpawner(self.root, environ=os.environ)
+        self.spawner = TeamSpawner(self.root, environ=os.environ,
+                                   host=self.host)
         # The registry's derived views (online snapshot, mirror).
         self.mirror = RegistryMirror(
             self.root, self._registry, self.idle_timeout)
@@ -660,13 +661,14 @@ class TeamBroker:
         # belongs to the team: park the message and ack, so the
         # hold-restart window loses nothing. The sweep drops what
         # outlives the mailbox ttl.
-        if self._parent_host(target) == self.host \
+        host = self._target_host(target)
+        if host == self.host \
                 and self.delivery.accepts(
                     target, target in self._registry):
             self.delivery.park(target, envelope)
             self._reply(sender_conn, op="ack", queued=True)
             return
-        peer = self._peers.get(self._parent_host(target))
+        peer = self._peers.get(host)
         if peer is not None and peer.connected:
             rid = secrets.token_hex(8)
             with self._lock:
@@ -708,12 +710,13 @@ class TeamBroker:
     def terminate(self, target, why, conn=None):
         """Evict a local agent, or ask its host's broker to evict it, and
         answer the requester once. One entry point for local and peer."""
-        if self._parent_host(target) == self.host:
+        host = self._target_host(target)
+        if host == self.host:
             self._terminate(target, why)
             if conn is not None:
                 self._reply(conn, op="ack")
             return
-        peer = self._peers.get(self._parent_host(target))
+        peer = self._peers.get(host)
         if peer is None or not peer.connected:
             if conn is not None:
                 self._reply(conn, op="error", error="undeliverable",
@@ -804,6 +807,21 @@ class TeamBroker:
         # one; routing and cross-host parentage both use this.
         if isinstance(agent_id, str) and ":" in agent_id:
             return agent_id.split(":", 1)[0]
+        return self.host
+
+    def _target_host(self, agent_id):
+        # The host that owns `agent_id` for a send: its explicit prefix,
+        # our host when it resolves locally, else the peer whose
+        # registry lists it. A bare id minted before host-labeling was
+        # enforced still routes to the host that registered it.
+        if isinstance(agent_id, str) and ":" in agent_id:
+            return agent_id.split(":", 1)[0]
+        with self._lock:
+            if agent_id in self._registry or agent_id in self._clients:
+                return self.host
+            for host, entries in self._remote.items():
+                if any(e.get("id") == agent_id for e in entries):
+                    return host
         return self.host
 
     def _snapshot_all(self):
@@ -991,6 +1009,12 @@ class TeamBroker:
         target = msg.get("to")
         with self._lock:
             conn = self._clients.get(target)
+            # A peer may address us with our own host prefix while the
+            # registration is still bare (a teammate minted before ids
+            # were host-labeled): accept either key.
+            if conn is None and isinstance(target, str) \
+                    and target.startswith(self.host + ":"):
+                conn = self._clients.get(target[len(self.host) + 1:])
         if conn is not None:
             self._write(conn, self._envelope(
                 msg.get("from") or peer.host,
