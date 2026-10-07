@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.43 - 2026-10-07
+
+- Let an orphaned teammate become independent. Membership now also
+  comes from the durable teammate marker in the transcript, so a
+  teammate whose launch env was lost (a resumed session, a revived
+  spawn) stays a member, and a teammate whose parent is gone is
+  treated as its own team root: `team_send` no longer refuses its
+  targets as "outside your team", and `team_detach` still makes it a
+  plain agent.
+
 ## v0.4.42 - 2026-10-07
 
 - Keep a teammate's conversation past its process. A spawned teammate's
