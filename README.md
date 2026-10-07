@@ -126,7 +126,10 @@ itself, never a signal, and a main agent is never asked to reap.
 fork id. An agent belongs to one team: a target that already has a
 parent is refused, and a teammate cannot attach. `team_detach` reverses
 it. A spawned teammate's conversation outlives its process and stays
-in `/resume`, just as an attached session's does.
+in `/resume`, just as an attached session's does. An **orphaned
+teammate** — its parent no longer live — is independent: the teammate
+marker in its transcript keeps it a member, it is no longer scoped to
+the dead parent's team, and `team_detach` makes it a plain team root.
 
 ### Awareness
 
@@ -155,7 +158,10 @@ Two machines with SSH between them federate their brokers.
   messages expire after a ttl.
 - **Lifetime** — a remote-parented fork obeys the same idle reap as a
   local one, and its own host performs it; a departed parent no longer
-  reaps it. Reaping never crosses hosts.
+  reaps it. A teammate whose parent disappears (a departed peer or a
+  dead parent agent) is orphaned and runs independently: it keeps its
+  membership and is not scoped to the dead team. Reaping never crosses
+  hosts.
 - **Password-only hosts** — a non-interactive SSH failure fails closed
   with the one-line setup command to run manually
   (`sh .../peer-ssh-setup.sh user@host`); after that `team_peer add`

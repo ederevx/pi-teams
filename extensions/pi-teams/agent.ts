@@ -41,6 +41,10 @@ import {
 	type TeamMessage,
 } from "./protocol.ts";
 
+/** Written into a spawned teammate's transcript by the broker
+ *  (src/team_root.py TEAMMATE_MARKER); kept in sync. */
+const TEAMMATE_MARKER = "a teammate spawned by a parent pi session";
+
 export class TeamAgent {
 	private readonly runner: ProcessHost;
 	private readonly deliver: DeliverFn;
@@ -486,7 +490,24 @@ export class TeamAgent {
 	 *  member-only operations. */
 	async isTeammate(): Promise<boolean> {
 		if (this.role === "fork" || this.teamOwner) return true;
-		return this.ownsTeammates();
+		if (await this.ownsTeammates()) return true;
+		return this.wasSpawnedTeammate();
+	}
+
+	/** Whether this conversation was spawned as a teammate: its
+	 *  transcript carries the broker's teammate marker. The marker is
+	 *  durable, so a teammate whose launch env was lost or whose session
+	 *  was resumed after its process died still counts as a member; with
+	 *  no live parent it acts as its own independent root. */
+	private wasSpawnedTeammate(): boolean {
+		if (!this.sessionFile) return false;
+		try {
+			const head = readFileSync(this.sessionFile, "utf8")
+				.split("\n", 5).join("\n");
+			return head.includes(TEAMMATE_MARKER);
+		} catch {
+			return false;
+		}
 	}
 
 	/** Whether another live agent is parented to this session. Deriving
@@ -575,11 +596,21 @@ export class TeamAgent {
 		return rootA === rootB;
 	}
 
+	/** Whether this session's parent is no longer a live agent. An
+	 *  orphaned teammate keeps running independently instead of staying
+	 *  scoped to a dead parent's team. */
+	async isOrphaned(): Promise<boolean> {
+		if (!this.hasParent()) return false;
+		const agents = await this.snapshot();
+		return !agents.some((a) => a.id === this.parent);
+	}
+
 	/** A teammate may only reach agents in its own team; to reach an
 	 *  outsider it must ask its parent to attach that agent. A root (no
-	 *  parent) is unrestricted. */
+	 *  parent) and an orphaned teammate (its parent gone) are
+	 *  unrestricted, because the orphan runs as its own team root. */
 	async requireSameTeam(target: string): Promise<void> {
-		if (!this.hasParent()) return;
+		if (!this.hasParent() || await this.isOrphaned()) return;
 		if (await this.sameTeam(this.parent, target)) return;
 		throw new Error(
 			`${target} is outside your team; ask your parent ${this.parent} ` +

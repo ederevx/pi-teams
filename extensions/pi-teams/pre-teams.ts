@@ -100,6 +100,9 @@ export class PreTeamsTool {
 			"The parent owns planning, integration, and final validation. " +
 				"A teammate messages only its own team and asks its parent " +
 				"to attach an outsider.",
+			"An orphaned teammate - its parent no longer live - is " +
+				"independent: it acts as its own team root, so it keeps " +
+				"messaging and may become a plain agent with team_detach.",
 			"Call team_gc_reap only when the broker asks or this session " +
 				"is done.",
 		];
@@ -111,6 +114,8 @@ export class PreTeamsTool {
 				"reap themselves when idle.",
 			"Sending and waiting are member-only; the broker enforces it " +
 				"with a per-session send token.",
+			"A teammate's transcript marks it a member even after its " +
+				"launch env is lost; orphaned, it becomes its own team root.",
 			"team_peer links another host over SSH; /team-ls opens the " +
 				"dock and /team-settings edits the piTeams settings.",
 		];

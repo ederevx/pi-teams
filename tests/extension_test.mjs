@@ -604,6 +604,51 @@ test("requireSameTeam is team-scoped for a teammate", async () => {
 	agent.stopHold();
 });
 
+test("requireSameTeam frees an orphaned teammate to reach anyone", async () => {
+	const savedId = process.env.TEAM_ID;
+	const savedParent = process.env.TEAM_PARENT_ID;
+	process.env.TEAM_ID = "fork-orphan";
+	process.env.TEAM_PARENT_ID = "gone-parent";
+	const { runner } = makeRunner((file, args) => {
+		if (args.includes("ls")) {
+			return Promise.resolve({ stdout: JSON.stringify({ agents: [
+				{ id: "outsider", name: "o", role: "main", pid: 3,
+				  parent: null, session: null, online: true },
+			] }), stderr: "", code: 0 });
+		}
+		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+	});
+	const agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	else delete process.env.TEAM_ID;
+	if (savedParent !== undefined) process.env.TEAM_PARENT_ID = savedParent;
+	else delete process.env.TEAM_PARENT_ID;
+	agent.hold("/work");
+	assert.equal(agent.hasParent(), true);
+	assert.equal(await agent.isOrphaned(), true);
+	await assert.doesNotReject(() => agent.requireSameTeam("outsider"));
+	agent.detach();
+	agent.stopHold();
+});
+
+test("a teammate-marked transcript keeps its session a member", async () => {
+	const dir = mkdtempSync(join(scratch, "session-"));
+	const file = join(dir, "sess.jsonl");
+	writeFileSync(file, JSON.stringify({ type: "session" }) + "\n" +
+		JSON.stringify({ type: "message",
+			content: "a teammate spawned by a parent pi session" }) + "\n");
+	const savedId = process.env.TEAM_ID;
+	delete process.env.TEAM_ID;
+	const { runner } = makeRunner(() =>
+		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
+	const agent = new TeamAgent(runner, () => {});
+	if (savedId !== undefined) process.env.TEAM_ID = savedId;
+	else delete process.env.TEAM_ID;
+	agent.rememberSession(file);
+	assert.equal(agent.hasParent(), false);
+	assert.equal(await agent.isTeammate(), true);
+});
+
 test("a gc-reap request steers the agent to call the reap tool", async () => {
 	const delivered = [];
 	const { calls, runner } = makeRunner(() =>
