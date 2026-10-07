@@ -3,17 +3,18 @@ orphan-file sweeps.
 
 One owner for every GC decision the broker makes: the single idle
 window that asks a reachable session to reap itself, and the retention
-sweeps of orphan busy files, teammate transcripts, and aged write
-scratch. Reads the registry and removes only files whose owners are
-gone; a registry entry it deems dead is handed to the broker's drop
-callback because the reaper never mutates the registry. The broker
-composes this from its sweep loop and drop paths.
+sweeps of orphan busy files and aged write scratch. Conversation
+lifetime is not a GC decision made here - the session store owns
+transcripts - so this reaper never ends a conversation. Reads the
+registry and removes only files whose owners are gone; a registry entry
+it deems dead is handed to the broker's drop callback because the
+reaper never mutates the registry. The broker composes this from its
+sweep loop.
 """
 
 import pathlib
-import time
 
-from team_root import TEAMMATE_MARKER
+from session_store import SessionStore
 
 
 class GcReaper:
@@ -26,8 +27,9 @@ class GcReaper:
         self.root = root
         self.registry = registry
         self.lock = lock
-        self.sessions_root = pathlib.Path(sessions_root)
-        self.session_grace = session_grace
+        # The conversation store owns transcript identity and retention;
+        # this reaper only decides when to ask it to sweep.
+        self.sessions = SessionStore(root, sessions_root, session_grace)
         self.busy_grace = busy_grace
         # The one idle window, in seconds; zero disables the policy.
         self.gc_idle = float(gc_idle)
@@ -51,16 +53,6 @@ class GcReaper:
         # Ids already asked to reap; kept until the session shows work
         # or leaves, so one idle episode earns exactly one request.
         self._requested = set()
-        # Teammate transcripts condemned when their registration was
-        # dropped, keyed by resolved path to (owner pid, condemned at).
-        # The unlink is deferred until the owning process is gone:
-        # unlinking while pi was still writing let its next append
-        # recreate the file headerless, leaving a nameless stub (and a
-        # same-session re-registration destroyed a live transcript).
-        self._condemned = {}
-        # A condemned path whose owner never exits is released after
-        # this window so the map cannot grow without bound.
-        self.condemned_ttl = 3600.0
 
     def request_idle_reaps(self, now):
         # The single idle policy: a reachable session with no work
@@ -130,26 +122,21 @@ class GcReaper:
         self._sweep(files, live, now, self.busy_grace, self.root.base)
 
     def gc_orphan_session_files(self, now):
-        # Every teammate is a pi session in /resume; remove
-        # teammate-marked files neither live nor touched within the
-        # grace (a user's own session is never marked, a live fork's
-        # file is skipped regardless of mtime). NOTE: globs the whole
-        # sessions tree each interval by design.
+        # A teammate's transcript is a pi conversation in /resume, so it
+        # is reclaimed only when no live process backs it and no recent
+        # work touched it - never because a registration dropped. The
+        # session store owns that rule. NOTE: globs the whole sessions
+        # tree each interval by design.
         if now - self._last_session_sweep < self.session_sweep_interval:
             return
         self._last_session_sweep = now
-        try:
-            files = list(self.sessions_root.glob("**/*.jsonl"))
-        except OSError:
-            return
         with self.lock:
             live = {
                 str(pathlib.Path(entry["session"]).resolve())
                 for entry in self.registry.values()
                 if entry.get("session")
             }
-        self._sweep(files, live, now, self.session_grace,
-                    self.sessions_root, teammate_marked=True)
+        self.sessions.reclaim(live, now)
 
     def gc_tmp_files(self, now):
         # The root owns the scratch paths; the reaper owns the cadence
@@ -159,9 +146,9 @@ class GcReaper:
         self._last_tmp_sweep = now
         self.root.gc_tmp_files(now, self.busy_grace)
 
-    def _sweep(self, files, live, now, grace, base, teammate_marked=False):
-        # One orphan sweep for every file kind: remove files neither
-        # live-owned nor touched within the grace.
+    def _sweep(self, files, live, now, grace, base):
+        # The orphan sweep for the reaper-owned file kinds: remove files
+        # neither live-owned nor touched within the grace.
         for path in files:
             try:
                 if str(path.resolve()) in live:
@@ -170,60 +157,4 @@ class GcReaper:
                     continue
             except OSError:
                 continue
-            if not teammate_marked or self.is_teammate_session(path):
-                self.root.unlink_under(str(path), base)
-
-    def condemn_session_file(self, entry):
-        # A dropped teammate's transcript is broker-owned and marked for
-        # removal, but not unlinked here: the owning session may still be
-        # writing, and unlinking now let pi's next append recreate the
-        # file without its header. An attached session carries no spawn
-        # marker and must stay in /resume, so it is never condemned.
-        if (entry or {}).get("role") != "fork":
-            return
-        path = (entry or {}).get("session")
-        if not path or not self.is_teammate_session(path):
-            return
-        try:
-            owner_pid = int(entry.get("owner_pid"))
-        except (TypeError, ValueError):
-            owner_pid = None
-        with self.lock:
-            self._condemned[str(pathlib.Path(path).resolve())] = (
-                owner_pid, time.time())
-
-    def gc_condemned_sessions(self, now):
-        # The deferred unlink: remove a condemned transcript once its
-        # owner process is gone, so pi has stopped writing and the file
-        # is final. A record with no owner pid, or one older than the
-        # TTL, is released even if the probe still answers, so a reused
-        # pid can never pin it forever.
-        with self.lock:
-            pending = list(self._condemned.items())
-        for path, (owner_pid, condemned_at) in pending:
-            alive = owner_pid is not None and self.root._pid_alive(owner_pid)
-            if alive and now - condemned_at < self.condemned_ttl:
-                continue
-            self.root.unlink_under(path, self.sessions_root)
-            with self.lock:
-                if self._condemned.get(path) == (owner_pid, condemned_at):
-                    del self._condemned[path]
-
-    def is_teammate_session(self, path):
-        # The marker sits in the first user turn; scan only the head so a
-        # large transcript is never fully read during a sweep. The scan
-        # is byte-based on purpose: the locale text codec differs per
-        # platform (cp1252 on Windows), and a non-ASCII session file
-        # decoded through the wrong codec would raise and kill the whole
-        # sweep thread.
-        marker = TEAMMATE_MARKER.encode("utf-8")
-        try:
-            with open(path, "rb") as fh:
-                for index, line in enumerate(fh):
-                    if marker in line:
-                        return True
-                    if index >= 50:
-                        break
-        except OSError:
-            return False
-        return False
+            self.root.unlink_under(str(path), base)

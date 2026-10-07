@@ -4,6 +4,17 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.42 - 2026-10-07
+
+- Keep a teammate's conversation past its process. A spawned teammate's
+  transcript was condemned when its registration dropped and unlinked
+  once the owner exited, so `/resume` lost the conversation exactly when
+  it became resumable; on a peer host that transcript is the only copy.
+  `SessionStore` now owns transcript identity and retention under the
+  sessions root and `GcReaper` composes it, so nothing deletes a
+  transcript because a registration dropped and a reaped teammate stays
+  in `/resume`. The aged-orphan sweep still bounds the tree per host.
+
 ## v0.4.41 - 2026-10-07
 
 - Label a broker-spawned teammate id with its host, so a peer fork

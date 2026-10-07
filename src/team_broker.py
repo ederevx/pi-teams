@@ -78,8 +78,8 @@ class TeamBroker:
             else self.settings.busy_grace()
         )
         # A teammate-marked pi session file whose agent is not live
-        # and idle past this grace is swept (see gc_reaper); keeps old
-        # forks out of pi's /resume list.
+        # and idle past this grace is reclaimed (see session_store);
+        # conversation lifetime is independent of registration.
         self.sessions_root = pathlib.Path(
             sessions_root or self.settings.sessions_root()
         )
@@ -409,9 +409,9 @@ class TeamBroker:
             self._reply(conn, op="ack")
         elif op == "gc-reap":
             # A session's own agent answered the reaper's request by
-            # calling its reap tool: drop its registration, condemn the
-            # teammate transcript (unlinked once the session exits), then
-            # ack. The tool owns the orderly process shutdown.
+            # calling its reap tool: drop its registration and ack. The
+            # tool owns the orderly process shutdown, and the
+            # conversation it leaves behind stays in /resume.
             target = str(msg.get("id") or agent_id or "")
             if not self._send_gate.check(target, msg.get("send_token")):
                 self._reply(conn, op="error", error="send-token",
@@ -521,8 +521,7 @@ class TeamBroker:
         for old_id, old_entry in stale:
             # A stale duplicate is the same live session re-registered
             # under a fresh id, so its transcript is the live one: drop
-            # only the old busy file, never the session file. The
-            # transcript goes when the session is actually reaped.
+            # only the old busy file, never the session file.
             self.root.remove_busy_file(old_entry)
         self._persist_and_notify()
         self._reply(conn, op="ack", id=agent_id)
@@ -603,7 +602,6 @@ class TeamBroker:
     def _drop_entry(self, agent_id):
         entry, conn = self._release(agent_id)
         self.root.remove_busy_file(entry)
-        self.gc.condemn_session_file(entry)
         self._persist_and_notify()
         return conn
 
@@ -700,7 +698,6 @@ class TeamBroker:
             except OSError:
                 pass
         self.root.remove_busy_file(entry)
-        self.gc.condemn_session_file(entry)
         self._kill_owner(entry or {}, why)
 
     def _terminate(self, agent_id, why):
@@ -783,7 +780,6 @@ class TeamBroker:
         self.gc.gc_orphan_session_files(now)
         self.gc.gc_tmp_files(now)
         self.gc.gc_dead_agents(now)
-        self.gc.gc_condemned_sessions(now)
         self.delivery.prune(now)
         self._maybe_restart(now)
         self.gc.request_idle_reaps(now)

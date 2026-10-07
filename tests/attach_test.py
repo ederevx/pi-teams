@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import unittest
 
 from harness import make_root, wait_endpoint, wait_until
@@ -111,13 +112,15 @@ class AttachCrossHostTests(unittest.TestCase):
         self.assertIn("beta:fork-1", self._ids_b())
         self.assertIn("beta:fork-2", self._ids_b())
 
-    def test_voluntary_reap_keeps_attached_and_removes_spawned_session(self):
-        # Answering the reap drops the registration; a spawned
-        # teammate's marked transcript goes with it, an attached
-        # session's unmarked transcript stays for /resume. The broker
-        # never signals on a voluntary reap: the session shuts itself
-        # down.
+    def test_voluntary_reap_keeps_every_transcript(self):
+        # Answering the reap drops the registration, never a
+        # conversation: a spawned teammate's marked transcript and an
+        # attached session's unmarked transcript both stay for /resume.
+        # The broker never signals on a voluntary reap; the session
+        # shuts itself down. Widened retention grace past the sweep
+        # window so the reap path, not the age sweep, is under test.
         self.setUpPeers(gc_idle=IDLE_ROOMY)
+        self.broker_b.gc.sessions.grace = 60
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import os, time; time.sleep(60)"])
         self.procs.append(dummy)
@@ -138,7 +141,7 @@ class AttachCrossHostTests(unittest.TestCase):
             owner_pid=str(dummy.pid), session=attached, attached=True,
             heartbeat=0.2)
         for agent_id, session, kept in (
-                ("beta:fork-1", spawned, False),
+                ("beta:fork-1", spawned, True),
                 ("beta:fork-2", attached, True)):
             acker = TeamClient(self.root_b)
             acker.id = agent_id
@@ -149,17 +152,17 @@ class AttachCrossHostTests(unittest.TestCase):
                 lambda a=agent_id: a not in self._ids_b()))
         self.assertIsNone(dummy.poll(),
                           "a voluntary reap signalled the owner process")
-        # A spawned teammate's transcript is broker-owned but its unlink
-        # waits for the owning session to stop writing, so pi cannot
-        # recreate it as a nameless stub; an attached session's
-        # transcript is never removed.
+        # A reaped teammate's transcript is a conversation the user can
+        # resume, so it survives the reap and the owner's exit; an
+        # attached session's transcript is never removed either.
         self.assertTrue(os.path.exists(spawned),
-                        "the spawned transcript was unlinked while its "
-                        "owner still ran")
+                        "the spawned transcript was removed on reap")
         self.assertTrue(os.path.exists(attached))
         dummy.kill()
         dummy.wait()
-        self.assertTrue(wait_until(lambda: not os.path.exists(spawned)))
+        time.sleep(1.5)
+        self.assertTrue(os.path.exists(spawned),
+                        "the spawned transcript was erased with its owner")
         self.assertTrue(os.path.exists(attached))
 
     def _ids_b(self):
