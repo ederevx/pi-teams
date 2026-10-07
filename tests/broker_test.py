@@ -1137,6 +1137,81 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root_a, ignore_errors=True)
             shutil.rmtree(root_b, ignore_errors=True)
 
+    def test_peer_relay_reaches_a_bare_legacy_fork(self):
+        # A teammate registered before ids were host-labeled stays bare
+        # on the owning host. The sender must still resolve it to that
+        # peer instead of refusing it as local-undeliverable.
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        try:
+            caller = TeamClient(root_a, heartbeat=None)
+            caller.id = "alpha:caller"
+            caller.send_token = "st-legacy-1"
+            caller.register()
+            fork = TeamClient(root_b, heartbeat=None)
+            fork.id = "fork-legacy-0001"
+            fork.role = "fork"
+            fork.parent = "alpha:caller"
+            fork.send_token = "st-legacy-2"
+            fork.register()
+            self.assertTrue(broker_a.link_peer(
+                "beta", broker_b.root.read_endpoint()))
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            self.assertTrue(wait_until(lambda: any(
+                a.get("id") == "fork-legacy-0001"
+                for a in broker_a._remote.get("beta", []))))
+            reply = caller.send_msg("fork-legacy-0001", "text", "hi")
+            self.assertEqual(reply.get("op"), "ack", reply)
+            reply = caller.terminate("fork-legacy-0001")
+            self.assertEqual(reply.get("op"), "ack", reply)
+            self.assertTrue(wait_until(
+                lambda: "fork-legacy-0001" not in self._ids_via(root_b)))
+            caller.close()
+            fork.close()
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_peer_relay_accepts_own_host_prefix_for_a_bare_fork(self):
+        # The host-prefixed form of a bare registration must deliver on
+        # the owning host: a peer that learned the address with the
+        # prefix still reaches the teammate.
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        try:
+            caller = TeamClient(root_a, heartbeat=None)
+            caller.id = "alpha:caller"
+            caller.send_token = "st-legacy-3"
+            caller.register()
+            fork = TeamClient(root_b, heartbeat=None)
+            fork.id = "fork-legacy-0002"
+            fork.role = "fork"
+            fork.parent = "alpha:caller"
+            fork.send_token = "st-legacy-4"
+            fork.register()
+            self.assertTrue(broker_a.link_peer(
+                "beta", broker_b.root.read_endpoint()))
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            reply = caller.send_msg("beta:fork-legacy-0002", "text", "hi")
+            self.assertEqual(reply.get("op"), "ack", reply)
+            caller.close()
+            fork.close()
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
     def test_peer_down_spares_remote_parent_forks(self):
         root_a = make_root()
         root_b = make_root()
@@ -1649,6 +1724,20 @@ class SpawnOpTests(unittest.TestCase):
             bad.send_token = "wrong"
             self.assertEqual(bad.spawn("x").get("op"), "error")
             self.assertEqual(len(fake.calls), 1)
+        finally:
+            broker.stop()
+
+    def test_broker_spawner_carries_the_host_label(self):
+        # A peer routes by the minted id's prefix, so the broker must
+        # both know its host and hand it to the spawner; losing either
+        # wires a peer-spawned fork bare and unaddressable.
+        root = make_root()
+        broker = self._start(root, "alpha")
+        try:
+            self.assertEqual(broker.spawner.host, "alpha")
+            self.assertTrue(
+                broker.spawner._fork_id("alpha:parent").startswith(
+                    "alpha:fork-"))
         finally:
             broker.stop()
 

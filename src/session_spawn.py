@@ -28,9 +28,13 @@ class TeamSpawner:
     """Launches one teammate through a provider, else self-provisioned."""
 
     def __init__(self, root, environ=None, resolver_factory=None,
-                 self_host=None, confirm_timeout=None):
+                 self_host=None, confirm_timeout=None, host=None):
         self.root = root if isinstance(root, TeamRoot) else TeamRoot(root)
         self.environ = os.environ if environ is None else environ
+        # The host label every minted id is prefixed with: peers route
+        # to this host by the prefix, so a bare fork id is unroutable
+        # from the parent's host (and reads as local on this one).
+        self.host = host or ""
         self.self_host = self_host or SelfSessionHost(
             self.root, environ=self.environ)
         self._resolver_factory = resolver_factory or self._default_resolver
@@ -118,12 +122,13 @@ class TeamSpawner:
     def _default_resolver(self, fallback):
         return SessionHostResolver(fallback=fallback, env=self.environ)
 
-    @staticmethod
-    def _fork_id(parent):
+    def _fork_id(self, parent):
         text = str(parent or "0")
         digits = "".join(ch for ch in text.rsplit("-", 1)[-1]
                          if ch.isdigit())
-        return "fork-%s-%s" % (digits[:8] or "0", secrets.token_hex(4))
+        label = "%s:" % self.host if self.host else ""
+        return "%sfork-%s-%s" % (label, digits[:8] or "0",
+                                 secrets.token_hex(4))
 
     @staticmethod
     def _session(name, task):
