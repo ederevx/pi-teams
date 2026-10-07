@@ -202,7 +202,12 @@ class BrokerProtocolTests(unittest.TestCase):
                 fh.write(json.dumps({"type": "message", "role": "user",
                                      "content": TEAMMATE_MARKER}) + "\n")
 
-    def test_fork_session_removed_on_deregister(self):
+    def test_fork_transcript_survives_deregister(self):
+        # A teammate's transcript is a conversation in /resume, not a
+        # byproduct of its registration: dropping the fork keeps it, so
+        # the user can resume the work afterwards. The retention grace
+        # is widened past the sweep window so only the drop is tested.
+        self.broker.gc.sessions.grace = 60
         path = os.path.join(self.sessions_root, "fork-a.jsonl")
         self._write_session(path, marker=True)
         client = TeamClient(self.root)
@@ -213,45 +218,38 @@ class BrokerProtocolTests(unittest.TestCase):
         client.send_token = "st-1"
         client.register()
         client.deregister()
+        time.sleep(1.5)
         self.assertTrue(
-            wait_until(lambda: not os.path.exists(path)),
-            "the teammate transcript was not removed after the owner left")
+            os.path.exists(path),
+            "the teammate transcript was removed with its registration")
 
-    def test_recreated_teammate_transcript_is_removed_after_owner_exit(self):
-        # pi recreates a transcript deleted mid-turn with its next append;
-        # that race left a nameless, headerless stub in the sessions tree.
-        # The deferred unlink must remove the final file once the owner
-        # process is gone instead of leaving the recreated stub behind.
-        path = os.path.join(self.sessions_root, "recreated-fork.jsonl")
+    def test_reaped_transcript_survives_owner_exit(self):
+        # Reaping ends the process, never the conversation: after the
+        # owner exits the transcript stays for /resume, and only the
+        # aged-orphan sweep may reclaim it. The retention grace is
+        # widened past the sweep window so the drop path is what is
+        # under test.
+        self.broker.gc.sessions.grace = 60
+        path = os.path.join(self.sessions_root, "reaped-fork.jsonl")
         self._write_session(path, marker=True)
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"])
         self.addCleanup(dummy.wait)
         client = TeamClient(self.root)
-        client.id = "beta:recreated"
+        client.id = "beta:reaped"
         client.role = "fork"
         client.parent = "checker"
         client.session = path
         client.owner_pid = str(dummy.pid)
-        client.send_token = "st-rec"
+        client.send_token = "st-reaped"
         client.register()
         client.deregister()
-        # The former eager unlink removed the file mid-turn and pi wrote
-        # the tail back as a headerless stub. Recreate that stub and
-        # check the deferred record still owns the path.
-        os.unlink(path)
-        with open(path, "w") as fh:
-            fh.write(json.dumps({"type": "message", "message": {
-                "role": "toolResult", "content": "tail"}}) + "\n")
+        dummy.kill()
+        dummy.wait()
         time.sleep(1.5)
         self.assertTrue(
             os.path.exists(path),
-            "a transcript whose owner still ran was unlinked")
-        dummy.kill()
-        dummy.wait()
-        self.assertTrue(
-            wait_until(lambda: not os.path.exists(path), timeout=6),
-            "the recreated transcript was never removed")
+            "a reaped teammate's transcript was erased with its process")
 
     def test_main_session_file_is_not_removed(self):
         path = os.path.join(self.sessions_root, "main-a.jsonl")
