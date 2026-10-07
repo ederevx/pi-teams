@@ -1727,6 +1727,20 @@ class SpawnOpTests(unittest.TestCase):
         finally:
             broker.stop()
 
+    def test_broker_spawner_carries_the_host_label(self):
+        # A peer routes by the minted id's prefix, so the broker must
+        # both know its host and hand it to the spawner; losing either
+        # wires a peer-spawned fork bare and unaddressable.
+        root = make_root()
+        broker = self._start(root, "alpha")
+        try:
+            self.assertEqual(broker.spawner.host, "alpha")
+            self.assertTrue(
+                broker.spawner._fork_id("alpha:parent").startswith(
+                    "alpha:fork-"))
+        finally:
+            broker.stop()
+
     def test_a_spawn_that_hosted_nobody_is_an_error(self):
         # The broker must report the failure, never ack a phantom
         # teammate: the client would otherwise wait for a report that
