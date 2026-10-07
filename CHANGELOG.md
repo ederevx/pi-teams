@@ -4,6 +4,16 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.41 - 2026-10-07
+
+- Label a broker-spawned teammate id with its host, so a peer fork
+  registers `host:fork-...` like every other id. A bare peer id read as
+  local on its own host and as an unknown prefixed key on the peer, so
+  sends were refused in both directions and `terminate` acked as a local
+  no-op while the stale fork kept listing online. Routing also falls
+  back to a bare legacy peer id, so already-spawned forks stay reachable
+  and terminable.
+
 ## v0.4.40 - 2026-10-06
 
 - Stop a peer spawn from inheriting the requester's `cwd`. A cwd names
