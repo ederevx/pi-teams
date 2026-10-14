@@ -511,14 +511,16 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	// -- agent-facing teammate termination ---------------------------------
-	// Ends a teammate like the broker GC would, session file included.
+	// Ends a teammate's process and registration; its conversation is
+	// untouched, so it stays resumable in pi's picker.
 	pi.registerTool({
 		name: "team_kill",
 		label: "terminate a teammate",
 		description:
 			"Terminate a pi-teams agent by id, local or peer-hosted " +
 			"(routed through the link): its process is signalled and " +
-			"its session file removed. Requires team membership.",
+			"its registration dropped; the conversation stays. Requires " +
+			"team membership.",
 		parameters: Type.Object({
 			target: Type.String({
 				description: "Agent id to terminate",

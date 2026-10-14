@@ -4,36 +4,32 @@ orphan-file sweeps.
 One owner for every GC decision the broker makes: the single idle
 window that asks a reachable session to reap itself, and the retention
 sweeps of orphan busy files and aged write scratch. Conversation
-lifetime is not a GC decision made here - the session store owns
-transcripts - so this reaper never ends a conversation. Reads the
-registry and removes only files whose owners are gone; a registry entry
-it deems dead is handed to the broker's drop callback because the
+lifetime is not a GC decision made here at all - the pi-daemon owns
+pi's session store - so this reaper never touches a transcript. Reads
+the registry and removes only files whose owners are gone; a registry
+entry it deems dead is handed to the broker's drop callback because the
 reaper never mutates the registry. The broker composes this from its
 sweep loop.
 """
 
 import pathlib
 
-from session_store import SessionStore
-
 
 class GcReaper:
     """Owns the idle self-reap request and the orphan-file sweeps under
     a broker's root."""
 
-    def __init__(self, root, registry, lock, sessions_root, session_grace,
-                 busy_grace, gc_idle, session_sweep_interval,
+    def __init__(self, root, registry, lock, busy_grace, gc_idle,
                  request_reap, drop_agent):
         self.root = root
         self.registry = registry
         self.lock = lock
-        # The conversation store owns transcript identity and retention;
-        # this reaper only decides when to ask it to sweep.
-        self.sessions = SessionStore(root, sessions_root, session_grace)
+        # Conversation lifetime belongs to pi-daemon, which owns pi's
+        # session store and its GC; this reaper never touches a
+        # transcript, only the broker's own files.
         self.busy_grace = busy_grace
         # The one idle window, in seconds; zero disables the policy.
         self.gc_idle = float(gc_idle)
-        self.session_sweep_interval = float(session_sweep_interval)
         # write_atomic leaves a .tmp.<pid> scratch only when every
         # rename retry failed; sweep those aged leftovers on this
         # cadence so one crashed write cannot litter the root.
@@ -48,7 +44,6 @@ class GcReaper:
         # A registration's pid record can lag a moment; never judge an
         # entry younger than this as dead-owner.
         self.liveness_grace = 5.0
-        self._last_session_sweep = 0.0
         self._last_tmp_sweep = 0.0
         # Ids already asked to reap; kept until the session shows work
         # or leaves, so one idle episode earns exactly one request.
@@ -120,23 +115,6 @@ class GcReaper:
                 if entry.get("busy_file")
             }
         self._sweep(files, live, now, self.busy_grace, self.root.base)
-
-    def gc_orphan_session_files(self, now):
-        # A teammate's transcript is a pi conversation in /resume, so it
-        # is reclaimed only when no live process backs it and no recent
-        # work touched it - never because a registration dropped. The
-        # session store owns that rule. NOTE: globs the whole sessions
-        # tree each interval by design.
-        if now - self._last_session_sweep < self.session_sweep_interval:
-            return
-        self._last_session_sweep = now
-        with self.lock:
-            live = {
-                str(pathlib.Path(entry["session"]).resolve())
-                for entry in self.registry.values()
-                if entry.get("session")
-            }
-        self.sessions.reclaim(live, now)
 
     def gc_tmp_files(self, now):
         # The root owns the scratch paths; the reaper owns the cadence

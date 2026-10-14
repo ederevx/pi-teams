@@ -173,23 +173,6 @@ export class TeamSettingsPresenter {
 				value: String(s.peerGraceSeconds()),
 			},
 			{
-				id: "sessionGraceHours", label: "Session grace (h)",
-				kind: "number", key: "sessionGraceHours",
-				env: ["PI_TEAMS_SESSION_GRACE_HOURS"],
-				description: "Age in hours past which a dead teammate's " +
-					"transcript is deleted.",
-				value: String(s.sessionGraceHours()),
-			},
-			{
-				id: "sessionSweepIntervalSeconds",
-				label: "Session sweep interval", kind: "number",
-				key: "sessionSweepIntervalSeconds",
-				env: ["PI_TEAMS_SESSION_SWEEP_INTERVAL"],
-				description: "Seconds between disk sweeps; must stay " +
-					"positive.",
-				value: String(s.sessionSweepIntervalSeconds()),
-			},
-			{
 				id: "peerSetup", label: "Peer setup command", kind: "text",
 				key: "peerSetup", env: ["PI_TEAMS_PEER_SETUP"],
 				description: "Command a user runs once to set up SSH for a " +

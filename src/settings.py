@@ -141,16 +141,6 @@ class PackageSettings:
         return self.resolve(
             "PI_TEAMS_PEER_GRACE", "peerGraceSeconds", 15, "number")
 
-    def session_grace(self):
-        return self.resolve(
-            "PI_TEAMS_SESSION_GRACE_HOURS", "sessionGraceHours", 72,
-            "number") * 3600.0
-
-    def session_sweep_interval(self):
-        return self.resolve(
-            "PI_TEAMS_SESSION_SWEEP_INTERVAL",
-            "sessionSweepIntervalSeconds", 3600, "number")
-
     def ssh(self):
         return self.resolve("PI_TEAMS_SSH", "ssh", "ssh", "text")
 
