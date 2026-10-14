@@ -41,12 +41,9 @@ class AttachCrossHostTests(unittest.TestCase):
                           ignore_errors=True)
 
     def _start_broker(self, root, host, gc_idle=IDLE_ROOMY):
-        sessions = os.path.join(root, "sessions")
-        os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             sweep_interval=0.1, host=host,
-                            gc_idle=gc_idle,
-                            sessions_root=sessions, session_grace=0.3)
+                            gc_idle=gc_idle)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
         wait_endpoint(root)
@@ -117,10 +114,8 @@ class AttachCrossHostTests(unittest.TestCase):
         # conversation: a spawned teammate's marked transcript and an
         # attached session's unmarked transcript both stay for /resume.
         # The broker never signals on a voluntary reap; the session
-        # shuts itself down. Widened retention grace past the sweep
-        # window so the reap path, not the age sweep, is under test.
+        # shuts itself down.
         self.setUpPeers(gc_idle=IDLE_ROOMY)
-        self.broker_b.gc.sessions.grace = 60
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import os, time; time.sleep(60)"])
         self.procs.append(dummy)

@@ -51,8 +51,8 @@ class TeamBroker:
     """Registry + relay for connected agents on one loopback endpoint."""
 
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
-                 gc_idle=None, busy_grace=None, sessions_root=None,
-                 session_grace=None, restart_grace=None, peer_grace=None,
+                 gc_idle=None, busy_grace=None,
+                 restart_grace=None, peer_grace=None,
                  host=None, settings=None, tunnel_factory=None):
         # Settings own every configurable flag; an injected value (the
         # tests) or an explicit environment variable beats them.
@@ -77,18 +77,9 @@ class TeamBroker:
             busy_grace if busy_grace is not None
             else self.settings.busy_grace()
         )
-        # A teammate-marked pi session file whose agent is not live
-        # and idle past this grace is reclaimed (see session_store);
-        # conversation lifetime is independent of registration.
-        self.sessions_root = pathlib.Path(
-            sessions_root or self.settings.sessions_root()
-        )
-        self.session_grace = float(
-            session_grace if session_grace is not None
-            else self.settings.session_grace()
-        )
-        self.session_sweep_interval = float(
-            self.settings.session_sweep_interval())
+        # Conversation lifetime is pi-daemon's to own: a teammate's
+        # transcript lives in pi's session store, which the daemon
+        # sweeps. The broker holds no path or grace for it.
         self.token = secrets.token_hex(16)
         # Stamp the running source (the installed file's hash) so a
         # reloading extension can restart an older broker.
@@ -135,10 +126,8 @@ class TeamBroker:
             self.root, self._registry, self.idle_timeout)
         self._lock = threading.RLock()
         self.gc = GcReaper(
-            self.root, self._registry, self._lock,
-            self.sessions_root, self.session_grace, self.busy_grace,
-            self.gc_idle, self.session_sweep_interval,
-            self._request_reap, self._drop_dead_agent)
+            self.root, self._registry, self._lock, self.busy_grace,
+            self.gc_idle, self._request_reap, self._drop_dead_agent)
         self._running = False
         self._server = None
 
@@ -777,7 +766,6 @@ class TeamBroker:
         self._expire_peer_relays()
         self._reap_expired_peers(now)
         self.gc.gc_orphan_busy_files(now)
-        self.gc.gc_orphan_session_files(now)
         self.gc.gc_tmp_files(now)
         self.gc.gc_dead_agents(now)
         self.delivery.prune(now)

@@ -109,12 +109,10 @@ itself, never a signal, and a main agent is never asked to reap.
 - **Busy-file GC** clears stale `.busy` state: a file whose agent is
   unregistered and untouched past `PI_TEAMS_BUSY_GRACE_HOURS`
   (default 2h) is removed; registered agents keep theirs.
-- **Session GC** reclaims only abandoned teammate transcripts: a
-  teammate-marked file no live process backs and whose mtime is past
-  `PI_TEAMS_SESSION_GRACE_HOURS` (default 72h;
-  `PI_TEAMS_SESSIONS_ROOT` overrides the root). A registration drop
-  never deletes a conversation. Deletions are guarded to the sessions
-  root.
+- **Session GC** is pi-daemon's: a teammate's transcript lives in pi's
+  session store, so the broker never deletes a transcript however old
+  or abandoned. Conversation lifetime stays with the daemon that owns
+  the store, and a registration drop never touches the file.
 - **Self-restart**: the broker stamps its endpoint with a source hash
   and exits once idle for `PI_TEAMS_RESTART_GRACE` (default 60s) after
   the on-disk source changes, never while agents are live; the next
@@ -184,10 +182,9 @@ agent-directory settings file, `<agent-dir>/settings.json`, where
 
 An injected constructor argument (used by tests) beats all three.
 `stallSeconds` and `gcIdleHours` treat `0` as a real value, not
-"unset": 0 disables the stall nudge and the idle reap entirely, while
-`sessionSweepIntervalSeconds` must stay positive (it drives the whole
-disk sweep). The GC reaper windows are configured in hours (`Hours`
-keys); the broker converts them to seconds internally.
+"unset": 0 disables the stall nudge and the idle reap entirely. The GC
+reaper windows are configured in hours (`Hours` keys); the broker
+converts them to seconds internally.
 
 | Key | Default | Environment override |
 | --- | --- | --- |
@@ -199,8 +196,6 @@ keys); the broker converts them to seconds internally.
 | `busyGraceHours` | `2` | `PI_TEAMS_BUSY_GRACE_HOURS` |
 | `restartGraceSeconds` | `60` | `PI_TEAMS_RESTART_GRACE` |
 | `peerGraceSeconds` | `15` | `PI_TEAMS_PEER_GRACE` |
-| `sessionGraceHours` | `72` | `PI_TEAMS_SESSION_GRACE_HOURS` |
-| `sessionSweepIntervalSeconds` | `3600` | `PI_TEAMS_SESSION_SWEEP_INTERVAL` |
 | `spawnWindowMs` | `15000` | `PI_TEAMS_SPAWN_WINDOW` |
 | `waitSeconds` | `300` | `PI_TEAMS_WAIT` |
 | `stallSeconds` | `90` | `PI_TEAMS_STALL` |

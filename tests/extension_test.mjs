@@ -1380,8 +1380,6 @@ test("settings fall back to built-in defaults without a file", () => {
 	assert.equal(s.busyGraceHours(), 2);
 	assert.equal(s.restartGraceSeconds(), 60);
 	assert.equal(s.peerGraceSeconds(), 15);
-	assert.equal(s.sessionGraceHours(), 72);
-	assert.equal(s.sessionSweepIntervalSeconds(), 3600);
 	assert.equal(s.spawnWindowMs(), 15000);
 	assert.equal(s.waitSeconds(), 300);
 	assert.equal(s.stallSeconds(), 90);
@@ -1463,8 +1461,7 @@ test("sessionsRoot keeps the legacy PI_SESSIONS_ROOT fallback", () => {
 const ROW_ORDER = "spawnWindowMs,waitSeconds,stallSeconds,binDir,ssh," +
 	"remoteState,sessionsRoot,host,stateDir,gcIdleHours," +
 	"busyGraceHours,restartGraceSeconds," +
-	"peerGraceSeconds,sessionGraceHours," +
-	"sessionSweepIntervalSeconds,peerSetup,restoreDefaults";
+	"peerGraceSeconds,peerSetup,restoreDefaults";
 
 const VIEW_THEME = {
 	fg: (_color, text) => text,
@@ -1498,11 +1495,11 @@ test("team-settings rows keep the piTeams order and effective values", () => {
 	const presenter = new TeamSettingsPresenter(settings, new SettingsStore(), {});
 	const rows = presenter.rows();
 	assert.equal(rows.map((row) => row.id).join(","), ROW_ORDER);
-	assert.equal(rows.length, 17);
+	assert.equal(rows.length, 15);
 	assert.equal(rows[1].value, "42");
 	assert.equal(rows[4].value, "custom-ssh");
 	assert.equal(rows[1].title, "Wait timeout");
-	assert.equal(rows[15].value, "");
+	assert.equal(rows[13].value, "");
 	for (const row of rows) {
 		assert.equal(typeof row.submenu, "function");
 	}

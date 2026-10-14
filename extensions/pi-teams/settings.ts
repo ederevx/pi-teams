@@ -163,18 +163,6 @@ export class PackageSettings {
 			"number") as number;
 	}
 
-	sessionGraceHours(): number {
-		return this.resolve(
-			"PI_TEAMS_SESSION_GRACE_HOURS", "sessionGraceHours", 72,
-			"number") as number;
-	}
-
-	sessionSweepIntervalSeconds(): number {
-		return this.resolve(
-			"PI_TEAMS_SESSION_SWEEP_INTERVAL", "sessionSweepIntervalSeconds",
-			3600, "number") as number;
-	}
-
 	/** A zero or negative answer window is no window at all, so the
 	 *  default stands in (the call site needs a positive timeout). */
 	spawnWindowMs(): number {
