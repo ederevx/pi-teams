@@ -49,8 +49,6 @@ class DefaultTests(SettingsCase):
         self.assertEqual(s.busy_grace(), 2 * 3600.0)
         self.assertEqual(s.restart_grace(), 60)
         self.assertEqual(s.peer_grace(), 15)
-        self.assertEqual(s.session_grace(), 72 * 3600.0)
-        self.assertEqual(s.session_sweep_interval(), 3600)
         self.assertEqual(s.ssh(), "ssh")
         self.assertIsNone(s.remote_state())
         self.assertIsNone(s.peer_setup())
@@ -71,8 +69,6 @@ class SettingsValueTests(SettingsCase):
             "busyGraceHours": 22,
             "restartGraceSeconds": 44,
             "peerGraceSeconds": 55,
-            "sessionGraceHours": 66,
-            "sessionSweepIntervalSeconds": 77,
             "spawnWindowMs": 88,
             "waitSeconds": 99,
             "stallSeconds": 101,
@@ -88,8 +84,6 @@ class SettingsValueTests(SettingsCase):
         self.assertEqual(s.busy_grace(), 22 * 3600.0)
         self.assertEqual(s.restart_grace(), 44)
         self.assertEqual(s.peer_grace(), 55)
-        self.assertEqual(s.session_grace(), 66 * 3600.0)
-        self.assertEqual(s.session_sweep_interval(), 77)
         self.assertEqual(s.ssh(), "file-ssh")
         self.assertEqual(s.remote_state(), "/file/remote")
         self.assertEqual(s.peer_setup(), "/file/setup")
@@ -176,8 +170,6 @@ class BrokerWiringTests(SettingsCase):
             "busyGraceHours": 22,
             "restartGraceSeconds": 44,
             "peerGraceSeconds": 55,
-            "sessionGraceHours": 66,
-            "sessionSweepIntervalSeconds": 77,
         }})
         root = str(self.agent / "root")
         broker = TeamBroker(root=root, settings=self.settings())
@@ -186,9 +178,6 @@ class BrokerWiringTests(SettingsCase):
         self.assertEqual(broker.busy_grace, 22 * 3600.0)
         self.assertEqual(broker.restart_grace, 44)
         self.assertEqual(broker.peer_grace, 55)
-        self.assertEqual(broker.session_grace, 66 * 3600.0)
-        self.assertEqual(broker.gc.session_sweep_interval, 77)
-        self.assertEqual(broker.sessions_root, pathlib.Path("/set/sessions"))
 
     def test_injected_values_beat_env_and_settings(self):
         self.write_settings({"piTeams": {"gcIdleHours": 11}})

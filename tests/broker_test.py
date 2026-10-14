@@ -145,10 +145,7 @@ class BrokerProtocolTests(unittest.TestCase):
         self.sessions_root = os.path.join(self.root, "sessions")
         os.makedirs(self.sessions_root, exist_ok=True)
         self.broker = TeamBroker(self.root, idle_timeout=IDLE_ROOMY,
-                                 sweep_interval=0.2, busy_grace=0.3,
-                                 sessions_root=self.sessions_root,
-                                 session_grace=0.3)
-        self.broker.gc.session_sweep_interval = 0.2
+                                 sweep_interval=0.2, busy_grace=0.3)
         self.thread = threading.Thread(target=self.broker.run, daemon=True)
         self.thread.start()
         wait_endpoint(self.root)
@@ -205,9 +202,7 @@ class BrokerProtocolTests(unittest.TestCase):
     def test_fork_transcript_survives_deregister(self):
         # A teammate's transcript is a conversation in /resume, not a
         # byproduct of its registration: dropping the fork keeps it, so
-        # the user can resume the work afterwards. The retention grace
-        # is widened past the sweep window so only the drop is tested.
-        self.broker.gc.sessions.grace = 60
+        # the user can resume the work afterwards.
         path = os.path.join(self.sessions_root, "fork-a.jsonl")
         self._write_session(path, marker=True)
         client = TeamClient(self.root)
@@ -224,12 +219,8 @@ class BrokerProtocolTests(unittest.TestCase):
             "the teammate transcript was removed with its registration")
 
     def test_reaped_transcript_survives_owner_exit(self):
-        # Reaping ends the process, never the conversation: after the
-        # owner exits the transcript stays for /resume, and only the
-        # aged-orphan sweep may reclaim it. The retention grace is
-        # widened past the sweep window so the drop path is what is
-        # under test.
-        self.broker.gc.sessions.grace = 60
+        # Reaping ends the process, never the conversation: the
+        # transcript stays for /resume after the owner exits.
         path = os.path.join(self.sessions_root, "reaped-fork.jsonl")
         self._write_session(path, marker=True)
         dummy = subprocess.Popen(
@@ -280,15 +271,16 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertTrue(os.path.exists(path),
                         "an attached session's transcript must not be removed")
 
-    def test_orphan_teammate_session_is_swept(self):
+    def test_aged_teammate_session_is_never_swept(self):
+        # pi-daemon owns pi's session store; the broker never removes a
+        # transcript, however old or abandoned.
         path = os.path.join(self.sessions_root, "orphan.jsonl")
         self._write_session(path, marker=True)
         old = time.time() - 3600
         os.utime(path, (old, old))
-        self.assertTrue(
-            wait_until(lambda: not os.path.exists(path)),
-            "old teammate session file was not swept",
-        )
+        time.sleep(0.6)
+        self.assertTrue(os.path.exists(path),
+                        "an aged teammate session file was swept")
 
     def test_non_teammate_session_is_kept(self):
         path = os.path.join(self.sessions_root, "plain.jsonl")
@@ -1013,10 +1005,10 @@ class BrokerProtocolTests(unittest.TestCase):
             thread.join(timeout=3)
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_gc_reap_removes_teammate_session_and_keeps_attached(self):
-        # The voluntary reap drops the registration; a spawned
-        # teammate's marked transcript goes with it, an attached
-        # session's unmarked transcript stays for /resume.
+    def test_gc_reap_keeps_every_transcript(self):
+        # The voluntary reap drops the registration; both a spawned
+        # teammate's marked transcript and an attached session's
+        # unmarked transcript stay for /resume.
         spawned = os.path.join(self.sessions_root, "reaped-fork.jsonl")
         self._write_session(spawned, marker=True)
         attached = os.path.join(self.sessions_root, "reaped-attached.jsonl")
@@ -1031,30 +1023,22 @@ class BrokerProtocolTests(unittest.TestCase):
             client.session = session
             client.send_token = token
             self.assertEqual(client.register().get("op"), "ack")
-        for agent_id, session, token, kept in (
-                ("beta:reap-fork", spawned, "st-rf", False),
-                ("beta:reap-attached", attached, "st-ra", True)):
+        for agent_id, session, token in (
+                ("beta:reap-fork", spawned, "st-rf"),
+                ("beta:reap-attached", attached, "st-ra")):
             acker = TeamClient(self.root)
             acker.id = agent_id
             acker.send_token = token
             self.assertEqual(acker.gc_reap().get("op"), "ack")
             acker.close()
-            if kept:
-                self.assertTrue(os.path.exists(session), session)
-            else:
-                self.assertTrue(
-                    wait_until(lambda s=session: not os.path.exists(s)),
-                    session)
+            self.assertTrue(os.path.exists(session), session)
             self.assertTrue(wait_until(
                 lambda a=agent_id: a not in self._ids_via(self.root)))
 
     def _start_broker(self, root, host, tunnel_factory=None):
-        sessions = os.path.join(root, "sessions")
-        os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
                             sweep_interval=0.1, host=host,
-                            peer_grace=0.3, sessions_root=sessions,
-                            session_grace=0.3,
+                            peer_grace=0.3,
                             tunnel_factory=tunnel_factory)
         thread = threading.Thread(target=broker.run, daemon=True)
         thread.start()
@@ -1690,11 +1674,8 @@ class FailingSpawner:
 
 class SpawnOpTests(unittest.TestCase):
     def _start(self, root, host):
-        sessions = os.path.join(root, "sessions")
-        os.makedirs(sessions, exist_ok=True)
         broker = TeamBroker(root, idle_timeout=IDLE_ROOMY,
-                            sweep_interval=0.1, host=host,
-                            sessions_root=sessions)
+                            sweep_interval=0.1, host=host)
         threading.Thread(target=broker.run, daemon=True).start()
         wait_endpoint(root)
         return broker
