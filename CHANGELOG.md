@@ -4,6 +4,18 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.44 - 2026-10-14
+
+- Stop deleting teammate transcripts. The broker's session-store sweep
+  reclaimed a teammate-marked pi conversation once no live process
+  backed it and it aged past `sessionGraceHours`; that file is pi's
+  conversation, and pi-daemon owns pi's session store and its GC, so a
+  second daemon reaching into it deleted a conversation the user could
+  still resume. `SessionStore` and `GcReaper.gc_orphan_session_files`
+  are gone, the `sessionGraceHours`/`sessionSweepIntervalSeconds`
+  settings are removed, and `team_kill` ends the process and
+  registration while the conversation stays resumable.
+
 ## v0.4.43 - 2026-10-07
 
 - Let an orphaned teammate become independent. Membership now also
