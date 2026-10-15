@@ -4,6 +4,20 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.46 - 2026-10-15
+
+- Stream each teammate's live activity while `team_wait` blocks: the
+  tool window shows one section per local teammate - its state
+  (`live`, `quiet 45s`, `starting`) and the newest lines of its
+  transcript - read incrementally on the wait's own tick, bounded, and
+  released with it. A peer-hosted teammate shows `peer: no live view`,
+  since its transcript is not readable here. The model still receives
+  the report, and `team_peek` reads a transcript in full.
+- Move transcript entry parsing and rendering into `ChatEntryRenderer`,
+  shared by `team_peek` and the live stream, and resolve every waited
+  id from one broker snapshot (`TeamAgent.transcriptsOf`) instead of
+  one lookup per id.
+
 ## v0.4.45 - 2026-10-15
 
 - Replace `team_tail` with a target-aware `team_peek`. The old tool
