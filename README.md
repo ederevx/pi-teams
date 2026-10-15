@@ -78,6 +78,15 @@ natively, without a shared filesystem as the channel.
   message.
 - While waiting, the agent publishes `waiting`, which exempts a fork
   from idle GC.
+- While it blocks, the tool window streams one live section per
+  teammate whose transcript is readable on this host: its state
+  (`live`, `quiet 45s`, `starting`) and the newest lines of what it
+  is doing. A parent can then see which teammate is working, quiet, or
+  unreachable instead of a single elapsed line. A peer-hosted teammate
+  has no transcript here and shows `peer: no live view`.
+- The live section is a view, never the answer: the model still gets
+  the report, or the yield/timeout note, and `team_peek` reads any
+  transcript in full.
 - A teammate silent past the stall bound (`stall` parameter,
   `PI_TEAMS_STALL`, default 90s; 0 disables) looks hung: the wait
   itself sends it a continue-or-report steer once per teammate. A
