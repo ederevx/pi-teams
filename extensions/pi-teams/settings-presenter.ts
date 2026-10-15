@@ -126,8 +126,8 @@ export class TeamSettingsPresenter {
 				id: "sessionsRoot", label: "Sessions root", kind: "path",
 				key: "sessionsRoot",
 				env: ["PI_TEAMS_SESSIONS_ROOT", "PI_SESSIONS_ROOT"],
-				description: "Root of pi session transcripts for team_tail " +
-					"and session GC.",
+				description: "Root of pi session transcripts and " +
+					"session GC.",
 				value: s.sessionsRoot(),
 			},
 			{

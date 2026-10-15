@@ -11,7 +11,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { TeamAgent } from "./pi-teams/agent.ts";
-import { ChatTail } from "./pi-teams/chat-tail.ts";
+import { ChatPeek, type PeekKind } from "./pi-teams/chat-peek.ts";
 import { PreTeamsTool } from "./pi-teams/pre-teams.ts";
 import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
@@ -21,7 +21,6 @@ import {
 	logTeamMessage,
 	registerLogRenderer,
 } from "./pi-teams/messages.ts";
-import { sessionsRoot } from "./pi-teams/paths.ts";
 import { ProcessRunner } from "./pi-teams/process-runner.ts";
 import { TeamSettingsPresenter } from "./pi-teams/settings-presenter.ts";
 import {
@@ -35,7 +34,7 @@ import {
 // Re-exported so tests and embedders reach the seam classes from the
 // entry alone.
 export { TeamAgent } from "./pi-teams/agent.ts";
-export { ChatTail } from "./pi-teams/chat-tail.ts";
+export { ChatPeek } from "./pi-teams/chat-peek.ts";
 export { ProcessRunner } from "./pi-teams/process-runner.ts";
 export {
 	WindowlessPython,
@@ -82,7 +81,9 @@ export default async function (pi: ExtensionAPI) {
 			"self-contained task in its own session. Call pre_teams for " +
 			"the team tool catalog, conventions, and feature summary.",
 		promptGuidelines: [
-			"Delegate bounded tasks: pass one self-contained task per " +
+			"Before delegating, check team_ls and team_peek for a live " +
+				"session that already holds the task's context and prefer " +
+				"team_attach; otherwise pass one self-contained task per " +
 				"team_spawn, then call team_wait to block for the report " +
 				"or keep working and let it arrive as a message.",
 		],
@@ -326,6 +327,10 @@ export default async function (pi: ExtensionAPI) {
 			const peers = await app.peers();
 			const lines = agents.map((a) =>
 				`${a.id}\t${a.role}\t${a.online ? "online" : "offline"}` +
+				(a.id === app.id ? "\t(you)" : "") +
+				(a.name && a.name !== a.id ? `\t"${a.name}"` : "") +
+				(a.parent ? `\tteammate of ${a.parent}` : "") +
+				(a.cwd ? `\tcwd ${a.cwd}` : "") +
 				(a.remote ? "\tpeer" : ""));
 			const remote = agents.filter((a) => a.remote);
 			const quietPeers = peers.filter(
@@ -348,25 +353,75 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "team_tail",
-		label: "tail chat history",
+		name: "team_peek",
+		label: "peek at a transcript",
 		description:
-			"Tail the pi chat history: the last lines of the newest " +
-			"session transcript (.jsonl), to reconstruct context after " +
-			"a compacted, resumed, or aborted turn.",
+			"Read a local pi-teams agent's chat transcript by id " +
+			"(default this session): head or tail entries, paged, or " +
+			"grep matches with context, as role-labelled text. Prints " +
+			"the .jsonl path; #N is its line for the read tool. Call " +
+			"pre_teams for the catalog and conventions.",
 		parameters: Type.Object({
-			lines: Type.Optional(Type.Number({
-				description: "Trailing lines to return (default 60, max 500)",
+			target: Type.Optional(Type.String({
+				description: "Agent id from team_ls; omit for this session",
+			})),
+			from: Type.Optional(Type.Union([
+				Type.Literal("tail"), Type.Literal("head"),
+			], { description: "Read from the end (default) or the start" })),
+			limit: Type.Optional(Type.Number({
+				description: "Entries, or grep matches, to return " +
+					"(default 20, max 100)",
+			})),
+			offset: Type.Optional(Type.Number({
+				description: "Entries or matches to skip from that end, " +
+					"for paging (default 0)",
+			})),
+			grep: Type.Optional(Type.String({
+				description: "Case-insensitive regex (literal if " +
+					"invalid); returns matching entries only",
+			})),
+			context: Type.Optional(Type.Number({
+				description: "Entries around each grep match " +
+					"(default 0, max 5)",
+			})),
+			include: Type.Optional(Type.Array(Type.Union(
+				ChatPeek.KINDS.map((kind) => Type.Literal(kind))), {
+				description: "Entry kinds (default user, assistant, " +
+					"summary, custom); tool adds results, thinking adds " +
+					"reasoning",
+			})),
+			maxChars: Type.Optional(Type.Number({
+				description: "Per-entry character cap " +
+					"(default 1500, max 8000)",
 			})),
 		}),
+		annotations: { readOnlyHint: true },
 		async execute(_toolCallId, params) {
-			const tailer = new ChatTail(sessionsRoot);
-			const lines = Math.max(1, Math.min(500, params.lines ?? 60));
+			const source = await app.transcriptOf(params.target);
+			const bound = (value: number | undefined, fallback: number,
+				low: number, high: number): number =>
+				Math.max(low, Math.min(high, Math.floor(
+					Number.isFinite(value) ? value as number : fallback)));
+			const query = {
+				from: params.from === "head"
+					? "head" as const : "tail" as const,
+				limit: bound(params.limit, 20, 1, 100),
+				offset: bound(params.offset, 0, 0, 100_000),
+				grep: params.grep ? ChatPeek.pattern(params.grep) : null,
+				context: params.grep ? bound(params.context, 0, 0, 5) : 0,
+				include: new Set<PeekKind>(params.include?.length
+					? params.include : ChatPeek.DEFAULT_KINDS),
+				maxChars: bound(params.maxChars, 1500, 200, 8000),
+			};
+			const peek = new ChatPeek(source.path);
+			const page = await peek.read(query);
 			return {
-				content: [{
-					type: "text",
-					text: tailer.tail(lines),
-				}],
+				content: [{ type: "text",
+					text: peek.format(page, query, source.id) }],
+				details: { target: source.id, path: source.path,
+					from: query.from, offset: query.offset,
+					limit: query.limit, units: page.units,
+					more: page.more, scanned: page.scanned },
 			};
 		},
 	});

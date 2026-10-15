@@ -15,7 +15,7 @@ export const stateRoot = settings.stateDir();
 export const binDir = settings.binDir();
 
 /** Where pi writes session transcripts (.jsonl), one directory per
- *  working directory; team_tail reads the newest. */
+ *  working directory. */
 export const sessionsRoot = settings.sessionsRoot();
 
 /** The bundled broker/client (sibling src/ with teamd.py, team.py)

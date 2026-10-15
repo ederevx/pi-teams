@@ -45,12 +45,15 @@ export class PreTeamsTool {
 		this.tools = [
 			{
 				name: "team_spawn",
-				purpose: "spawn a persistent, resumable teammate to do " +
-					"one task.",
+				purpose: "start a new, blank teammate for one " +
+					"self-contained task; only when no live session " +
+					"already fits.",
 			},
 			{
 				name: "team_attach",
-				purpose: "attach an existing live agent as your teammate.",
+				purpose: "make an existing live agent your teammate, " +
+					"keeping its context; prefer it over team_spawn when " +
+					"that session already works on the topic.",
 			},
 			{
 				name: "team_wait",
@@ -59,16 +62,19 @@ export class PreTeamsTool {
 			},
 			{
 				name: "team_send",
-				purpose: "message a live agent, local or on a linked peer.",
+				purpose: "message a live agent, local or on a linked " +
+					"peer; gives an attached teammate its task.",
 			},
 			{
 				name: "team_ls",
-				purpose: "list live agents and linked peers.",
+				purpose: "list live agents (id, role, name, cwd, " +
+					"parent) and linked peers.",
 			},
 			{
-				name: "team_tail",
-				purpose: "tail the newest local chat transcript to " +
-					"rebuild context.",
+				name: "team_peek",
+				purpose: "read a local agent's transcript by id " +
+					"(default yours): head/tail pages, grep with " +
+					"context; prints the .jsonl path for read.",
 			},
 			{
 				name: "team_peer",
@@ -91,10 +97,22 @@ export class PreTeamsTool {
 		this.conventions = [
 			"Call pre_teams once per session before any team tool; its " +
 				"gate blocks the rest until you do.",
-			"One task per teammate: give team_spawn a self-contained task.",
-			"After spawning or attaching, call team_wait; re-call it with " +
-				"details.remaining to keep blocking. An unwaited report " +
-				"still arrives as a message.",
+			"Reuse before you spawn: run team_ls, then team_peek likely " +
+				"candidates - from=head shows the original task, grep " +
+				"finds the topic, tail shows where it stopped.",
+			"Prefer team_attach when a live session's history already " +
+				"covers the task's topic, repo, or files: it keeps that " +
+				"context, while a spawn starts blank. Spawn only when none " +
+				"fits or every fit already has a parent (attach refuses " +
+				"those).",
+			"Attach chain: team_attach an id -> team_send the returned " +
+				"teammate id the task (attaching hands over no task) -> " +
+				"team_wait on that id.",
+			"Spawn chain: team_spawn one self-contained task -> " +
+				"team_wait, or keep working and take the report as a " +
+				"message.",
+			"Re-call team_wait with details.remaining to keep blocking; " +
+				"an unwaited report still arrives as a message.",
 			"A teammate silent past the stall bound is nudged once per " +
 				"wait (PI_TEAMS_STALL, 0 disables).",
 			"The parent owns planning, integration, and final validation. " +
@@ -103,6 +121,10 @@ export class PreTeamsTool {
 			"An orphaned teammate - its parent no longer live - is " +
 				"independent: it acts as its own team root, so it keeps " +
 				"messaging and may become a plain agent with team_detach.",
+			"Rebuild your own context after compaction or a resume with " +
+				"team_peek and no target: tail it, or grep a keyword.",
+			"team_peek reads local transcripts only; a peer-hosted " +
+				"agent can still be attached, judged by its team_ls name.",
 			"Call team_gc_reap only when the broker asks or this session " +
 				"is done.",
 		];
@@ -116,6 +138,9 @@ export class PreTeamsTool {
 				"with a per-session send token.",
 			"A teammate's transcript marks it a member even after its " +
 				"launch env is lost; orphaned, it becomes its own team root.",
+			"team_peek reads the transcript the broker registered for an " +
+				"agent id, never just the newest file; its #N lines map to " +
+				"the read tool.",
 			"team_peer links another host over SSH; /team-ls opens the " +
 				"dock and /team-settings edits the piTeams settings.",
 		];
