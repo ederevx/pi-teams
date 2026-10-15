@@ -28,6 +28,7 @@ import {
 	rmSync,
 	statSync,
 	unlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -54,7 +55,7 @@ process.env.TEAM_ID = "parent-1";
 
 const { TeamAgent, ProcessRunner, PendingRequests,
 	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory,
-	ResultInbox } =
+	ResultInbox, ChatPeek } =
 	await import("../extensions/pi-teams.ts");
 const { PackageSettings } =
 	await import("../extensions/pi-teams/settings.ts");
@@ -1839,10 +1840,16 @@ test("pre_teams catalog covers every team tool, conventions, features", async ()
 	assert.match(text, /pre_teams/);
 	const names = [
 		"team_spawn", "team_attach", "team_wait", "team_send",
-		"team_ls", "team_tail", "team_peer", "team_detach",
+		"team_ls", "team_peek", "team_peer", "team_detach",
 		"team_kill", "team_gc_reap",
 	];
 	assert.deepEqual(result.details.tools, names);
+	const conventions = result.details.conventions.join("\n");
+	assert.match(conventions,
+		/Reuse before you spawn.*team_ls.*team_peek/s);
+	assert.match(conventions, /Prefer team_attach/);
+	assert.match(conventions, /Attach chain:.*team_send.*team_wait/s);
+	assert.match(conventions, /Spawn chain:.*team_spawn.*team_wait/s);
 	for (const name of names) {
 		assert.match(text, new RegExp(`- ${name}: `),
 			`${name} has a one-line purpose in the catalog`);
@@ -1881,4 +1888,270 @@ test("pre_teams defines no custom renderer, so pi collapses natively", () => {
 	new PreTeamsTool().register(pi);
 	assert.equal(pi.tool.renderResult, undefined);
 	assert.equal(pi.tool.renderCall, undefined);
+});
+
+/** A fixture transcript writer for the ChatPeek tests. */
+function writeTranscript(name, entries) {
+	const path = join(sessionDir, name);
+	mkdirSync(sessionDir, { recursive: true });
+	writeFileSync(path,
+		entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+	return path;
+}
+
+/** The default peek query, overridden per test. */
+function peekQuery(overrides = {}) {
+	return {
+		from: "tail", limit: 20, offset: 0, grep: null, context: 0,
+		include: new Set(ChatPeek.DEFAULT_KINDS), maxChars: 1500,
+		...overrides,
+	};
+}
+
+/** One fixture transcript: a session header, a user turn, an
+ *  assistant turn with reasoning, a tool result, and a tool call. */
+function peekFixture(name) {
+	return writeTranscript(name, [
+		{ type: "session", cwd: "/work" },
+		{ type: "message", message: { role: "user",
+			content: [{ type: "text", text: "hello there" }] } },
+		{ type: "message", message: { role: "assistant", content: [
+			{ type: "thinking", thinking: "hmm" },
+			{ type: "text", text: "hi back" },
+		] } },
+		{ type: "message", message: { role: "toolResult",
+			toolName: "bash", isError: false,
+			content: [{ type: "text", text: "tool output" }] } },
+		{ type: "message", message: { role: "assistant",
+			content: [{ type: "toolCall", name: "bash",
+				arguments: { command: "ls" } }] } },
+	]);
+}
+
+test("ChatPeek renders head and tail pages with the session cwd", async () => {
+	const peek = new ChatPeek(peekFixture("peek-basic.jsonl"));
+	const query = peekQuery();
+	const page = await peek.read(query);
+	assert.equal(page.cwd, "/work");
+	assert.equal(page.scanned, 5);
+	// user, assistant (reasoning + text), assistant (tool call): the
+	// tool result and the session header are not default kinds.
+	assert.equal(page.units, 3);
+	const text = peek.format(page, query, "self");
+	assert.match(text, /team_peek self: .*peek-basic\.jsonl/);
+	assert.match(text, /cwd \/work/);
+	assert.match(text, /#2 user: hello there/);
+	assert.match(text, /#3 assistant: hi back/);
+	assert.match(text, /#5 assistant: \[call bash/);
+	assert.doesNotMatch(text, /tool output/);
+	assert.doesNotMatch(text, /hmm/);
+
+	const tailQuery = peekQuery({ limit: 1 });
+	const tail = await peek.read(tailQuery);
+	assert.equal(tail.page.length, 1);
+	assert.match(peek.format(tail, tailQuery, "self"), /#5 assistant/);
+});
+
+test("ChatPeek include selects tool and reasoning entries", async () => {
+	const peek = new ChatPeek(peekFixture("peek-include.jsonl"));
+	const query = peekQuery({
+		include: new Set(["user", "assistant", "thinking", "tool"]),
+	});
+	const page = await peek.read(query);
+	assert.equal(page.units, 4);
+	const text = peek.format(page, query, "self");
+	assert.match(text, /\[thinking\] hmm/);
+	assert.match(text, /#4 tool bash: tool output/);
+});
+
+test("ChatPeek greps case-insensitively and falls back to a literal",
+	async () => {
+	const peek = new ChatPeek(writeTranscript("peek-grep.jsonl", [
+		{ type: "message", message: { role: "user", content: "Alpha topic" } },
+		{ type: "message", message: { role: "assistant", content: "beta" } },
+		{ type: "message", message: { role: "user", content: "gamma ALPHA again" } },
+		{ type: "message", message: { role: "user", content: "weird foo( token" } },
+	]));
+	const query = peekQuery({ grep: ChatPeek.pattern("alpha"), context: 1 });
+	const page = await peek.read(query);
+	assert.equal(page.units, 2);
+	const text = peek.format(page, query, "x");
+	assert.match(text, /#1 user: Alpha topic/);
+	assert.match(text, /#2 assistant: beta/);
+	assert.match(text, /#3 user: gamma ALPHA again/);
+
+	// An invalid regex is matched literally instead of throwing.
+	const literal = peekQuery({ grep: ChatPeek.pattern("foo(") });
+	const literalPage = await peek.read(literal);
+	assert.equal(literalPage.units, 1);
+	assert.match(peek.format(literalPage, literal, "x"),
+		/weird foo\( token/);
+});
+
+test("ChatPeek separates non-contiguous grep context with a rule",
+	async () => {
+	const peek = new ChatPeek(writeTranscript("peek-context.jsonl", [
+		{ type: "message", message: { role: "user", content: "hit one" } },
+		{ type: "message", message: { role: "assistant", content: "near one" } },
+		{ type: "message", message: { role: "user", content: "unrelated" } },
+		{ type: "message", message: { role: "assistant", content: "near two" } },
+		{ type: "message", message: { role: "user", content: "hit two" } },
+	]));
+	const query = peekQuery({ grep: ChatPeek.pattern("hit"), context: 1 });
+	const text = peek.format(await peek.read(query), query, "x");
+	assert.match(text, /#1 user: hit one/);
+	assert.match(text, /--/);
+	assert.match(text, /#5 user: hit two/);
+	assert.doesNotMatch(text, /unrelated/);
+});
+
+test("ChatPeek refuses a missing or non-transcript file", async () => {
+	await assert.rejects(
+		() => new ChatPeek(join(sessionDir, "nope.jsonl")).read(peekQuery()),
+		/no longer exists/);
+	await assert.rejects(
+		() => new ChatPeek(join(sessionDir, "notes.txt")).read(peekQuery()),
+		/not a pi transcript/);
+});
+
+test("ChatPeek renders a malformed line as unparsed meta", async () => {
+	const path = join(sessionDir, "peek-bad.jsonl");
+	mkdirSync(sessionDir, { recursive: true });
+	writeFileSync(path, "not json\n" + JSON.stringify(
+		{ type: "message", message: { role: "user", content: "ok" } }) +
+		"\n");
+	const peek = new ChatPeek(path);
+	const query = peekQuery({ include: new Set(["meta", "user"]) });
+	const page = await peek.read(query);
+	assert.equal(page.units, 2);
+	assert.match(peek.format(page, query, "x"), /#1 unparsed: not json/);
+});
+
+test("ChatPeek caps output and notes the dropped rows", async () => {
+	const entries = [{ type: "message", message: { role: "user",
+		content: "x".repeat(8000) } }];
+	for (let i = 0; i < 30; i += 1) {
+		entries.push({ type: "message", message: { role: "assistant",
+			content: "y".repeat(8000) } });
+	}
+	const peek = new ChatPeek(writeTranscript("peek-cap.jsonl", entries));
+	const query = peekQuery({ limit: 30, maxChars: 8000 });
+	const text = peek.format(await peek.read(query), query, "x");
+	assert.ok(text.length < ChatPeek.OUTPUT_CAP + 1000,
+		`output stayed bounded, got ${text.length}`);
+	assert.match(text, /output capped/);
+});
+
+test("transcriptOf resolves this session and local targets only",
+	async () => {
+	const { agent } = makeAgent();
+	const selfPath = join(sessionDir, "self.jsonl");
+	agent.rememberSession(selfPath);
+	assert.equal((await agent.transcriptOf()).path, selfPath);
+	assert.equal((await agent.transcriptOf(agent.id)).path, selfPath);
+
+	agent.snapshot = async () => ([
+		{ id: "local-fork", name: "local", role: "fork", pid: 1,
+			parent: null, session: join(sessionDir, "fork.jsonl"),
+			online: true },
+		{ id: "remote-fork", name: "rem", role: "fork", pid: 2,
+			parent: null, session: "/other/rem.jsonl", online: true,
+			remote: true, origin: "beta" },
+		{ id: "no-session", name: "ns", role: "fork", pid: 3,
+			parent: null, session: null, online: true },
+	]);
+	assert.equal((await agent.transcriptOf("local-fork")).path,
+		join(sessionDir, "fork.jsonl"));
+	await assert.rejects(() => agent.transcriptOf("ghost"), /team_ls/);
+	await assert.rejects(() => agent.transcriptOf("remote-fork"), /peer/);
+	await assert.rejects(() => agent.transcriptOf("no-session"),
+		/not recorded/);
+});
+
+test("team_peek reads this session's transcript, not the newest file",
+	async () => {
+	const tools = new Map();
+	const pi = {
+		appendEntry: () => {}, sendMessage: () => {}, on: () => {},
+		registerEntryRenderer: () => {}, registerCommand: () => {},
+		registerTool: (definition) => tools.set(definition.name, definition),
+	};
+	const previous = globalThis.__piTeamsAgent;
+	globalThis.__piTeamsAgent = undefined;
+	try {
+		const { default: register } =
+			await import("../extensions/pi-teams.ts");
+		await register(pi);
+		const app = globalThis.__piTeamsAgent;
+		const selfPath = writeTranscript("peek-self.jsonl", [{ type: "message",
+			message: { role: "user", content: "SELF-MARKER" } }]);
+		const otherPath = writeTranscript("peek-other.jsonl", [{ type: "message",
+			message: { role: "user", content: "OTHER-MARKER" } }]);
+		const future = new Date(Date.now() + 60_000);
+		utimesSync(otherPath, future, future);
+		app.rememberSession(selfPath);
+		app.snapshot = async () => [];
+		const result = await tools.get("team_peek").execute("call-1", {});
+		assert.match(result.content[0].text, /SELF-MARKER/);
+		assert.doesNotMatch(result.content[0].text, /OTHER-MARKER/);
+		assert.equal(result.details.path, selfPath);
+	} finally {
+		if (previous === undefined) delete globalThis.__piTeamsAgent;
+		else globalThis.__piTeamsAgent = previous;
+	}
+});
+
+test("team_ls shows name, parent, cwd, you, and peer", async () => {
+	const tools = new Map();
+	const pi = {
+		appendEntry: () => {}, sendMessage: () => {}, on: () => {},
+		registerEntryRenderer: () => {}, registerCommand: () => {},
+		registerTool: (definition) => tools.set(definition.name, definition),
+	};
+	const previous = globalThis.__piTeamsAgent;
+	globalThis.__piTeamsAgent = undefined;
+	try {
+		const { default: register } =
+			await import("../extensions/pi-teams.ts");
+		await register(pi);
+		const app = globalThis.__piTeamsAgent;
+		app.id = "me";
+		app.snapshot = async () => ([
+			{ id: "me", name: "pi@/work", role: "main", pid: 1,
+				parent: null, session: null, cwd: "/work", online: true },
+			{ id: "kid", name: "task-slug", role: "fork", pid: 2,
+				parent: "me", session: null, cwd: "/repo", online: true },
+			{ id: "far", name: "rem", role: "fork", pid: 3,
+				parent: null, session: null, online: true, remote: true,
+				origin: "beta" },
+		]);
+		app.peers = async () => [];
+		const result = await tools.get("team_ls").execute("call-1", {});
+		const text = result.content[0].text;
+		assert.match(text, /me\tmain\tonline\t\(you\)/);
+		assert.match(text,
+			/kid\tfork\tonline\t"task-slug"\tteammate of me\tcwd \/repo/);
+		assert.match(text, /far\tfork\tonline\t"rem"\tpeer/);
+	} finally {
+		if (previous === undefined) delete globalThis.__piTeamsAgent;
+		else globalThis.__piTeamsAgent = previous;
+	}
+});
+
+test("attach marks the requester a team owner", async () => {
+	const { agent } = makeAgent();
+	agent.send = async (_to, _kind, payload) => {
+		const { requestId } = JSON.parse(payload);
+		agent.pending.settle({
+			from: "kid", to: agent.id, kind: "attach-ack",
+			payload: { requestId, id: "kid-fork", session: "kid" },
+		}, "attach-ack");
+		return "sent";
+	};
+	const ref = await agent.attach("kid");
+	assert.deepEqual(ref, { id: "kid-fork", session: "kid" });
+	// Without the owner flag this needs the target's hold to have
+	// re-registered already, which the ack does not guarantee.
+	assert.equal(await agent.isTeammate(), true);
+	agent.stopHold();
 });

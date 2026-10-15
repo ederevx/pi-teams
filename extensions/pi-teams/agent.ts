@@ -477,6 +477,36 @@ export class TeamAgent {
 		return this.brokerOps.snapshot();
 	}
 
+	/** The local transcript of `target` (default this session) for
+	 *  team_peek. Throws with the fix when it is not readable here. */
+	async transcriptOf(
+		target?: string,
+	): Promise<{ id: string; path: string }> {
+		if (!target || target === this.id) {
+			if (!this.sessionFile) {
+				throw new Error("this session has no transcript file");
+			}
+			return { id: this.id || "this session", path: this.sessionFile };
+		}
+		const agents = await this.snapshot();
+		const entry = agents.find((a) => a.id === target);
+		if (!entry) {
+			throw new Error(
+				`no registered agent ${target}; run team_ls for ids`);
+		}
+		if (entry.remote || (entry.origin && entry.origin !== this.host)) {
+			throw new Error(
+				`${target} runs on peer ${entry.origin ?? "host"}; its ` +
+				"transcript is not readable from this host");
+		}
+		if (!entry.session) {
+			throw new Error(
+				`${target} has not recorded a transcript yet; ` +
+				"retry shortly");
+		}
+		return { id: target, path: entry.session };
+	}
+
 	async send(to: string, kind: string, text: string): Promise<string> {
 		// The peer's spawn handler replies to the message's `from`, and a
 		// spawned fork is parented to it, so an unregistered sender would
@@ -732,7 +762,12 @@ export class TeamAgent {
 		const pending = this.pending.register(id, 15000);
 		await this.send(target, "attach", JSON.stringify(
 			{ requestId: id, name }));
-		return pending;
+		const ref = await pending;
+		// Attaching makes this session the owner of the new teammate, so
+		// message and wait work at once instead of racing the target's
+		// hold registration.
+		if (ref) this.teamOwner = true;
+		return ref;
 	}
 
 	/** Another agent asked this running session to become its teammate:
