@@ -12,6 +12,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { TeamAgent } from "./pi-teams/agent.ts";
 import { ChatPeek, type PeekKind } from "./pi-teams/chat-peek.ts";
+import { TeamWaitFeed } from "./pi-teams/wait-feed.ts";
+import { TeamWaitStream } from "./pi-teams/wait-stream.ts";
+import { TeamWaitView } from "./pi-teams/wait-view.ts";
 import { PreTeamsTool } from "./pi-teams/pre-teams.ts";
 import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
@@ -35,6 +38,11 @@ import {
 // entry alone.
 export { TeamAgent } from "./pi-teams/agent.ts";
 export { ChatPeek } from "./pi-teams/chat-peek.ts";
+export { ChatEntryRenderer } from "./pi-teams/chat-entry.ts";
+export { TranscriptTail } from "./pi-teams/transcript-tail.ts";
+export { TeamWaitFeed } from "./pi-teams/wait-feed.ts";
+export { TeamWaitStream } from "./pi-teams/wait-stream.ts";
+export { TeamWaitView } from "./pi-teams/wait-view.ts";
 export { ProcessRunner } from "./pi-teams/process-runner.ts";
 export {
 	WindowlessPython,
@@ -164,7 +172,9 @@ export default async function (pi: ExtensionAPI) {
 
 	// -- agent-facing teammate wait --------------------------------------
 	// An active poll that stays interruptible (Escape ends it at once,
-	// a queued message yields early); the report arrives either way.
+	// a queued message yields early); the report arrives either way, and
+	// the call streams each teammate's live activity while it blocks.
+	const waitView = new TeamWaitView();
 	pi.registerTool({
 		name: "team_wait",
 		label: "wait for teammates",
@@ -206,37 +216,35 @@ export default async function (pi: ExtensionAPI) {
 				throw new Error("team_wait needs at least one teammate id");
 			}
 			const bound = waitSeconds(params.timeout);
-			// Live wait status: a partial result the TUI re-renders
-			// while the call runs, at most once a second.
-			const startedAt = Date.now();
-			let lastStatus = 0;
-			const updateStatus = (): void => {
-				const now = Date.now();
-				if (now - lastStatus < 1000) return;
-				lastStatus = now;
-				onUpdate?.({
-					content: [{
-						type: "text",
-						text: `waiting for ${targetIds.length} teammate(s): ` +
-							`${targetIds.join(", ")} ` +
-							`(${Math.round((now - startedAt) / 1000)}s elapsed)`,
-					}],
-					details: undefined,
-				});
-			};
+			// Live wait view: one section per teammate whose transcript
+			// is readable here, fed from the wait's own tick so the
+			// stream can never outlive the wait.
+			const feed = new TeamWaitFeed(targetIds, (snapshot) => {
+				try {
+					onUpdate?.({
+						content: [{ type: "text", text: snapshot.text }],
+						details: { streams: snapshot.streams },
+					});
+				} catch {
+					// The host callback must never break the wait.
+				}
+			});
+			const stream = new TeamWaitStream(targetIds, app, feed);
 			// A waiting agent is not working: publish that for the
 			// whole wait (the fork stays exempt from idle GC), then
 			// restore the turn's busy state.
 			app.setState("waiting");
 			try {
-				updateStatus();
+				stream.start();
+				stream.tick();
 				// Watch the wait for a hung teammate: past the stall bound
 				// the wait itself sends the continue-or-report steer, once
 				// per teammate, instead of blocking silently forever.
 				const stallMs = stallSeconds(params.stall) * 1000;
 				const { results, interruptedBy } = await app.waitForResults(
 					targetIds, bound * 1000, signal,
-					() => ctx.hasPendingMessages(), updateStatus, stallMs);
+					() => ctx.hasPendingMessages(), () => stream.tick(),
+					stallMs);
 				const reports = results.filter(
 					(message): message is TeamMessage => message !== null);
 				for (const report of reports) {
@@ -276,9 +284,12 @@ export default async function (pi: ExtensionAPI) {
 						interruptedBy },
 				};
 			} finally {
+				stream.close();
 				app.setBusy(true);
 			}
 		},
+		renderResult: (result, options, theme, context) =>
+			waitView.render(result, options, theme, context),
 	});
 
 	// -- agent-facing messaging ------------------------------------------

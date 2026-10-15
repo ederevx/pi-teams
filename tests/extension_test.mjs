@@ -19,6 +19,7 @@
 
 import assert from "node:assert/strict";
 import {
+	appendFileSync,
 	chmodSync,
 	existsSync,
 	mkdirSync,
@@ -55,7 +56,8 @@ process.env.TEAM_ID = "parent-1";
 
 const { TeamAgent, ProcessRunner, PendingRequests,
 	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory,
-	ResultInbox, ChatPeek } =
+	ResultInbox, ChatPeek, ChatEntryRenderer, TranscriptTail, TeamWaitFeed,
+	TeamWaitStream, TeamWaitView } =
 	await import("../extensions/pi-teams.ts");
 const { PackageSettings } =
 	await import("../extensions/pi-teams/settings.ts");
@@ -2154,4 +2156,282 @@ test("attach marks the requester a team owner", async () => {
 	// re-registered already, which the ack does not guarantee.
 	assert.equal(await agent.isTeammate(), true);
 	agent.stopHold();
+});
+
+// -- live team_wait streaming -----------------------------------------
+
+/** One assistant transcript line, as pi writes it. */
+function assistantLine(text) {
+	return JSON.stringify({ type: "message", message: {
+		role: "assistant", content: [{ type: "text", text }] } });
+}
+
+/** An empty fixture transcript to append to. */
+function emptyTranscript(name) {
+	const path = join(sessionDir, name);
+	mkdirSync(sessionDir, { recursive: true });
+	writeFileSync(path, "");
+	return path;
+}
+
+/** A structural render-slot stub: the view reuses one Text. */
+function renderSlot() {
+	return {};
+}
+
+const viewTheme = { fg: (_color, text) => text };
+
+test("TranscriptTail returns only the lines added since the last read", () => {
+	const path = emptyTranscript("tail-append.jsonl");
+	const tail = new TranscriptTail(path);
+	assert.deepEqual(tail.read(), []);
+	appendFileSync(path,
+		assistantLine("one") + "\n" + assistantLine("two") + "\n");
+	assert.deepEqual(tail.read(), [assistantLine("one"), assistantLine("two")]);
+	assert.deepEqual(tail.read(), [], "a read with no new bytes is empty");
+	appendFileSync(path, assistantLine("three") + "\n");
+	assert.deepEqual(tail.read(), [assistantLine("three")]);
+});
+
+test("TranscriptTail holds a partial line until it completes", () => {
+	const path = emptyTranscript("tail-partial.jsonl");
+	const tail = new TranscriptTail(path);
+	const line = assistantLine("half written");
+	appendFileSync(path, line.slice(0, 20));
+	assert.deepEqual(tail.read(), []);
+	appendFileSync(path, line.slice(20) + "\n");
+	const lines = tail.read();
+	assert.equal(lines.length, 1);
+	assert.equal(JSON.parse(lines[0]).message.content[0].text, "half written");
+});
+
+test("TranscriptTail keeps a character split across two reads", () => {
+	const path = emptyTranscript("tail-utf8.jsonl");
+	const bytes = Buffer.from(assistantLine("café ☕ done") + "\n", "utf8");
+	// Split inside the two bytes of "é".
+	const split = bytes.indexOf(Buffer.from("é", "utf8")) + 1;
+	writeFileSync(path, bytes.subarray(0, split));
+	const tail = new TranscriptTail(path);
+	assert.deepEqual(tail.read(), []);
+	appendFileSync(path, bytes.subarray(split));
+	const lines = tail.read();
+	assert.equal(lines.length, 1);
+	assert.equal(JSON.parse(lines[0]).message.content[0].text, "café ☕ done");
+});
+
+test("TranscriptTail resumes when the transcript is rewritten", () => {
+	const path = emptyTranscript("tail-rewrite.jsonl");
+	writeFileSync(path,
+		assistantLine("first") + "\n" + assistantLine("second") + "\n");
+	const tail = new TranscriptTail(path);
+	assert.equal(tail.read().length, 2);
+	// A resumed session rewrites the file shorter: the cursor is past
+	// its end, so the tail restarts from the window instead of throwing.
+	writeFileSync(path, assistantLine("third") + "\n");
+	const lines = tail.read();
+	assert.equal(lines.length, 1);
+	assert.match(lines[0], /third/);
+});
+
+test("TranscriptTail starts inside the tail of a large transcript", () => {
+	const path = emptyTranscript("tail-large.jsonl");
+	const all = [];
+	for (let i = 0; i < 4000; i++) all.push(assistantLine(`entry ${i}`));
+	writeFileSync(path, all.join("\n") + "\n");
+	const read = new TranscriptTail(path).read();
+	assert.ok(read.length > 0 && read.length < 4000, `read ${read.length}`);
+	assert.match(read.at(-1), /entry 3999/);
+	const bytes = read.reduce((n, line) => n + Buffer.byteLength(line), 0);
+	assert.ok(bytes <= 16 * 1024, `${bytes} bytes backfilled`);
+});
+
+test("TranscriptTail reports a transcript that does not exist yet", () => {
+	const path = join(sessionDir, "tail-missing.jsonl");
+	if (existsSync(path)) unlinkSync(path);
+	const tail = new TranscriptTail(path);
+	assert.deepEqual(tail.read(), []);
+	assert.equal(tail.missing, true);
+	writeFileSync(path, assistantLine("now here") + "\n");
+	assert.match(tail.read()[0], /now here/);
+	assert.equal(tail.missing, false);
+});
+
+test("TeamWaitFeed bounds the snapshot and keeps every stream", () => {
+	const snapshots = [];
+	const feed = new TeamWaitFeed(["a", "b", "c"],
+		(snapshot) => snapshots.push(snapshot), 0);
+	for (const id of ["a", "b", "c"]) {
+		for (let i = 0; i < 1000; i++) {
+			feed.note(id, `[assistant] ${id} line ${i} `.repeat(4));
+		}
+	}
+	feed.publish(1000);
+	assert.equal(snapshots.length, 1);
+	const { text, streams } = snapshots[0];
+	assert.ok(Buffer.byteLength(text, "utf8") <= 16 * 1024,
+		`${Buffer.byteLength(text, "utf8")} bytes snapshotted`);
+	assert.deepEqual(streams.map((stream) => stream.id), ["a", "b", "c"]);
+	for (const stream of streams) {
+		assert.ok(stream.lines.length >= 1,
+			`${stream.id} keeps at least one line`);
+	}
+});
+
+test("TeamWaitFeed publishes only when the snapshot changes", () => {
+	const snapshots = [];
+	const feed = new TeamWaitFeed(["a"],
+		(snapshot) => snapshots.push(snapshot), 0);
+	feed.mark("a", "live");
+	feed.publish(1000);
+	assert.equal(snapshots.length, 1);
+	feed.publish(1200);
+	assert.equal(snapshots.length, 1, "an unchanged snapshot is not resent");
+	feed.publish(3000);
+	assert.equal(snapshots.length, 2, "the elapsed header moves the wait on");
+	feed.close();
+	feed.note("a", "[assistant] after close");
+	feed.publish(9000);
+	assert.equal(snapshots.length, 2, "a closed feed delivers nothing");
+});
+
+test("TeamWaitStream follows a transcript and names an unreadable peer",
+	async () => {
+	const local = emptyTranscript("wait-local.jsonl");
+	const snapshots = [];
+	const feed = new TeamWaitFeed(["kid", "peer-kid"],
+		(snapshot) => snapshots.push(snapshot), 0);
+	const source = {
+		transcriptsOf: async (ids) => ids.map((id) => id === "kid"
+			? { id, path: local }
+			: { id, peer: true, error: `${id} runs on peer alpha` }),
+	};
+	const stream = new TeamWaitStream(["kid", "peer-kid"], source, feed);
+	stream.start();
+	await new Promise((resolve) => setImmediate(resolve));
+	stream.tick(1000);
+	appendFileSync(local, assistantLine("working on it") + "\n");
+	stream.tick(2000);
+	const last = snapshots.at(-1);
+	assert.match(last.text, /kid \(live\)/);
+	assert.match(last.text, /\[assistant\] working on it/);
+	assert.match(last.text, /peer-kid \(peer: no live view\)/);
+	stream.close();
+	const delivered = snapshots.length;
+	appendFileSync(local, assistantLine("after close") + "\n");
+	stream.tick(3000);
+	assert.equal(snapshots.length, delivered,
+		"a closed stream stops reading and delivering");
+});
+
+test("TeamWaitView shows every stream while a wait blocks", () => {
+	const view = new TeamWaitView();
+	const streams = ["a", "b", "c"].map((id) => ({
+		id, state: "live",
+		lines: Array.from({ length: 20 }, (_v, i) => `${id} line ${i}`),
+	}));
+	const partial = view.render({
+		content: [{ type: "text", text: "waiting" }],
+		details: { streams },
+	}, { expanded: false, isPartial: true }, viewTheme, renderSlot());
+	const text = partial.render(80).join("\n");
+	for (const id of ["a", "b", "c"]) {
+		assert.match(text, new RegExp(`── ${id} \\(live\\) ──`));
+		assert.match(text, new RegExp(`${id} line 19`),
+			`${id}'s newest line is in view`);
+	}
+});
+
+test("TeamWaitView previews a long final report", () => {
+	const view = new TeamWaitView();
+	const text = Array.from({ length: 25 }, (_v, i) => `row ${i}`).join("\n");
+	const result = { content: [{ type: "text", text }], details: {} };
+	const collapsed = view.render(result,
+		{ expanded: false, isPartial: false }, viewTheme, renderSlot())
+		.render(80).join("\n");
+	assert.match(collapsed, /row 9/);
+	assert.doesNotMatch(collapsed, /row 10\n/);
+	assert.match(collapsed, /15 more lines; expand the tool to show all/);
+	const expanded = view.render(result,
+		{ expanded: true, isPartial: false }, viewTheme, renderSlot())
+		.render(80).join("\n");
+	assert.match(expanded, /row 24/);
+});
+
+test("transcriptsOf resolves every id from one registry snapshot",
+	async () => {
+	const { agent } = makeAgent();
+	let calls = 0;
+	agent.snapshot = async () => {
+		calls += 1;
+		return [
+			{ id: "local-fork", name: "local", role: "fork", pid: 1,
+				parent: null, session: join(sessionDir, "fork.jsonl"),
+				online: true },
+			{ id: "remote-fork", name: "rem", role: "fork", pid: 2,
+				parent: null, session: "/other/rem.jsonl", online: true,
+				remote: true, origin: "beta" },
+			{ id: "no-session", name: "ns", role: "fork", pid: 3,
+				parent: null, session: null, online: true },
+		];
+	};
+	const refs = await agent.transcriptsOf(
+		["local-fork", "remote-fork", "no-session", "ghost"]);
+	assert.equal(calls, 1, "one snapshot serves every id");
+	assert.equal(refs[0].path, join(sessionDir, "fork.jsonl"));
+	assert.equal(refs[1].peer, true);
+	assert.match(refs[2].error, /not recorded/);
+	assert.match(refs[3].error, /team_ls/);
+});
+
+test("team_wait streams teammate activity and keeps its report text",
+	async () => {
+	const tools = new Map();
+	const pi = {
+		appendEntry: () => {}, sendMessage: () => {}, on: () => {},
+		registerEntryRenderer: () => {}, registerCommand: () => {},
+		registerTool: (definition) => tools.set(definition.name, definition),
+	};
+	const previous = globalThis.__piTeamsAgent;
+	globalThis.__piTeamsAgent = undefined;
+	try {
+		const { default: register } =
+			await import("../extensions/pi-teams.ts");
+		await register(pi);
+		const app = globalThis.__piTeamsAgent;
+		assert.ok(app, "the extension publishes its agent");
+		const transcript = emptyTranscript("wait-tool.jsonl");
+		const report = {
+			from: "kid", to: app.id, kind: "result", payload: "all done",
+		};
+		app.requireTeammate = async () => {};
+		app.setState = () => {};
+		app.setBusy = () => {};
+		app.transcriptsOf = async (ids) => ids.map((id) => ({ id, path: transcript }));
+		// Stand in for the wait: append a line, let the stream resolve
+		// the transcript, then tick it once, as the real poll would.
+		app.waitForResults = async (_ids, _timeout, _signal, _yield, onTick) => {
+			appendFileSync(transcript, assistantLine("still working") + "\n");
+			await new Promise((resolve) => setImmediate(resolve));
+			onTick();
+			return { results: [report], interruptedBy: null };
+		};
+		const updates = [];
+		const result = await tools.get("team_wait").execute("call-1",
+			{ ids: ["kid"] }, undefined,
+			(update) => updates.push(update),
+			{ hasPendingMessages: () => false });
+		// The model-facing result is unchanged by the live view.
+		assert.equal(result.content[0].text, formatReport(report));
+		assert.deepEqual(result.details.remaining, []);
+		const partial = updates.at(-1);
+		assert.match(partial.content[0].text, /still working/);
+		assert.equal(partial.details.streams[0].id, "kid");
+		// The stream ends with the wait: nothing lands after the result.
+		const delivered = updates.length;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(updates.length, delivered);
+	} finally {
+		if (previous === undefined) delete globalThis.__piTeamsAgent;
+		else globalThis.__piTeamsAgent = previous;
+	}
 });
