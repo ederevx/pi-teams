@@ -11,6 +11,7 @@ export interface AgentInfo {
 	pid: number;
 	parent: string | null;
 	session: string | null;
+	cwd?: string;
 	online: boolean;
 	origin?: string;
 	remote?: boolean;

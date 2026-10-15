@@ -38,7 +38,8 @@ natively, without a shared filesystem as the channel.
   | `team_detach` | Return an attached session to a main agent |
   | `team_kill` | Terminate an agent by id |
   | `team_gc_reap` | Ack the broker's idle reap and shut down |
-  | `team_ls` / `team_peer` / `team_tail` | List, link peers, tail chat |
+  | `team_ls` / `team_peer` | List agents, link peers |
+  | `team_peek` | Read or grep a local agent's transcript |
 
   Sending and waiting are member-only; a teammate may only message its
   own team and asks its parent to attach outsiders. The broker enforces
@@ -119,6 +120,15 @@ itself, never a signal, and a main agent is never asked to reap.
   start adopts the new code.
 
 ### Attach
+
+Attach before you spawn when a live session already holds the
+context: `team_ls` lists each agent's name, cwd, and parent, and
+`team_peek` reads a target's transcript (`from=head` for the original
+task, `grep` for a topic, tail for where it stopped). Attaching hands
+over no task, so the chain is `team_attach` -> `team_send` the
+returned teammate id its task -> `team_wait`. `team_spawn` starts a
+blank session and is the fallback; `team_attach` refuses a target that
+already has a parent.
 
 `team_attach` re-registers a running session under the requester's
 fork id. An agent belongs to one team: a target that already has a
