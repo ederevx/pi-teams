@@ -85,6 +85,43 @@ class InstallGuardTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("installed as a pi package", result.stderr)
 
+    def renamed_checkout(self):
+        """This checkout under a directory that is not named pi-teams:
+        the guard must recognize it by where the path resolves."""
+        link = self.scratch.root / "renamed-checkout"
+        link.symlink_to(ROOT, target_is_directory=True)
+        return link
+
+    def test_install_refuses_a_renamed_checkout_path(self):
+        # Regression: the guard compared the entry's final path
+        # component, so a worktree or renamed clone of this checkout
+        # slipped through and installed a second extension copy.
+        self.scratch.settings([str(self.renamed_checkout())])
+        result = self.run_install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("installed as a pi package", result.stderr)
+
+    def test_install_refuses_when_run_from_a_renamed_checkout(self):
+        # The same defect from the other side: the installer runs from
+        # a path whose final component is not the package name.
+        link = self.renamed_checkout()
+        self.scratch.settings([str(ROOT)])
+        result = subprocess.run(
+            [BASH, str(link / "scripts" / "install.sh")], cwd=str(ROOT),
+            env=self.scratch.env(), capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("installed as a pi package", result.stderr)
+
+    def test_install_allowed_for_an_unrelated_local_entry(self):
+        # The guard must not over-refuse: an entry that installs some
+        # other package never blocks a manual pi-teams install.
+        elsewhere = self.scratch.root / "another-package"
+        elsewhere.mkdir()
+        self.scratch.settings([str(elsewhere)])
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.scratch.bin / "teamd").exists())
+
     def test_install_allowed_without_a_pin(self):
         self.scratch.settings([])
         result = self.run_install()
@@ -117,6 +154,22 @@ class PostinstallCleanupTests(unittest.TestCase):
         return subprocess.run(
             [NODE, str(POSTINSTALL)], cwd=str(ROOT),
             env=self.scratch.env(), capture_output=True, text=True)
+
+    def test_postinstall_drops_a_renamed_local_entry(self):
+        # Regression: the reconciler matched the entry's final path
+        # component, so a local entry pointing at this checkout under
+        # another directory name survived beside the pin and pi loaded
+        # the extension twice.
+        link = self.scratch.root / "renamed-checkout"
+        link.symlink_to(ROOT, target_is_directory=True)
+        self.scratch.settings([
+            "git:github.com/ederevx/pi-teams@v0.4.19", str(link)])
+        result = self.run_postinstall()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = json.loads(
+            (self.scratch.agent / "settings.json").read_text())
+        self.assertEqual(
+            saved["packages"], ["git:github.com/ederevx/pi-teams@v0.4.19"])
 
     def test_postinstall_drops_manual_copies_and_keeps_foreign_files(self):
         result = self.run_postinstall()
