@@ -4,14 +4,16 @@
  * responsibility - showing an agent a session's conversation, its own
  * or another local agent's. The file is streamed in one pass and only
  * the requested page is kept, so a large transcript stays bounded.
+ * Parsing and rendering one entry belong to ChatEntryRenderer, shared
+ * with the live team_wait stream.
  */
 
 import { createReadStream, statSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-export type PeekKind =
-	"user" | "assistant" | "thinking" | "tool" | "summary" | "custom" |
-	"meta";
+import { ChatEntryRenderer, type PeekKind } from "./chat-entry.ts";
+
+export type { PeekKind };
 
 export interface PeekQuery {
 	from: "head" | "tail";
@@ -42,23 +44,12 @@ export interface PeekPage {
 	more: boolean;
 }
 
-interface Rendered {
-	kind: PeekKind;
-	label: string;
-	full: string;
-}
-
-type Json = Record<string, unknown>;
-
 export class ChatPeek {
-	static readonly KINDS: readonly PeekKind[] = [
-		"user", "assistant", "thinking", "tool", "summary", "custom", "meta",
-	];
-	static readonly DEFAULT_KINDS: readonly PeekKind[] = [
-		"user", "assistant", "summary", "custom",
-	];
+	static readonly KINDS = ChatEntryRenderer.KINDS;
+	static readonly DEFAULT_KINDS = ChatEntryRenderer.DEFAULT_KINDS;
 	static readonly OUTPUT_CAP = 50_000;
 	private readonly path: string;
+	private readonly renderer = new ChatEntryRenderer();
 
 	constructor(path: string) {
 		this.path = path;
@@ -104,11 +95,12 @@ export class ChatPeek {
 		for await (const line of lines) {
 			scanned++;
 			if (!line.trim()) continue;
-			const parsed = this.parse(line);
+			const parsed = this.renderer.parse(line);
 			if (parsed?.type === "session" && !cwd) {
 				cwd = String(parsed.cwd ?? "");
 			}
-			const rendered = this.render(parsed, line, query.include);
+			const rendered = this.renderer.render(
+				parsed, line, query.include);
 			if (!rendered || !query.include.has(rendered.kind)) continue;
 			// Match the full text, then keep only a clipped copy.
 			const hit = query.grep ? rendered.full.search(query.grep) : 0;
@@ -200,100 +192,6 @@ export class ChatPeek {
 			throw new Error(`transcript ${this.path} no longer exists`);
 		}
 		if (!isFile) throw new Error(`${this.path} is not a file`);
-	}
-
-	private parse(line: string): Json | null {
-		try {
-			const value = JSON.parse(line);
-			return value && typeof value === "object"
-				? value as Json : null;
-		} catch {
-			return null;
-		}
-	}
-
-	private render(
-		entry: Json | null,
-		line: string,
-		include: ReadonlySet<PeekKind>,
-	): Rendered | null {
-		if (!entry) {
-			return {
-				kind: "meta", label: "unparsed", full: line.slice(0, 500),
-			};
-		}
-		if (entry.type === "message") {
-			const message = (entry.message ?? {}) as Json;
-			const role = String(message.role ?? "");
-			const full = this.flatten(message.content, include).trim();
-			if (!full) return null;
-			if (role === "user" || role === "assistant") {
-				return { kind: role, label: role, full };
-			}
-			if (role === "toolResult") {
-				const name = String(message.toolName ?? "");
-				const error = message.isError ? " error" : "";
-				return {
-					kind: "tool",
-					label: `tool ${name}${error}`.trim(),
-					full,
-				};
-			}
-			if (role === "system") {
-				return { kind: "meta", label: "system", full };
-			}
-			return { kind: "custom", label: role || "message", full };
-		}
-		if (entry.type === "custom_message") {
-			const full = this.flatten(entry.content, include).trim();
-			if (!full) return null;
-			return {
-				kind: "custom",
-				label: `custom ${String(entry.customType ?? "")}`.trim(),
-				full,
-			};
-		}
-		if (typeof entry.summary === "string") {
-			return {
-				kind: "summary",
-				label: String(entry.type),
-				full: entry.summary,
-			};
-		}
-		return {
-			kind: "meta",
-			label: String(entry.type ?? "entry"),
-			full: JSON.stringify(entry).slice(0, 300),
-		};
-	}
-
-	private flatten(content: unknown, include: ReadonlySet<PeekKind>): string {
-		if (typeof content === "string") return content;
-		if (!Array.isArray(content)) return "";
-		return content
-			.map((block) => this.block((block ?? {}) as Json, include))
-			.filter((text) => text.length > 0)
-			.join("\n");
-	}
-
-	private block(block: Json, include: ReadonlySet<PeekKind>): string {
-		switch (block.type) {
-		case "text":
-			return String(block.text ?? "");
-		case "thinking":
-			return include.has("thinking")
-				? `[thinking] ${String(block.thinking ?? "")}`
-				: "";
-		case "toolCall":
-			return `[call ${String(block.name ?? "")} ` +
-				`${JSON.stringify(block.arguments ?? {}).slice(0, 200)}]`;
-		case "toolResult":
-			return this.flatten(block.content, include);
-		case "image":
-			return "[image]";
-		default:
-			return "";
-		}
 	}
 
 	/** At most `max` chars; a match past the window is kept in view. */

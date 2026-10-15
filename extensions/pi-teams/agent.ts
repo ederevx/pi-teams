@@ -34,6 +34,7 @@ import {
 } from "./spawn.ts";
 import { PendingRequests } from "./pending.ts";
 import { ResultInbox } from "./inbox.ts";
+import type { TranscriptRef } from "./wait-stream.ts";
 import {
 	mintSendToken,
 	requestId,
@@ -488,21 +489,42 @@ export class TeamAgent {
 			}
 			return { id: this.id || "this session", path: this.sessionFile };
 		}
+		const ref = this.locate(target, await this.snapshot());
+		if (!ref.path) throw new Error(ref.error);
+		return { id: ref.id, path: ref.path };
+	}
+
+	/** The local transcripts of `ids` for the live team_wait stream: one
+	 *  registry snapshot for all of them, and a per-id reason when a
+	 *  transcript is not readable from this host. */
+	async transcriptsOf(ids: readonly string[]): Promise<TranscriptRef[]> {
 		const agents = await this.snapshot();
+		return ids.map((id) => this.locate(id, agents));
+	}
+
+	/** Resolves one id against an already-fetched registry snapshot. */
+	private locate(target: string, agents: AgentInfo[]): TranscriptRef {
 		const entry = agents.find((a) => a.id === target);
 		if (!entry) {
-			throw new Error(
-				`no registered agent ${target}; run team_ls for ids`);
+			return {
+				id: target,
+				error: `no registered agent ${target}; run team_ls for ids`,
+			};
 		}
 		if (entry.remote || (entry.origin && entry.origin !== this.host)) {
-			throw new Error(
-				`${target} runs on peer ${entry.origin ?? "host"}; its ` +
-				"transcript is not readable from this host");
+			return {
+				id: target,
+				peer: true,
+				error: `${target} runs on peer ${entry.origin ?? "host"}; its ` +
+					"transcript is not readable from this host",
+			};
 		}
 		if (!entry.session) {
-			throw new Error(
-				`${target} has not recorded a transcript yet; ` +
-				"retry shortly");
+			return {
+				id: target,
+				error: `${target} has not recorded a transcript yet; ` +
+					"retry shortly",
+			};
 		}
 		return { id: target, path: entry.session };
 	}
