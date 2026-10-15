@@ -32,7 +32,8 @@ function version() {
 
 try {
 	const dropped = new SettingsReconciler(
-		SettingsReconciler.defaultPath(), version(), "pi-teams").reconcile();
+		SettingsReconciler.defaultPath(), version(), "pi-teams",
+		repoRoot).reconcile();
 	if (dropped.length > 0) {
 		process.stderr.write(
 			"pi-teams: removed duplicate package entries that would load " +

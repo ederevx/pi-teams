@@ -7,8 +7,8 @@
  * both extensions load, and pi aborts startup with tool-conflict errors
  * ("Tool "bash" conflicts with .../offload.ts"). The documented practice
  * (see the project status record) is: with the git package pinned, keep
- * only it. This reconciler runs from postinstall after any pi-daemon
- * install or pinned-ref update and drops duplicate pi-daemon entries,
+ * only it. This reconciler runs from postinstall after any pi-teams
+ * install or pinned-ref update and drops duplicate pi-teams entries,
  * preferring the pin that matches the installed version.
  */
 
@@ -16,12 +16,13 @@ import {
 	chmodSync,
 	existsSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 /** Owns the one rule: at most one packages entry may install the
@@ -29,11 +30,14 @@ import { homedir } from "node:os";
 export class SettingsReconciler {
 	/** @param settingsPath path of the pi settings.json to reconcile
 	 *  @param version the version being installed (prefers its pin)
-	 *  @param packageName directory name the package installs under */
-	constructor(settingsPath, version, packageName) {
+	 *  @param packageName directory name the package installs under
+	 *  @param repoRoot this checkout's root, so a local entry that
+	 *  resolves here is recognized whatever the directory is called */
+	constructor(settingsPath, version, packageName, repoRoot = "") {
 		this.settingsPath = settingsPath;
 		this.version = version;
 		this.packageName = packageName;
+		this.repoRoot = repoRoot ? this.realPath(repoRoot) : "";
 	}
 
 	/** Default settings location, honoring pi's config-dir override. */
@@ -54,13 +58,25 @@ export class SettingsReconciler {
 		}
 	}
 
-	/** Whether a packages entry installs this package: a git pin or a
-	 *  path whose final component is the package directory. */
+	/** Whether a packages entry installs this package: a git pin, a path
+	 *  that is this checkout under any directory name (a worktree, a
+	 *  renamed clone), or another copy of the package directory. */
 	installsPackage(entry) {
 		if (typeof entry !== "string") return false;
 		if (entry.startsWith("git:")) return entry.includes(this.packageName);
 		const last = entry.split(/[\\/]/).filter(Boolean).pop();
-		return last === this.packageName;
+		if (last === this.packageName) return true;
+		return this.repoRoot !== "" && this.realPath(entry) === this.repoRoot;
+	}
+
+	/** The absolute, symlink-resolved form of a path; a path that cannot
+	 *  be resolved is compared as given. */
+	realPath(value) {
+		try {
+			return realpathSync(value);
+		} catch {
+			return resolve(value);
+		}
 	}
 
 	/** Drops every pi-daemon entry but one. Returns the dropped entries,

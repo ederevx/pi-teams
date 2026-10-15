@@ -22,9 +22,10 @@ manifest="$state_dir/manifest.json"
 # broker/client), and a manual extension copy beside it aborts every new
 # pi session with tool-conflict errors. The manual installer therefore
 # refuses outright whenever a packages entry installs pi-teams — a git
-# pin or a local path whose final component is this package. Uninstall
-# the manual copy or drop the pin first; nothing on disk has been
-# touched by the refusal.
+# pin, or a local path that is this checkout (whatever its directory is
+# called: a worktree or a renamed clone still counts) or another copy of
+# the package. Uninstall the manual copy or drop the pin first; nothing
+# on disk has been touched by the refusal.
 settings="$agent_dir/settings.json"
 if [[ -f "$settings" ]]; then
   python_bin=""
@@ -32,17 +33,25 @@ if [[ -f "$settings" ]]; then
 	if command -v "$candidate" >/dev/null 2>&1; then python_bin="$candidate"; break; fi
   done
   if [[ -n "$python_bin" ]]; then
-	pinned="$($python_bin - "$settings" <<'PYGUARD'
-import json, sys
+	pinned="$($python_bin - "$settings" "$repo_root" <<'PYGUARD'
+import json, os, sys
 try:
     packages = json.load(open(sys.argv[1], encoding="utf-8")).get("packages", [])
 except Exception:
     packages = []
+repo = os.path.realpath(sys.argv[2])
 for entry in packages:
     if not isinstance(entry, str):
         continue
     normalized = entry.replace("\\", "/").rstrip("/")
-    if (normalized.startswith("git:") and "pi-teams" in normalized) \
+    if normalized.startswith("git:"):
+        if "pi-teams" in normalized:
+            print(entry)
+            break
+        continue
+    # A local path: this checkout under any directory name, or another
+    # copy of the package directory.
+    if os.path.realpath(normalized) == repo \
             or normalized.rsplit("/", 1)[-1] == "pi-teams":
         print(entry)
         break
