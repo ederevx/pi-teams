@@ -4,6 +4,18 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.47 - 2026-10-15
+
+- Recognize this checkout by path, not directory name, in the one-loader
+  guard (`scripts/install.sh`) and the postinstall reconciler
+  (`scripts/settings-reconciler.mjs`). Both matched a local `packages`
+  entry only when its final path component was `pi-teams`, so a worktree
+  or renamed clone was missed: a manual install added a second extension
+  copy beside the pin, and the reconciler left both entries loading it.
+  A local entry that resolves to this checkout is now caught whatever
+  the directory is called; the git-pin and same-named-directory rules
+  are unchanged.
+
 ## v0.4.46 - 2026-10-15
 
 - Stream each teammate's live activity while `team_wait` blocks: the
