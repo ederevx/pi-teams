@@ -4,6 +4,13 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.48 - 2026-10-15
+
+- Style the live wait view so a teammate's marker cannot be mistaken for
+  a line of its output: each header is a rule-framed band in the title
+  color with its state muted, and its activity is indented under it with
+  any `[label]` prefix muted.
+
 ## v0.4.47 - 2026-10-15
 
 - Recognize this checkout by path, not directory name, in the one-loader
