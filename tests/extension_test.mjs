@@ -2179,7 +2179,7 @@ function renderSlot() {
 	return {};
 }
 
-const viewTheme = { fg: (_color, text) => text };
+const viewTheme = { fg: (_color, text) => text, bold: (text) => text };
 
 test("TranscriptTail returns only the lines added since the last read", () => {
 	const path = emptyTranscript("tail-append.jsonl");
@@ -2339,6 +2339,26 @@ test("TeamWaitView shows every stream while a wait blocks", () => {
 		assert.match(text, new RegExp(`${id} line 19`),
 			`${id}'s newest line is in view`);
 	}
+	// The marker is a header band: every activity line sits indented
+	// under it, so a line of output cannot be mistaken for a marker.
+	for (const line of text.split("\n")) {
+		if (line.startsWith("──")) continue;
+		assert.match(line, /^ {2}\S/, `activity line indented: ${line}`);
+	}
+});
+
+test("TeamWaitView dims an activity label and marks an empty stream", () => {
+	const view = new TeamWaitView();
+	const partial = view.render({
+		content: [{ type: "text", text: "waiting" }],
+		details: { streams: [
+			{ id: "a", state: "live", lines: ["[assistant] working"] },
+			{ id: "b", state: "starting", lines: [] },
+		] },
+	}, { expanded: false, isPartial: true }, viewTheme, renderSlot())
+		.render(80).join("\n");
+	assert.match(partial, / {2}\[assistant\] working/);
+	assert.match(partial, / {2}\(no activity yet\)/);
 });
 
 test("TeamWaitView previews a long final report", () => {

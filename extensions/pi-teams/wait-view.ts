@@ -1,8 +1,9 @@
 /**
  * pi-teams - the TUI view of a team_wait result.
  *
- * A live wait shows one section per teammate - its state and most recent
- * lines - so every stream stays in view while the wait blocks. The final
+ * A live wait shows one section per teammate - a header marker in the
+ * title color, its activity indented beneath it - so every stream stays
+ * in view and a marker never reads as another output line. The final
  * result is pi's own preview: the first lines, with the rest on expand.
  * Used only by the interactive renderer, so the model-facing text is
  * untouched.
@@ -45,40 +46,74 @@ export class TeamWaitView {
 		theme: Theme,
 	): string {
 		const lines = options.isPartial
-			? this.streamLines(result, options.expanded)
-			: this.resultLines(result, options.expanded);
-		return lines.map((line) => theme.fg("toolOutput", line)).join("\n");
+			? this.streamLines(result, options.expanded, theme)
+			: this.resultLines(result, options.expanded, theme);
+		return lines.join("\n");
 	}
 
+	/** One section per teammate: a styled marker, then that teammate's
+	 *  activity indented under it, so the marker never reads as just
+	 *  another line of output. */
 	private streamLines(
 		result: AgentToolResult<unknown>,
 		expanded: boolean,
+		theme: Theme,
 	): string[] {
 		const streams = this.streams(result);
-		if (streams.length === 0) return this.plainText(result).split("\n");
+		if (streams.length === 0) return this.plainLines(result, theme);
 		const perStream = Math.max(
 			1, Math.floor(TeamWaitView.PARTIAL_LINES / streams.length) - 1);
 		const lines: string[] = [];
 		for (const stream of streams) {
-			lines.push(`── ${stream.id} (${stream.state}) ──`);
+			lines.push(this.marker(stream, theme));
 			const shown = expanded
 				? stream.lines : stream.lines.slice(-perStream);
-			lines.push(...(shown.length > 0 ? shown : ["(no activity yet)"]));
+			for (const line of shown.length > 0 ? shown : ["(no activity yet)"]) {
+				lines.push(this.activity(line, theme));
+			}
 		}
 		return lines;
+	}
+
+	/** A section header: the teammate's id in the title color, its state
+	 *  muted, framed by rules. */
+	private marker(stream: TeamWaitStreamSection, theme: Theme): string {
+		return theme.fg("toolTitle", theme.bold(`── ${stream.id}`)) +
+			theme.fg("muted", ` (${stream.state}) `) +
+			theme.fg("toolTitle", "──");
+	}
+
+	/** One activity line, indented under its marker; a leading `[label]`
+	 *  is muted so the text reads apart from it. */
+	private activity(line: string, theme: Theme): string {
+		const labelled = /^\[([^\]]+)\]\s?(.*)$/.exec(line);
+		if (!labelled) return `  ${theme.fg("toolOutput", line)}`;
+		return `  ${theme.fg("muted", `[${labelled[1]}]`)} ` +
+			theme.fg("toolOutput", labelled[2]);
 	}
 
 	private resultLines(
 		result: AgentToolResult<unknown>,
 		expanded: boolean,
+		theme: Theme,
 	): string[] {
-		const lines = this.plainText(result).split("\n");
-		if (expanded || lines.length <= TeamWaitView.PREVIEW_LINES) return lines;
-		const hidden = lines.length - TeamWaitView.PREVIEW_LINES;
+		const styled = this.plainLines(result, theme);
+		if (expanded || styled.length <= TeamWaitView.PREVIEW_LINES) return styled;
+		const hidden = styled.length - TeamWaitView.PREVIEW_LINES;
 		return [
-			...lines.slice(0, TeamWaitView.PREVIEW_LINES),
-			`... (${hidden} more lines; expand the tool to show all)`,
+			...styled.slice(0, TeamWaitView.PREVIEW_LINES),
+			theme.fg("muted",
+				`... (${hidden} more lines; expand the tool to show all)`),
 		];
+	}
+
+	/** The result text, line by line, in the output color. */
+	private plainLines(
+		result: AgentToolResult<unknown>,
+		theme: Theme,
+	): string[] {
+		return this.plainText(result).split("\n")
+			.map((line) => theme.fg("toolOutput", line));
 	}
 
 	private streams(result: AgentToolResult<unknown>): TeamWaitStreamSection[] {
