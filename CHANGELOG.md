@@ -4,6 +4,26 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.45 - 2026-10-15
+
+- Replace `team_tail` with a target-aware `team_peek`. The old tool
+  read the globally newest transcript, which could be another agent's;
+  `team_peek` resolves an agent id through the broker registry to that
+  session's `.jsonl` (default this session), renders role-labelled
+  head/tail pages or case-insensitive grep matches with context, and
+  prints the transcript path and `#N` line numbers so the read and grep
+  tools can follow up. A peer-hosted target is refused, because its
+  transcript is not readable from this host.
+- Teach `pre_teams` the workflow chains: reuse before you spawn by
+  listing and peeking at candidate sessions, and prefer `team_attach`
+  when a live session already covers the task's topic, repo, or files
+  (attach -> send the task -> wait) over a blank `team_spawn`.
+  `team_ls` rows now carry name, cwd, parent, `(you)`, and peer so a
+  session can be matched before attaching.
+- Make `team_attach` mark the requester a team owner, mirroring
+  `team_spawn`, so `team_send` and `team_wait` work as soon as the
+  attach returns instead of racing the target's hold registration.
+
 ## v0.4.44 - 2026-10-14
 
 - Stop deleting teammate transcripts. The broker's session-store sweep
