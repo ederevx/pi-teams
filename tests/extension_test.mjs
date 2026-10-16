@@ -2179,7 +2179,10 @@ function renderSlot() {
 	return {};
 }
 
-const viewTheme = { fg: (_color, text) => text, bold: (text) => text };
+const viewTheme = {
+	fg: (_color, text) => text, bold: (text) => text,
+	italic: (text) => text,
+};
 
 test("TranscriptTail returns only the lines added since the last read", () => {
 	const path = emptyTranscript("tail-append.jsonl");
@@ -2339,26 +2342,49 @@ test("TeamWaitView shows every stream while a wait blocks", () => {
 		assert.match(text, new RegExp(`${id} line 19`),
 			`${id}'s newest line is in view`);
 	}
-	// The marker is a header band: every activity line sits indented
-	// under it, so a line of output cannot be mistaken for a marker.
+	// The marker is a bold header band; activity is set apart by its
+	// color, so no line of output is indented.
 	for (const line of text.split("\n")) {
-		if (line.startsWith("──")) continue;
-		assert.match(line, /^ {2}\S/, `activity line indented: ${line}`);
+		assert.doesNotMatch(line, /^ /, `activity line is flush: ${line}`);
 	}
 });
 
-test("TeamWaitView dims an activity label and marks an empty stream", () => {
+test("TeamWaitView colors activity by kind and marks an empty stream", () => {
 	const view = new TeamWaitView();
+	const palette = {
+		fg: (color, text) => `<${color}:${text}>`,
+		bold: (text) => `*${text}*`,
+		italic: (text) => `/${text}/`,
+	};
 	const partial = view.render({
 		content: [{ type: "text", text: "waiting" }],
 		details: { streams: [
-			{ id: "a", state: "live", lines: ["[assistant] working"] },
+			{ id: "a", state: "live", lines: [
+				"[user] go",
+				"[assistant] working",
+				"[tool bash] ls",
+				"[tool bash error] boom",
+				"[custom hook] note",
+				"[custom] bare",
+				"[compaction] trimmed",
+			] },
 			{ id: "b", state: "starting", lines: [] },
 		] },
-	}, { expanded: false, isPartial: true }, viewTheme, renderSlot())
+	}, { expanded: true, isPartial: true }, palette, renderSlot())
 		.render(80).join("\n");
-	assert.match(partial, / {2}\[assistant\] working/);
-	assert.match(partial, / {2}\(no activity yet\)/);
+	assert.match(partial, /^<accent:\[user\]> <accent:go>/m);
+	assert.match(partial, /^<success:\[assistant\]> <text:working>/m);
+	assert.match(partial, /^<toolTitle:\[tool bash\]> <toolOutput:ls>/m);
+	assert.match(partial, /^<error:\[tool bash error\]> <error:boom>/m);
+	assert.match(partial,
+		/^<customMessageLabel:\[custom hook\]> <customMessageText:note>/m);
+	assert.match(partial,
+		/^<customMessageLabel:\[custom\]> <customMessageText:bare>/m);
+	assert.match(partial,
+		/^<thinkingText:\[compaction\]> \/<thinkingText:trimmed>\//m);
+	assert.match(partial, /^<dim:\(no activity yet\)>/m);
+	assert.match(partial, /<toolTitle:\*── a\*>/,
+		"the marker stays bold and framed");
 });
 
 test("TeamWaitView previews a long final report", () => {

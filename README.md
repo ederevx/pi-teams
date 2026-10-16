@@ -81,9 +81,10 @@ natively, without a shared filesystem as the channel.
 - While it blocks, the tool window streams one live section per
   teammate whose transcript is readable on this host: its state
   (`live`, `quiet 45s`, `starting`) and the newest lines of what it is
-  doing, indented under a rule-framed marker so a line of activity can
-  never be read as a marker. A parent can then see which teammate is
-  working, quiet, or unreachable instead of a single elapsed line. A
+  doing, colored by kind under a bold rule-framed marker so a line of
+  activity can never be read as a marker. A parent can then see which
+  teammate is working, quiet, or unreachable instead of a single
+  elapsed line. A
   peer-hosted teammate has no transcript here and shows
   `peer: no live view`.
 - The live section is a view, never the answer: the model still gets
