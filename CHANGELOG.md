@@ -4,6 +4,13 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.49 - 2026-10-16
+
+- Color the live wait view's activity by kind instead of indenting it:
+  the `[label]` and its text take a tone from what the line is (a
+  teammate's words, a tool call, reasoning), so the marker is told apart
+  by weight and color and the transcript reads flush.
+
 ## v0.4.48 - 2026-10-15
 
 - Style the live wait view so a teammate's marker cannot be mistaken for
