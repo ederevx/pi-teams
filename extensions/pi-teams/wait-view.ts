@@ -1,9 +1,9 @@
 /**
  * pi-teams - the TUI view of a team_wait result.
  *
- * A live wait shows one section per teammate - a header marker in the
- * title color, its activity indented beneath it - so every stream stays
- * in view and a marker never reads as another output line. The final
+ * A live wait shows one section per teammate - a bold header marker,
+ * then its activity colored by kind - so every stream stays in view
+ * and a marker never reads as another output line. The final
  * result is pi's own preview: the first lines, with the rest on expand.
  * Used only by the interactive renderer, so the model-facing text is
  * untouched.
@@ -17,6 +17,7 @@ import type {
 import { type Component, Text } from "@earendil-works/pi-tui";
 
 import type { TeamWaitStreamSection } from "./wait-feed.ts";
+import { WaitLinePalette } from "./wait-palette.ts";
 
 /** The part of pi's render context this view reads. */
 export interface ResultRenderSlot {
@@ -26,6 +27,7 @@ export interface ResultRenderSlot {
 export class TeamWaitView {
 	private static readonly PARTIAL_LINES = 12;
 	private static readonly PREVIEW_LINES = 10;
+	private readonly palette = new WaitLinePalette();
 
 	/** Renders one result into a reusable Text component. */
 	render(
@@ -51,8 +53,8 @@ export class TeamWaitView {
 		return lines.join("\n");
 	}
 
-	/** One section per teammate: a styled marker, then that teammate's
-	 *  activity indented under it, so the marker never reads as just
+	/** One section per teammate: a bold marker, then that teammate's
+	 *  activity colored by kind, so the marker never reads as just
 	 *  another line of output. */
 	private streamLines(
 		result: AgentToolResult<unknown>,
@@ -68,9 +70,11 @@ export class TeamWaitView {
 			lines.push(this.marker(stream, theme));
 			const shown = expanded
 				? stream.lines : stream.lines.slice(-perStream);
-			for (const line of shown.length > 0 ? shown : ["(no activity yet)"]) {
-				lines.push(this.activity(line, theme));
+			if (shown.length === 0) {
+				lines.push(theme.fg("dim", "(no activity yet)"));
+				continue;
 			}
+			for (const line of shown) lines.push(this.activity(line, theme));
 		}
 		return lines;
 	}
@@ -83,13 +87,15 @@ export class TeamWaitView {
 			theme.fg("toolTitle", "──");
 	}
 
-	/** One activity line, indented under its marker; a leading `[label]`
-	 *  is muted so the text reads apart from it. */
+	/** One activity line, colored by its `[label]` kind; text keeps the
+	 *  line's own color so it never reads as the marker above it. */
 	private activity(line: string, theme: Theme): string {
 		const labelled = /^\[([^\]]+)\]\s?(.*)$/.exec(line);
-		if (!labelled) return `  ${theme.fg("toolOutput", line)}`;
-		return `  ${theme.fg("muted", `[${labelled[1]}]`)} ` +
-			theme.fg("toolOutput", labelled[2]);
+		if (!labelled) return theme.fg(this.palette.plain().text, line);
+		const tone = this.palette.tone(labelled[1]);
+		const body = theme.fg(tone.text, labelled[2]);
+		return `${theme.fg(tone.label, `[${labelled[1]}]`)} ` +
+			(tone.italic ? theme.italic(body) : body);
 	}
 
 	private resultLines(
