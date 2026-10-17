@@ -277,8 +277,6 @@ never the system `/tmp`. It chains:
 
 ## Deployment
 
-## Manual install
-
 ```
 scripts/install.sh      # broker, client, and extension into ~/.local
 scripts/uninstall.sh    # remove exactly what install.sh wrote
