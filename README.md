@@ -277,19 +277,7 @@ never the system `/tmp`. It chains:
 
 ## Deployment
 
-### As a pi package
-
-```
-pi install git:github.com/ederevx/pi-teams@v0.4.49
-pi install /absolute/path/to/pi-teams
-```
-
-The package ships the broker and client under `src/`; the extension
-runs them from its own directory, so install needs no setup step.
-`PI_TEAMS_BIN` overrides the lookup. The broker starts on demand, one
-per `TEAM_ROOT`.
-
-### Manual install
+## Manual install
 
 ```
 scripts/install.sh      # broker, client, and extension into ~/.local
