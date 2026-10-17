@@ -8,29 +8,36 @@ session start, and spawns, waits on, messages, attaches, and reaps
 teammates through agent tools — so multiple pi agents coordinate
 natively, without a shared filesystem as the channel.
 
+## Install
+
+```
+pi install git:github.com/ederevx/pi-teams@v0.4.49
+```
+
+The package ships the broker and client under `src/`; the extension
+runs them from its own directory, so install needs no setup step.
+`PI_TEAMS_BIN` overrides the lookup, and the broker starts on demand,
+one per `TEAM_ROOT`. See Deployment for a manual install.
+
 ## What it provides
 
-- **Broker** — `src/teamd.py`, composed from `team_broker.py`,
-  `team_root.py`, `peer_link.py`, `peer_tunnel.py`, `gc_reaper.py`,
-  and `peer_transport.py`:
-  - Loopback TCP registry and relay on `127.0.0.1`; ephemeral port and
-    random token, published atomically at `TEAM_ROOT/endpoint`
-    (default `~/.local/state/pi-teams`).
-  - Token-gated hello handshake, JSON-lines relay, connection-based
-    liveness (no pid probing), registry mirrored to `registry.json`.
-  - Per-root broker lock: one broker per root, even when many sessions
-    race at startup or the extension reloads.
-- **Client** — `src/team.py` over `src/team_client.py`: one persistent
-  connection per agent (`team hold`); CLI ops: `register`, `ls`,
-  `send`, `follow`, `terminate`, `deregister`.
-- **Extension** — `extensions/pi-teams.ts` plus the modules under
-  `extensions/pi-teams/`: registers the running pi, holds its
-  endpoint open, injects the teammates note before the first run, and
-  exposes the tools and the single command below.
+- **Broker** — a loopback TCP registry and relay on `127.0.0.1`: an
+  ephemeral port and random token published atomically at
+  `TEAM_ROOT/endpoint` (default `~/.local/state/pi-teams`), a
+  token-gated hello handshake, JSON-lines relay, connection-based
+  liveness, a registry mirrored to `registry.json`, and one broker per
+  root even when many sessions race at startup or the extension
+  reloads.
+- **Client** — one persistent connection per agent (`team hold`); CLI
+  ops: `register`, `ls`, `send`, `follow`, `terminate`, `deregister`.
+- **Extension** — registers the running pi, holds its endpoint open,
+  injects the teammates note before the first run, and exposes the
+  tools and commands below.
 - **Tools** (agent-facing; commands are not the interface):
 
   | Tool | Ability |
   | --- | --- |
+  | `pre_teams` | Read the team catalogue and unlock the other tools |
   | `team_spawn` | Spawn a named, resumable teammate for one task |
   | `team_wait` | Block for reports (see `team_wait` below) |
   | `team_send` | Message an agent, local or on a linked peer |
@@ -60,12 +67,10 @@ natively, without a shared filesystem as the channel.
   like a `subagent` delegation, it receives only the task text — and
   runs with the general teammate role (reports, messaging, waiting,
   leading its own sub-team, no memory writes).
-- The launch is a headless pi RPC session, not `pi -p`: the extension
-  owns it through `child_process`, holds its stdin open, and inherits
-  the model, thinking level, and session directory. `pi.exec` is
-  deliberately not used: it opens the child's stdin to `/dev/null` and
-  drops the `env` option, which would kill the hold and strip fork
-  identity.
+- The launch is a headless pi RPC session, not `pi -p`. The
+  extension requests the spawn through the broker: the destination
+  broker uses a session-host provider or a detached fallback, and the
+  requesting pi does not own the child process.
 
 ### team_wait and the hang watchdog
 
@@ -101,16 +106,16 @@ natively, without a shared filesystem as the channel.
 
 Liveness is connection-based everywhere: an agent is live while its
 hold connection is open. Reaping is a request the session answers
-itself, never a signal, and a main agent is never asked to reap.
+itself, never a signal.
 
 - **Idle reap**: with no work contact for `PI_TEAMS_GC_IDLE_HOURS`
-  (default 3h; 0 disables the policy), the broker asks the reachable
-  session to reap itself. The request steers a turn that calls the
-  `team_gc_reap` tool, which acks the broker and requests an orderly
-  process shutdown. A session is asked once per idle episode: any
-  work contact resets the clock and earns a fresh request, while a
-  session that never answers is left alone — its connection liveness
-  still owns the eventual cleanup.
+  (default 3h; 0 disables the policy), the broker asks the idle
+  reachable session to reap itself, main agents included. The request
+  steers a turn that calls the `team_gc_reap` tool, which acks the
+  broker and requests an orderly process shutdown. A session is asked
+  once per idle episode: any work contact resets the clock and earns a
+  fresh request, while a session that never answers is left alone —
+  its connection liveness still owns the eventual cleanup.
 - **Work keeps forks alive**: pi's lifecycle publishes busy state
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends
@@ -127,9 +132,8 @@ itself, never a signal, and a main agent is never asked to reap.
   or abandoned. Conversation lifetime stays with the daemon that owns
   the store, and a registration drop never touches the file.
 - **Self-restart**: the broker stamps its endpoint with a source hash
-  and exits once idle for `PI_TEAMS_RESTART_GRACE` (default 60s) after
-  the on-disk source changes, never while agents are live; the next
-  start adopts the new code.
+  and exits after the configured period without work activity once the
+  on-disk source changes; the next start adopts the new code.
 
 ### Attach
 
@@ -166,9 +170,10 @@ Two machines with SSH between them federate their brokers.
   loopback endpoint over the existing SSH session, owns a loopback-
   bound `ssh -L` tunnel, and links the brokers. `team_peer remove`
   unlinks; both sides persist the config and rebuild on restart.
-- **Remote spawn** — `team_spawn` accepts `host`. One spawn service
-  launches locally or asks the peer host's main agent to spawn, so the
-  peer owns the process, session, and reaping. `team_wait` waits by id.
+- **Remote spawn** — `team_spawn` accepts `host`. The destination
+  broker spawns through a session-host provider or a detached fallback,
+  so the peer owns the process, session, and reaping. `team_wait`
+  waits by id.
 - **Messaging** — ids carry a host label (`<host>:fork-...`), so
   `team_send`, reports, and `team_kill` reach peer-hosted ids through
   the same link; an undeliverable target reports back. A local target
@@ -275,8 +280,7 @@ never the system `/tmp`. It chains:
 ### As a pi package
 
 ```
-pi install git:github.com/ederevx/pi-teams@v0.4.0
-pi install npm:pi-teams          # once published to npm
+pi install git:github.com/ederevx/pi-teams@v0.4.49
 pi install /absolute/path/to/pi-teams
 ```
 
@@ -297,19 +301,6 @@ extension into the pi agent home, and a byte manifest;
 `uninstall.sh` removes exactly that manifest. Writes are staged
 through same-directory temp files and moved atomically. Run from Git
 Bash on Windows. Restart pi sessions after installing.
-
-Adoption rule: validate on `main` (tests green), then install — never
-the reverse. Each release tags the validated HEAD and records the
-commits since the previous tag in `CHANGELOG.md`.
-
-## Roadmap
-
-- **Task routing**: kind-based delivery (task/result/notice) with
-  acknowledgement and retry.
-- **Broker upgrades**: spooling for offline recipients, authenticated
-  roots, and a tighter spawner tie so forks reap promptly when the
-  spawning pi dies hard (currently bounded by the heartbeat sweep)
-  without pid probing.
 
 ## Attribution
 
