@@ -61,10 +61,15 @@ export class TeamsRemoteGuard {
 
 	/** The shell text a tool call would run, or undefined. */
 	private commandOf(event: ToolCallEvent): string | undefined {
-		if (event.toolName !== "bash" && event.toolName !== "powershell") {
-			return undefined;
-		}
-		const command = (event.input as { command?: unknown }).command;
+		const input = (event.input ?? {}) as Record<string, unknown>;
+		const shell = event.toolName === "bash"
+			|| event.toolName === "powershell";
+		// pi-daemon's submit runs the command later, out of this handler's
+		// sight; match it by name only, so the two packages stay independent.
+		const submitted = event.toolName === "daemon_tasks"
+			&& input.action === "submit";
+		if (!shell && !submitted) return undefined;
+		const command = input.command;
 		return typeof command === "string" && command.trim() !== ""
 			? command : undefined;
 	}

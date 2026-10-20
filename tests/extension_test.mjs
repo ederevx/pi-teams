@@ -2521,6 +2521,8 @@ test("remote guard: refuses ssh work, tunnels, and headless pi", async () => {
 		"cd x && ssh host ls", "bash -c \"ssh host ls\"",
 		"sudo env A=1 timeout 5 ssh host ls",
 		"echo $(ssh host hostname)", "ssh -o RemoteCommand=ls host",
+		"ssh host -T", "ssh host -o RemoteCommand=make",
+		"(cd x && ssh host make)", "pi -p update",
 		"rsync --rsync-path='sh -c x' a host:b",
 		"ssh host 'tar x --to-command=sh'",
 		"pi -p x", "pi --print x", "pi --mode rpc", "pi \"prompt\"",
@@ -2541,7 +2543,8 @@ test("remote guard: keeps file transfer and pi management", async () => {
 		"sftp -b batch host", "rsync -az -e 'ssh -p 2222' d host:d",
 		"ssh host 'cat > f' < f",
 		"tar c d | ssh host 'mkdir -p d && tar x -C d'",
-		"ssh host sha256sum f", "ssh -V", "ssh -G host",
+		"ssh host sha256sum f", "ssh host -- cat f",
+		"ssh -V", "ssh -G host",
 		"ssh-keygen -t ed25519", "grep -rn ssh README.md",
 		"pi install npm:x", "pi update", "pi list", "pi --version",
 	];
@@ -2560,6 +2563,14 @@ test("remote guard: covers powershell and never foreign tools", async () => {
 	const [foreign] = await pi.emit("tool_call",
 		{ toolName: "read", input: { path: "x" } });
 	assert.equal(foreign, undefined);
+	const [submitted] = await pi.emit("tool_call",
+		{ toolName: "daemon_tasks",
+			input: { action: "submit", command: "pi -p x" } });
+	assert.equal(submitted.block, true,
+		"a daemon_tasks submit cannot smuggle a headless pi");
+	const [status] = await pi.emit("tool_call",
+		{ toolName: "daemon_tasks", input: { action: "status" } });
+	assert.equal(status, undefined);
 	const [empty] = await pi.emit("tool_call",
 		{ toolName: "bash", input: { command: "   " } });
 	assert.equal(empty, undefined);
