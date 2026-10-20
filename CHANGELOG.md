@@ -4,6 +4,17 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.50 - 2026-10-20
+
+- Keep remote work inside pi-teams: a `tool_call` guard refuses `ssh`
+  work and a headless `pi` in `bash` and `powershell`, so another host is
+  reached only to move files (`scp`, `sftp`, `rsync`) and work goes
+  through `team_peer`/`team_spawn`/`team_send`. Options after the ssh
+  host, `( … )` subshells, and command substitutions are seen too, and
+  `daemon_tasks submit` is inspected so a headless `pi` cannot be
+  smuggled past it. `PI_TEAMS_REMOTE_GUARD=off` or `piTeams.remoteGuard`
+  disables it.
+
 ## v0.4.49 - 2026-10-16
 
 - Color the live wait view's activity by kind instead of indenting it:
