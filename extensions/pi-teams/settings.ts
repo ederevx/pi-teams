@@ -172,6 +172,13 @@ export class PackageSettings {
 		return value > 0 ? value : DEFAULT_SPAWN_WINDOW_MS;
 	}
 
+	/** The remote-work guard is on unless explicitly disabled. */
+	remoteGuard(): boolean {
+		return this.resolve(
+			"PI_TEAMS_REMOTE_GUARD", "remoteGuard", true,
+			"bool") as boolean;
+	}
+
 	/** Zero is not a wait bound; the default stands in. */
 	waitSeconds(): number {
 		const value = this.resolve(

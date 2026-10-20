@@ -127,6 +127,9 @@ export class PreTeamsTool {
 				"agent can still be attached, judged by its team_ls name.",
 			"Call team_gc_reap only when the broker asks or this session " +
 				"is done.",
+			"Work on another host stays in pi-teams: ssh is for moving " +
+				"files (scp, sftp, rsync), and headless pi is refused; the " +
+				"remote-work guard blocks both.",
 		];
 		this.features = [
 			"A local broker registers every pi session and relays " +

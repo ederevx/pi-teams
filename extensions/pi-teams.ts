@@ -16,6 +16,7 @@ import { TeamWaitFeed } from "./pi-teams/wait-feed.ts";
 import { TeamWaitStream } from "./pi-teams/wait-stream.ts";
 import { TeamWaitView } from "./pi-teams/wait-view.ts";
 import { PreTeamsTool } from "./pi-teams/pre-teams.ts";
+import { TeamsRemoteGuard } from "./pi-teams/remote-guard.ts";
 import { openTeammatesDock } from "./pi-teams/dock.ts";
 import {
 	announceAgents,
@@ -54,6 +55,8 @@ export { ResultInbox } from "./pi-teams/inbox.ts";
 export { PendingRequests } from "./pi-teams/pending.ts";
 export { BrokerOps } from "./pi-teams/broker-ops.ts";
 export { SpawnService } from "./pi-teams/spawn.ts";
+export { TeamsRemoteGuard } from "./pi-teams/remote-guard.ts";
+export { RemoteWorkClassifier } from "./pi-teams/remote-work-classifier.ts";
 
 export default async function (pi: ExtensionAPI) {
 	// A reload builds a second TeamAgent while the first one's hold may
@@ -76,6 +79,9 @@ export default async function (pi: ExtensionAPI) {
 
 	// Onboarding: one `pre_teams` catalog call gates every team tool.
 	new PreTeamsTool().register(pi);
+
+	// Remote work stays in pi-teams: ssh for files, team tools for work.
+	new TeamsRemoteGuard().register(pi);
 
 	// -- agent-facing teammate spawn -------------------------------------
 	// The agent names a task and gets a resumable session back; no
