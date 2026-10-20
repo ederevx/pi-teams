@@ -4,6 +4,13 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.51 - 2026-10-20
+
+- Say in the `pre_teams` catalogue that a fitting session is always
+  looked up and attached first: run `team_ls` and `team_peek`, attach
+  the session that covers the task, and fall back to `team_spawn` only
+  when none fits or every fit already has a parent.
+
 ## v0.4.50 - 2026-10-20
 
 - Keep remote work inside pi-teams: a `tool_call` guard refuses `ssh`
