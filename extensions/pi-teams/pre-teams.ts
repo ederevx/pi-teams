@@ -97,12 +97,13 @@ export class PreTeamsTool {
 		this.conventions = [
 			"Call pre_teams once per session before any team tool; its " +
 				"gate blocks the rest until you do.",
-			"Reuse before you spawn: run team_ls, then team_peek likely " +
-				"candidates - from=head shows the original task, grep " +
-				"finds the topic, tail shows where it stopped.",
-			"Prefer team_attach when a live session's history already " +
-				"covers the task's topic, repo, or files: it keeps that " +
-				"context, while a spawn starts blank. Spawn only when none " +
+			"Always try to attach first, before any spawn: run team_ls, " +
+				"then team_peek likely candidates - from=head shows the " +
+				"original task, grep finds the topic, tail shows where it " +
+				"stopped.",
+			"Attach the live session that fits the task's topic, repo, or " +
+				"files: team_attach keeps its context, while a spawn starts " +
+				"blank. Fall back to team_spawn only when no live session " +
 				"fits or every fit already has a parent (attach refuses " +
 				"those).",
 			"Attach chain: team_attach an id -> team_send the returned " +

@@ -1852,8 +1852,8 @@ test("pre_teams catalog covers every team tool, conventions, features", async ()
 	assert.deepEqual(result.details.tools, names);
 	const conventions = result.details.conventions.join("\n");
 	assert.match(conventions,
-		/Reuse before you spawn.*team_ls.*team_peek/s);
-	assert.match(conventions, /Prefer team_attach/);
+		/Always try to attach first.*team_ls.*team_peek/s);
+	assert.match(conventions, /Fall back to team_spawn/);
 	assert.match(conventions, /Attach chain:.*team_send.*team_wait/s);
 	assert.match(conventions, /Spawn chain:.*team_spawn.*team_wait/s);
 	for (const name of names) {
