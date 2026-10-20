@@ -33,6 +33,9 @@ one per `TEAM_ROOT`. See Deployment for a manual install.
 - **Extension** — registers the running pi, holds its endpoint open,
   injects the teammates note before the first run, and exposes the
   tools and commands below.
+- **Remote-work guard** — refuses `ssh` work and a headless `pi` in the
+  shell, so a host is reached only to move files (`scp`, `sftp`,
+  `rsync`) and work goes through the team tools.
 - **Tools** (agent-facing; commands are not the interface):
 
   | Tool | Ability |
@@ -226,6 +229,7 @@ converts them to seconds internally.
 | `spawnWindowMs` | `15000` | `PI_TEAMS_SPAWN_WINDOW` |
 | `waitSeconds` | `300` | `PI_TEAMS_WAIT` |
 | `stallSeconds` | `90` | `PI_TEAMS_STALL` |
+| `remoteGuard` | `true` | `PI_TEAMS_REMOTE_GUARD` (`off` disables) |
 | `ssh` | `ssh` | `PI_TEAMS_SSH` |
 | `remoteState` | `$HOME/.local/state/pi-teams` | `PI_TEAMS_REMOTE_STATE` |
 | `peerSetup` | bundled `peer-ssh-setup.sh` | `PI_TEAMS_PEER_SETUP` |
