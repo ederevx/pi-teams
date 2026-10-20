@@ -71,6 +71,10 @@ const { formatReport } =
 	await import("../extensions/pi-teams/messages.ts");
 const { PreTeamsTool } =
 	await import("../extensions/pi-teams/pre-teams.ts");
+const { TeamsRemoteGuard } =
+	await import("../extensions/pi-teams/remote-guard.ts");
+const { RemoteWorkClassifier } =
+	await import("../extensions/pi-teams/remote-work-classifier.ts");
 const { persistPiInvocation, piEntryFile } =
 	await import("../extensions/pi-teams/paths.ts");
 
@@ -2480,4 +2484,90 @@ test("team_wait streams teammate activity and keeps its report text",
 		if (previous === undefined) delete globalThis.__piTeamsAgent;
 		else globalThis.__piTeamsAgent = previous;
 	}
+});
+
+/** A minimal ExtensionAPI double for the remote-work guard. */
+function makeGuardPi() {
+	const handlers = new Map();
+	const pi = {
+		on(name, handler) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
+		},
+		async emit(name, event) {
+			const results = [];
+			for (const handler of handlers.get(name) ?? []) {
+				results.push(await handler(event));
+			}
+			return results;
+		},
+	};
+	return pi;
+}
+
+function guardPi(enabled = true) {
+	const pi = makeGuardPi();
+	const settings = { remoteGuard: () => enabled };
+	new TeamsRemoteGuard(settings, new RemoteWorkClassifier()).register(pi);
+	return pi;
+}
+
+test("remote guard: refuses ssh work, tunnels, and headless pi", async () => {
+	const pi = guardPi();
+	const blocked = [
+		"ssh host", "ssh -T host", "ssh host make",
+		"ssh -p 2222 -i k host 'git pull'", "ssh host pi -p x",
+		"cd x && ssh host ls", "bash -c \"ssh host ls\"",
+		"sudo env A=1 timeout 5 ssh host ls",
+		"echo $(ssh host hostname)", "ssh -o RemoteCommand=ls host",
+		"rsync --rsync-path='sh -c x' a host:b",
+		"ssh host 'tar x --to-command=sh'",
+		"pi -p x", "pi --print x", "pi --mode rpc", "pi \"prompt\"",
+		"git diff | pi x", "ssh -N -L 1:h:2 host",
+	];
+	for (const command of blocked) {
+		const [result] = await pi.emit("tool_call",
+			{ toolName: "bash", input: { command } });
+		assert.equal(result?.block, true, `must block: ${command}`);
+		assert.match(result.reason, /pi-teams/);
+	}
+});
+
+test("remote guard: keeps file transfer and pi management", async () => {
+	const pi = guardPi();
+	const allowed = [
+		"scp a host:b", "scp -P 2222 -i k host:a .",
+		"sftp -b batch host", "rsync -az -e 'ssh -p 2222' d host:d",
+		"ssh host 'cat > f' < f",
+		"tar c d | ssh host 'mkdir -p d && tar x -C d'",
+		"ssh host sha256sum f", "ssh -V", "ssh -G host",
+		"ssh-keygen -t ed25519", "grep -rn ssh README.md",
+		"pi install npm:x", "pi update", "pi list", "pi --version",
+	];
+	for (const command of allowed) {
+		const [result] = await pi.emit("tool_call",
+			{ toolName: "bash", input: { command } });
+		assert.equal(result, undefined, `must stay allowed: ${command}`);
+	}
+});
+
+test("remote guard: covers powershell and never foreign tools", async () => {
+	const pi = guardPi();
+	const [powershell] = await pi.emit("tool_call",
+		{ toolName: "powershell", input: { command: "ssh host ls" } });
+	assert.equal(powershell.block, true);
+	const [foreign] = await pi.emit("tool_call",
+		{ toolName: "read", input: { path: "x" } });
+	assert.equal(foreign, undefined);
+	const [empty] = await pi.emit("tool_call",
+		{ toolName: "bash", input: { command: "   " } });
+	assert.equal(empty, undefined);
+});
+
+test("remote guard: disabled leaves ssh alone", async () => {
+	const pi = guardPi(false);
+	const [result] = await pi.emit("tool_call",
+		{ toolName: "bash", input: { command: "ssh host ls" } });
+	assert.equal(result, undefined);
 });
