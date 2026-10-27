@@ -147,6 +147,13 @@ class DirectoryRootTests(unittest.TestCase):
             temp.root,
             pathlib.Path(tempfile.gettempdir(), "pi-services"))
 
+    def test_windows_root_ignores_xdg_runtime_dir(self):
+        windows = SessionHostDirectory(env={"XDG_RUNTIME_DIR": "/xdg"},
+                                       platform="win32")
+        self.assertEqual(
+            windows.root,
+            pathlib.Path(tempfile.gettempdir(), "pi-services"))
+
 
 class DirectoryParseTests(DirectoryCase):
     def test_skips_malformed_and_other_services(self):
@@ -158,6 +165,15 @@ class DirectoryParseTests(DirectoryCase):
         found = SessionHostDirectory(env=self.env()).descriptors()
         self.assertEqual([d["provider"] for d in found], ["good"])
         self.assertEqual(found[0]["unknown_field"], {"kept": True})
+
+    def test_skips_a_protocol_it_does_not_speak(self):
+        future = self.descriptor("future", version=9)
+        future["protocol"] = "pi-pty-host/2"
+        self.write_descriptor("future", future)
+        self.write_descriptor("current", self.descriptor("current"))
+
+        found = SessionHostDirectory(env=self.env()).descriptors()
+        self.assertEqual([d["provider"] for d in found], ["current"])
 
     def test_dead_pid_is_ignored_but_not_deleted(self):
         path = self.write_descriptor(
@@ -228,9 +244,9 @@ class ResolverTests(DirectoryCase):
         self.addCleanup(self.server.close)
         self.server.endpoint_file(self.base / "live.endpoint")
 
-    def live_descriptor(self, provider, version):
+    def live_descriptor(self, provider, version, protocol="pi-pty-host/1"):
         return {"service": "session-host", "version": version,
-                "protocol": "pi-pty-host/1", "provider": provider,
+                "protocol": protocol, "provider": provider,
                 "pid": os.getpid(),
                 "endpoint_file": str(self.base / "live.endpoint")}
 
@@ -249,6 +265,16 @@ class ResolverTests(DirectoryCase):
         resolver, calls = self.resolver()
         client = resolver.resolve()
         self.assertEqual(client.descriptor["provider"], "v3")
+        self.assertEqual(calls, [])
+
+    def test_higher_version_another_protocol_does_not_win(self):
+        self.write_descriptor(
+            "future", self.live_descriptor("future", 2,
+                                           protocol="pi-pty-host/2"))
+        self.write_descriptor("current", self.live_descriptor("current", 1))
+        resolver, calls = self.resolver()
+        self.assertEqual(resolver.resolve().descriptor["provider"],
+                         "current")
         self.assertEqual(calls, [])
 
     def test_activates_dead_provider_once_then_binds(self):

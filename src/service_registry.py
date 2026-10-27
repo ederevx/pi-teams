@@ -6,6 +6,9 @@ or daemon name. This module owns only the directory formula and the
 descriptor parse; it never writes, deletes, or mutates provider state,
 and liveness reuses TeamRoot's pid probes.
 
+The directory contract is pi-daemon's `docs/pi-services.md`; this module
+reads the descriptors that speak the protocol it speaks.
+
 Descriptor shape (unknown fields are preserved and tolerated):
     {"service": "session-host", "version": 1,
      "protocol": "pi-pty-host/1", "provider": "pi-daemon",
@@ -16,19 +19,22 @@ Descriptor shape (unknown fields are preserved and tolerated):
 import json
 import os
 import pathlib
+import sys
 import tempfile
 
 from team_root import TeamRoot
 
 SERVICE = "session-host"
 SERVICE_DIR = "session-host"
+PROTOCOL = "pi-pty-host/1"
 
 
 class SessionHostDirectory:
     """Read-only enumeration of session-host provider descriptors."""
 
-    def __init__(self, root=None, env=None):
+    def __init__(self, root=None, env=None, platform=None):
         self.env = dict(os.environ if env is None else env)
+        self.platform = sys.platform if platform is None else platform
         self.root = pathlib.Path(root or self._default_root())
         # Only the liveness probe is borrowed; the root itself is not a
         # team root and is never created or written.
@@ -40,7 +46,7 @@ class SessionHostDirectory:
         if override:
             return override
         xdg = self.env.get("XDG_RUNTIME_DIR")
-        if xdg:
+        if xdg and not str(self.platform).startswith("win"):
             return os.path.join(xdg, "pi-services")
         return os.path.join(tempfile.gettempdir(), "pi-services")
 
@@ -74,7 +80,8 @@ class SessionHostDirectory:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeDecodeError):
             return None
-        if not isinstance(data, dict) or data.get("service") != SERVICE:
+        if not isinstance(data, dict) or data.get("service") != SERVICE \
+                or data.get("protocol") != PROTOCOL:
             return None
         return data
 
