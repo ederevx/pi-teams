@@ -4,6 +4,21 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.52 - 2026-10-27
+
+- Keep only a `session-host` provider whose protocol is `pi-pty-host/1`
+  and take the highest version among those, so a newer provider of an
+  incompatible protocol no longer wins on version alone and is never
+  used as this one; the services root also skips `XDG_RUNTIME_DIR` on
+  Windows, so client and provider resolve the same directory on both
+  platforms.
+- Leave a hosted session's idle reap to its `session-host` provider: a
+  session started with `PI_HOSTED` registers as `hosted`, and while a
+  live provider is present the broker does not request a reap, while
+  with no provider present it is asked exactly as before.
+- Say in the README that the provider owns a hosted session's idle
+  lifetime and that the registration carries its host marker.
+
 ## v0.4.51 - 2026-10-20
 
 - Say in the `pre_teams` catalogue that a fitting session is always
