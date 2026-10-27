@@ -500,6 +500,10 @@ class TeamBroker:
             "last_work": time.time(),
             "waiting": False,
         }
+        # Only a marked session carries the field, so an unhosted one
+        # registers exactly as it always has.
+        if msg.get("hosted"):
+            entry["hosted"] = str(msg["hosted"])
         stale = []
         with self._lock:
             for old_id in self._stale_same_owner(agent_id, entry):

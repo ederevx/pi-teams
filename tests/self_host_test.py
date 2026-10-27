@@ -85,6 +85,20 @@ class SelfHostTest(unittest.TestCase):
         self.assertIn("--append-system-prompt", child_argv)
         self.assertIn("Task:\ndo a bounded thing", spec["prompt"])
 
+    def test_a_teammate_does_not_inherit_the_host_marker(self):
+        # A teammate runs under its own keeper, never under the provider
+        # that hosts the session it came from, so that provider's marker
+        # must not travel: pi-teams keeps deciding its idle lifetime.
+        root = harness.make_root()
+        host = SelfSessionHost(
+            root, runner=FakeRunner(),
+            environ={"PI_HOSTED": "1", "PI_HOSTED_SESSION": "x"},
+            interpreter="/usr/bin/python3", team_bin="/opt/pi/team.py")
+        host.spawn("do a bounded thing", "h:fork-2", session="worker")
+        env = TeamRoot(root).read_keeper_spec("h:fork-2")["env"]
+        self.assertNotIn("PI_HOSTED", env)
+        self.assertNotIn("PI_HOSTED_SESSION", env)
+
     def test_gc_reclaims_a_dead_keepers_state(self):
         root = harness.make_root()
         team_root = TeamRoot(root)

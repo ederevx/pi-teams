@@ -164,7 +164,7 @@ class BrokerProtocolTests(unittest.TestCase):
         return {a["id"]: a for a in reply["agents"]}
 
     def _agent(self, agent_id, role="cli", parent=None, owner_pid=None,
-               session=None):
+               session=None, hosted=None):
         client = TeamClient(self.root)
         client.id = agent_id
         client.name = agent_id
@@ -175,6 +175,8 @@ class BrokerProtocolTests(unittest.TestCase):
             client.owner_pid = owner_pid
         if session:
             client.session = session
+        if hosted:
+            client.hosted = hosted
         reply = client.register()
         self.assertIn(reply.get("op"), ("ack", "error"), reply)
         return client
@@ -198,6 +200,31 @@ class BrokerProtocolTests(unittest.TestCase):
             if marker:
                 fh.write(json.dumps({"type": "message", "role": "user",
                                      "content": TEAMMATE_MARKER}) + "\n")
+
+    def test_register_records_hosted(self):
+        # The marker a provider host left on its child travels with the
+        # registration, so the idle policy can leave that session to the
+        # provider that owns its lifetime.
+        self._agent("hosted-a", session="s1", hosted="s1")
+        self.assertEqual(self._agents()["hosted-a"].get("hosted"), "s1")
+
+    def test_register_omits_hosted_when_unset(self):
+        self._agent("plain-a")
+        self.assertNotIn("hosted", self._agents()["plain-a"])
+
+    def test_client_meta_reads_pi_hosted(self):
+        env = dict(os.environ)
+        try:
+            os.environ["PI_HOSTED"] = "1"
+            os.environ["PI_HOSTED_SESSION"] = "s1"
+            self.assertEqual(TeamClient(self.root).meta()["hosted"], "s1")
+            del os.environ["PI_HOSTED_SESSION"]
+            self.assertEqual(TeamClient(self.root).meta()["hosted"], "1")
+            del os.environ["PI_HOSTED"]
+            self.assertEqual(TeamClient(self.root).meta()["hosted"], "")
+        finally:
+            os.environ.clear()
+            os.environ.update(env)
 
     def test_fork_transcript_survives_deregister(self):
         # A teammate's transcript is a conversation in /resume, not a
