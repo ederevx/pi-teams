@@ -8,8 +8,9 @@ lifetime is not a GC decision made here at all - the pi-daemon owns
 pi's session store - so this reaper never touches a transcript. Reads
 the registry and removes only files whose owners are gone; a registry
 entry it deems dead is handed to the broker's drop callback because the
-reaper never mutates the registry. The broker composes this from its
-sweep loop.
+reaper never mutates the registry. A session a live session-host
+provider hosts is left to that provider's own idle policy. The broker
+composes this from its sweep loop.
 """
 
 import pathlib
@@ -20,7 +21,7 @@ class GcReaper:
     a broker's root."""
 
     def __init__(self, root, registry, lock, busy_grace, gc_idle,
-                 request_reap, drop_agent):
+                 request_reap, drop_agent, session_hosts=None):
         self.root = root
         self.registry = registry
         self.lock = lock
@@ -41,6 +42,10 @@ class GcReaper:
         # The callback evicts a registry entry whose owning process is
         # gone; the policy here only decides which entries qualify.
         self.drop_agent = drop_agent
+        # The session-host directory; a present provider owns the idle
+        # policy for the sessions it hosts, so this policy defers on
+        # those while one is present. None never defers.
+        self.session_hosts = session_hosts
         # A registration's pid record can lag a moment; never judge an
         # entry younger than this as dead-owner.
         self.liveness_grace = 5.0
@@ -57,11 +62,15 @@ class GcReaper:
         # connection liveness still owns the eventual cleanup).
         if self.gc_idle <= 0:
             return
+        # Probed outside the lock: it reads the services directory.
+        deferred = self.session_hosts is not None \
+            and self.session_hosts.present()
         with self.lock:
             due = [
                 agent_id for agent_id, entry in self.registry.items()
                 if not entry.get("waiting")
                 and entry.get("last_work", 0) < now - self.gc_idle
+                and not (deferred and entry.get("hosted"))
             ]
         self._requested &= set(due)
         for agent_id in due:

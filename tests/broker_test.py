@@ -1681,6 +1681,77 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root.base, ignore_errors=True)
 
 
+class _Hosts:
+    """A session-host directory whose presence the test sets."""
+
+    def __init__(self, present):
+        self.live = present
+
+    def present(self):
+        return self.live
+
+
+class HostedIdleTests(unittest.TestCase):
+    """The idle policy of a session a host provider declares its own."""
+
+    def _run(self, present, hosted):
+        root = make_root()
+        hosts = _Hosts(present)
+        broker = TeamBroker(root, idle_timeout=IDLE_ROOMY, gc_idle=0.3,
+                            sweep_interval=0.1, session_hosts=hosts)
+        thread = threading.Thread(target=broker.run, daemon=True)
+        thread.start()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.addCleanup(thread.join, 3)
+        self.addCleanup(broker.stop)
+        wait_endpoint(root)
+        client = TeamClient(root, heartbeat=None)
+        client.id = "hosted-%s" % ("a" if hosted else "b")
+        client.name = client.id
+        client.send_token = "st-%s" % client.id
+        client.hosted = hosted
+        received = []
+        ready = threading.Event()
+        follower = threading.Thread(
+            target=client.follow, args=(received.append, ready.set),
+            daemon=True)
+        follower.start()
+        self.assertTrue(ready.wait(timeout=3))
+        self.addCleanup(follower.join, 3)
+        self.addCleanup(client.close)
+        return hosts, lambda: [m for m in received
+                               if m.get("kind") == "gc-reap"]
+
+    def test_hosted_session_idle_reap_defers_to_live_provider(self):
+        # The provider that hosts the session owns its idle policy, so
+        # the broker must not ask a session it marked.
+        _, requests = self._run(present=True, hosted="s1")
+        time.sleep(1.0)
+        self.assertEqual(requests(), [])
+
+    def test_hosted_session_is_asked_when_no_provider_is_live(self):
+        # Without a provider, the broker is the only owner left: the
+        # session must still be asked, exactly as it is today.
+        _, requests = self._run(present=False, hosted="s1")
+        self.assertTrue(wait_until(requests, timeout=4))
+        self.assertEqual(requests()[0]["payload"].get("id"), "hosted-a")
+
+    def test_provider_death_resumes_idle_reaps(self):
+        hosts, requests = self._run(present=True, hosted="s1")
+        time.sleep(1.0)
+        self.assertEqual(requests(), [])
+        hosts.live = False
+        self.assertTrue(wait_until(requests, timeout=4))
+        time.sleep(0.8)
+        self.assertEqual(len(requests()), 1)
+
+    def test_unhosted_session_is_asked_while_provider_live(self):
+        _, requests = self._run(present=True, hosted="")
+        self.assertTrue(wait_until(requests, timeout=4))
+        time.sleep(0.8)
+        self.assertEqual(len(requests()), 1)
+
+
 class FakeSpawner:
     """Records spawn calls and returns a deterministic identity."""
 
