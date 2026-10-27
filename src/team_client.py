@@ -40,6 +40,11 @@ class TeamClient:
         self.owner_pid = os.environ.get("TEAM_OWNER_PID")
         self.busy_file = os.environ.get("TEAM_BUSY_FILE")
         self.attached = os.environ.get("TEAM_ATTACHED") == "1"
+        # The session-host provider marks the sessions it hosts; that
+        # provider's idle policy owns their lifetime (an old broker
+        # ignores the field).
+        self.hosted = (os.environ.get("PI_HOSTED_SESSION") or "1") \
+            if os.environ.get("PI_HOSTED") == "1" else ""
         # The send token the hold was launched with, so gated ops stay
         # pre-authorized (an old gate-less broker ignores the field).
         self.send_token = os.environ.get("TEAM_SEND_TOKEN")
@@ -74,6 +79,7 @@ class TeamClient:
             "owner_pid": self.owner_pid,
             "busy_file": self.busy_file,
             "attached": bool(self.attached),
+            "hosted": self.hosted or "",
             "send_token": self.send_token or "",
         }
 
