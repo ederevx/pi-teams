@@ -119,6 +119,11 @@ itself, never a signal.
   once per idle episode: any work contact resets the clock and earns a
   fresh request, while a session that never answers is left alone —
   its connection liveness still owns the eventual cleanup.
+- **Hosted sessions** are marked by the session-host provider that
+  runs them (`PI_HOSTED`), and that provider owns their idle policy:
+  while a non-stale provider descriptor is present, the broker leaves a
+  marked session alone and lets the provider reap it. With no provider
+  present, a marked session is asked exactly as any other.
 - **Work keeps forks alive**: pi's lifecycle publishes busy state
   (`agent_start`/`agent_settled`) and the hold streams it in its
   heartbeat, resetting the idle clock. Any message the fork sends

@@ -188,6 +188,36 @@ class DirectoryParseTests(DirectoryCase):
         self.assertTrue(path.exists())
 
 
+class DirectoryPresenceTests(DirectoryCase):
+    def write_endpoint(self, provider, host="127.0.0.1", port=1):
+        path = self.base / (provider + ".endpoint")
+        path.write_text(json.dumps({"host": host, "port": port}),
+                        encoding="utf-8")
+        return path
+
+    def test_present_requires_endpoint_coordinates(self):
+        # A descriptor is stale under the directory contract when its
+        # endpoint publishes no dialable coordinates, so a provider that
+        # cannot be dialled is not present.
+        self.write_descriptor("no-endpoint", self.descriptor("no-endpoint"))
+        self.assertFalse(SessionHostDirectory(env=self.env()).present())
+
+        self.write_endpoint("no-endpoint")
+        self.assertTrue(SessionHostDirectory(env=self.env()).present())
+
+    def test_present_ignores_a_dead_pid(self):
+        self.write_descriptor("dead", self.descriptor("dead", pid=1 << 30))
+        self.write_endpoint("dead")
+        self.assertFalse(SessionHostDirectory(env=self.env()).present())
+
+    def test_present_ignores_a_protocol_it_does_not_speak(self):
+        future = self.descriptor("future")
+        future["protocol"] = "pi-rpc/1"
+        self.write_descriptor("future", future)
+        self.write_endpoint("future")
+        self.assertFalse(SessionHostDirectory(env=self.env()).present())
+
+
 class ClientTests(DirectoryCase):
     def setUp(self):
         super().setUp()
