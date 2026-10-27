@@ -28,6 +28,7 @@ from send_gate import SendGate
 from peer_transport import PeerTransport
 from wire import LineStream, dump_line
 from peer_tunnel import PeerTunnel, PeerUnreachable
+from service_registry import SessionHostDirectory
 from session_spawn import TeamSpawner
 from settings import PackageSettings
 from team_root import (
@@ -53,7 +54,8 @@ class TeamBroker:
     def __init__(self, root=None, idle_timeout=15.0, sweep_interval=1.0,
                  gc_idle=None, busy_grace=None,
                  restart_grace=None, peer_grace=None,
-                 host=None, settings=None, tunnel_factory=None):
+                 host=None, settings=None, tunnel_factory=None,
+                 session_hosts=None):
         # Settings own every configurable flag; an injected value (the
         # tests) or an explicit environment variable beats them.
         self.settings = settings or PackageSettings()
@@ -117,6 +119,9 @@ class TeamBroker:
         # Store-and-forward owner: messages for a target whose hold is
         # restarting are parked on disk, replayed on re-register.
         self.delivery = MailboxDelivery(Mailbox(self.root))
+        # The session-host providers on this host: a present one owns
+        # the idle policy for the sessions it hosts (see gc_reaper).
+        self.session_hosts = session_hosts or SessionHostDirectory()
         # Spawning is a client of the session-host capability, never the
         # host itself: it binds to a provider or self-provisions.
         self.spawner = TeamSpawner(self.root, environ=os.environ,
@@ -127,7 +132,8 @@ class TeamBroker:
         self._lock = threading.RLock()
         self.gc = GcReaper(
             self.root, self._registry, self._lock, self.busy_grace,
-            self.gc_idle, self._request_reap, self._drop_dead_agent)
+            self.gc_idle, self._request_reap, self._drop_dead_agent,
+            session_hosts=self.session_hosts)
         self._running = False
         self._server = None
 
@@ -500,6 +506,10 @@ class TeamBroker:
             "last_work": time.time(),
             "waiting": False,
         }
+        # Only a marked session carries the field, so an unhosted one
+        # registers exactly as it always has.
+        if msg.get("hosted"):
+            entry["hosted"] = str(msg["hosted"])
         stale = []
         with self._lock:
             for old_id in self._stale_same_owner(agent_id, entry):
