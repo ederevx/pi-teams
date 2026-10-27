@@ -41,7 +41,8 @@ class SessionHostDirectory:
         self._team_root = TeamRoot(str(self.root))
 
     def _default_root(self):
-        # PI_SERVICES_DIR wins, then XDG_RUNTIME_DIR, then the temp dir.
+        # PI_SERVICES_DIR wins, then XDG_RUNTIME_DIR off Windows, then the
+        # temp dir.
         override = self.env.get("PI_SERVICES_DIR")
         if override:
             return override
@@ -55,8 +56,9 @@ class SessionHostDirectory:
         return self.root / SERVICE_DIR
 
     def descriptors(self):
-        """Every parsed session-host descriptor, live or dead; malformed
-        files and other services are skipped without deleting anything."""
+        """Every parsed session-host descriptor speaking PROTOCOL, live or
+        dead; malformed files, other services, and other protocols are
+        skipped without deleting anything."""
         found = []
         for path in self._paths():
             data = self._read(path)
