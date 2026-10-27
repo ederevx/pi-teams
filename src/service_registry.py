@@ -4,7 +4,8 @@ A provider publishes a descriptor under a well-known local directory, so
 a client enumerates providers by capability instead of hardcoding a path
 or daemon name. This module owns only the directory formula and the
 descriptor parse; it never writes, deletes, or mutates provider state,
-and liveness reuses TeamRoot's pid probes.
+and liveness reuses TeamRoot's pid probes while presence also requires
+the endpoint's coordinates.
 
 The directory contract is pi-daemon's `docs/pi-services.md`; this module
 reads the descriptors that speak the protocol it speaks.
@@ -22,6 +23,7 @@ import pathlib
 import sys
 import tempfile
 
+from session_host import SessionHostClient
 from team_root import TeamRoot
 
 SERVICE = "session-host"
@@ -69,6 +71,18 @@ class SessionHostDirectory:
     def live_descriptors(self):
         """The descriptors whose published pid is still alive."""
         return [d for d in self.descriptors() if self._is_live(d)]
+
+    def present(self):
+        """Whether a provider is present under the directory contract: a
+        live pid and an endpoint file publishing dialable coordinates.
+        The endpoint's token is read by the client's parse, never kept."""
+        for descriptor in self.live_descriptors():
+            try:
+                SessionHostClient(descriptor).endpoint()
+            except OSError:
+                continue
+            return True
+        return False
 
     def _paths(self):
         try:
