@@ -229,8 +229,9 @@ export class TeamSettingsPresenter {
 	}
 
 	/** Present the rows: the two-column settings view when a TUI custom
-	 *  UI is available, else the same rows on stderr. A render failure
-	 *  falls back to the listing so the command never breaks a session. */
+	 *  UI is available, else the same rows on stderr. A failed presentation
+	 *  reports why above the listing, because a silent fallback reads as the
+	 *  command doing nothing. */
 	async present(
 		ui: ExtensionUIContext | undefined,
 		mode: string | undefined,
@@ -242,11 +243,13 @@ export class TeamSettingsPresenter {
 		if (mode === "tui" && typeof ui?.custom === "function") {
 			try {
 				await ui.custom((_tui, theme, _keybindings, done) =>
-					new TeamSettingsView(rows, theme, onChange, () => done(undefined)),
+					new TeamSettingsView(rows, theme, onChange,
+						() => done(undefined), notify),
 				);
 				return;
-			} catch {
-				// fall through to the stderr listing
+			} catch (err) {
+				notify(`pi-teams: settings presentation failed: ${this.message(err)}\n\n${this.listing(rows)}`);
+				return;
 			}
 		}
 		this.printRows(rows);
@@ -348,9 +351,13 @@ export class TeamSettingsPresenter {
 
 	/** Print the same rows to stderr for non-UI modes. */
 	private printRows(rows: SettingRow[]): void {
-		console.error(
-			"pi-teams-settings:\n  " +
-			rows.map((row) => this.formatRow(row)).join("\n  "));
+		console.error(this.listing(rows));
+	}
+
+	/** The rows as a plain listing, shared by stderr and the failure notice. */
+	private listing(rows: SettingRow[]): string {
+		return "pi-teams-settings:\n  " +
+			rows.map((row) => this.formatRow(row)).join("\n  ");
 	}
 
 	/** One row in the fallback listing's single-line layout. */
