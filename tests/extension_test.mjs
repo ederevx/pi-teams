@@ -2582,3 +2582,61 @@ test("remote guard: disabled leaves ssh alone", async () => {
 		{ toolName: "bash", input: { command: "ssh host ls" } });
 	assert.equal(result, undefined);
 });
+
+test("settings dock: a failed presentation reports why above the listing",
+	async () => {
+		const notices = [];
+		const ui = {
+			custom: async () => {
+				throw new Error("no dock here");
+			},
+			notify: (message, kind) => notices.push({ message, kind }),
+		};
+		await new TeamSettingsPresenter().present(ui, "tui", () => {});
+		assert.equal(notices.length, 1, "one notice, not a silent fallback");
+		assert.equal(notices[0].kind, "error");
+		assert.match(notices[0].message, /no dock here/,
+			"the reason is carried");
+		assert.match(notices[0].message, /pi-teams-settings:/,
+			"the listing still answers");
+	});
+
+test("settings dock: a successful presentation reports nothing", async () => {
+	const notices = [];
+	const ui = {
+		custom: async (factory) => {
+			factory({}, { fg: (_c, text) => text }, {}, () => {});
+		},
+		notify: (message) => notices.push(message),
+	};
+	await new TeamSettingsPresenter().present(ui, "tui", () => {});
+	assert.deepEqual(notices, [], "no notice on the success path");
+});
+
+test("settings dock: a row that throws on input is reported, not thrown",
+	async () => {
+		const notices = [];
+		let view;
+		const ui = {
+			custom: async (factory) => {
+				view = factory({}, { fg: (_c, text) => text }, {}, () => {});
+			},
+			notify: (message) => notices.push(message),
+		};
+		const presenter = new TeamSettingsPresenter();
+		const rows = presenter.rows();
+		rows[0].submenu = () => {
+			throw new Error("Theme not initialized. Call initTheme() first.");
+		};
+		presenter.rows = () => rows;
+		await presenter.present(ui, "tui", () => {});
+		assert.ok(view !== undefined, "the dock mounted");
+		view.selectItem(rows[0].id);
+		view.handleInput("\r");
+		assert.ok(notices.length >= 1,
+			"the build failure is reported, not thrown");
+		assert.match(notices[0], /Theme not initialized/,
+			"the original reason is carried");
+		assert.ok(view.render(80).length > 0, "the dock keeps rendering");
+		view.handleInput("\u001b[B");
+	});
