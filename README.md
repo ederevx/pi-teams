@@ -11,7 +11,7 @@ natively, without a shared filesystem as the channel.
 ## Install
 
 ```
-pi install git:github.com/ederevx/pi-teams@v0.4.49
+pi install git:github.com/ederevx/pi-teams@v0.4.53
 ```
 
 The package ships the broker and client under `src/`; the extension

@@ -4,6 +4,15 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.53 - 2026-10-29
+
+- A `/teams-settings` dock that failed to open no longer answers like a
+  session with no TUI: the failure reports its reason above the listing,
+  and a headless run keeps the stderr listing.
+- A settings row whose submenu cannot be built is reported instead of
+  thrown, so the exception no longer escapes into pi's input loop and
+  ends the dock on the first keypress.
+
 ## v0.4.52 - 2026-10-27
 
 - Keep only a `session-host` provider whose protocol is `pi-pty-host/1`
