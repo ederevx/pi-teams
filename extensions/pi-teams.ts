@@ -248,11 +248,11 @@ export default async function (pi: ExtensionAPI) {
 				// the wait itself sends the continue-or-report steer, once
 				// per teammate, instead of blocking silently forever.
 				const stallMs = stallSeconds(params.stall) * 1000;
-			const { results, interruptedBy, stoppedBy } =
-				await app.waitForResults(
-					targetIds, bound * 1000, signal,
-					() => ctx.hasPendingMessages(), () => stream.tick(),
-					stallMs, startedAt);
+				const { results, interruptedBy, stoppedBy } =
+					await app.waitForResults(
+						targetIds, bound * 1000, signal,
+						() => ctx.hasPendingMessages(), () => stream.tick(),
+						stallMs, startedAt);
 				const reports = results.filter(
 					(message): message is TeamMessage => message !== null);
 				for (const report of reports) {
