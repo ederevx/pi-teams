@@ -77,6 +77,8 @@ const { RemoteWorkClassifier } =
 	await import("../extensions/pi-teams/remote-work-classifier.ts");
 const { persistPiInvocation, piEntryFile } =
 	await import("../extensions/pi-teams/paths.ts");
+const { openTeammatesDock } =
+	await import("../extensions/pi-teams/dock.ts");
 
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
@@ -2581,6 +2583,23 @@ test("remote guard: disabled leaves ssh alone", async () => {
 	const [result] = await pi.emit("tool_call",
 		{ toolName: "bash", input: { command: "ssh host ls" } });
 	assert.equal(result, undefined);
+});
+
+test("teammates dock: a failed presentation reports why", async () => {
+	const notices = [];
+	const ctx = {
+		mode: "tui",
+		ui: {
+			custom: async () => {
+				throw new Error("no dock here");
+			},
+			notify: (message, kind) => notices.push({ message, kind }),
+		},
+	};
+	await openTeammatesDock([], ctx);
+	assert.equal(notices.length, 1, "one notice, not a silent rejection");
+	assert.equal(notices[0].kind, "error");
+	assert.match(notices[0].message, /no dock here/, "the reason is carried");
 });
 
 test("settings dock: a failed presentation reports why above the listing",

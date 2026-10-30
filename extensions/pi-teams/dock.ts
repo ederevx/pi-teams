@@ -20,6 +20,12 @@ export async function openTeammatesDock(
 		notifyList(agents, ctx);
 		return;
 	}
+	// A presentation that fails must say why: pi's notify is a single
+	// status line, so a silent catch reads as a command that did nothing.
+	function reportFailure(error: unknown): void {
+		const reason = error instanceof Error ? error.message : String(error);
+		ctx.ui.notify(`pi-teams: teammates dock failed: ${reason}`, "error");
+	}
 	// The host provides these at runtime; the imports stay dynamic so a
 	// test or embedder without the TUI package never needs them.
 	const [{ Container, SelectList }, { getSelectListTheme }] =
@@ -73,11 +79,15 @@ export async function openTeammatesDock(
 				container.invalidate();
 			},
 			handleInput(data: string): void {
-				list.handleInput?.(data);
-				tui.requestRender();
+				try {
+					list.handleInput?.(data);
+					tui.requestRender();
+				} catch (error) {
+					reportFailure(error);
+				}
 			},
 		};
-	});
+	}).catch(reportFailure);
 }
 
 /** Describes an agent for its dock row: role, host, parent. The long
