@@ -9,7 +9,7 @@ maps each tag to its commit.
 - `team_wait` reads one monotonic start for every clock it prints, anchors the
   live view on that start, and reports why a wait ended instead of streaming
   past its bound.
-- A `/teammates` dock that could not open reports why, and an input failure
+- A `/team-ls` dock that could not open reports why, and an input failure
   inside it is reported instead of reaching pi's input loop.
 
 ## v0.4.53 - 2026-10-29
