@@ -910,9 +910,10 @@ export class TeamAgent {
 		shouldYield: () => boolean,
 		onTick?: () => void,
 		stallMs?: number,
+		startedAt?: number,
 	): Promise<WaitOutcome> {
 		return this.waits.waitForResults(
-			agentIds, timeoutMs, signal, shouldYield, onTick, stallMs);
+			agentIds, timeoutMs, signal, shouldYield, onTick, stallMs, startedAt);
 	}
 
 	private cancelWaits(): void {

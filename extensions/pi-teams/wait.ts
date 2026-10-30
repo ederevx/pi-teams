@@ -98,6 +98,7 @@ export class WaitController {
 		shouldYield: () => boolean,
 		onTick?: () => void,
 		stallMs = DEFAULT_STALL_SECONDS * 1000,
+		startedAt?: number,
 	): Promise<WaitOutcome> {
 		const results = new Map<string, TeamMessage>();
 		const pending: string[] = [];
@@ -126,10 +127,12 @@ export class WaitController {
 				let lastActivity = Date.now();
 				const nudged = new Set<string>();
 				const watching = new Set(pending);
-				// The bound, on a clock a wall-clock step cannot move. A
-				// timer delay Node cannot represent (over 2^31-1 ms)
-				// fires at once, so the timer rearms on the remainder.
-				const deadline = performance.now()
+				// The bound, on a clock a wall-clock step cannot move,
+				// shared with the wait view when the caller passed its
+				// own start. A timer delay Node cannot represent (over
+				// 2^31-1 ms) fires at once, so the timer rearms on the
+				// remainder.
+				const deadline = (startedAt ?? performance.now())
 					+ (timeoutMs > 0 ? timeoutMs : DEFAULT_WAIT_SECONDS * 1000);
 				const onActivity = (from: string): void => {
 					if (watching.has(from)) lastActivity = Date.now();

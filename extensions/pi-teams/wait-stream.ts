@@ -58,7 +58,7 @@ export class TeamWaitStream {
 	}
 
 	/** Reads every resolved transcript; the wait calls this per tick. */
-	tick(now = Date.now()): void {
+	tick(now = performance.now()): void {
 		if (this.closed) return;
 		this.ticks += 1;
 		if (this.ticks % TeamWaitStream.RESOLVE_EVERY_TICKS === 0) {
@@ -91,7 +91,7 @@ export class TeamWaitStream {
 	private stateOf(id: string, now: number): string {
 		const at = this.lastEvent.get(id);
 		if (at === undefined) return "live (no output yet)";
-		const age = Math.round((now - at) / 1000);
+		const age = Math.floor((now - at) / 1000);
 		return age * 1000 >= TeamWaitStream.QUIET_AFTER_MS
 			? `quiet ${age}s` : "live";
 	}

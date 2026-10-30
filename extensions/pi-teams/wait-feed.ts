@@ -36,7 +36,7 @@ export class TeamWaitFeed {
 	constructor(
 		ids: readonly string[],
 		deliver: (snapshot: TeamWaitSnapshot) => void,
-		started = Date.now(),
+		started = performance.now(),
 	) {
 		this.order = ids;
 		this.deliver = deliver;
@@ -64,7 +64,7 @@ export class TeamWaitFeed {
 
 	/** Delivers the snapshot when it changed; the elapsed header
 	 *  changes it once a second, so a quiet wait still reports. */
-	publish(now = Date.now()): void {
+	publish(now = performance.now()): void {
 		if (this.closed) return;
 		const snapshot = this.snapshot(now);
 		if (snapshot.text === this.lastText) return;
@@ -76,7 +76,7 @@ export class TeamWaitFeed {
 		}
 	}
 
-	snapshot(now = Date.now()): TeamWaitSnapshot {
+	snapshot(now = performance.now()): TeamWaitSnapshot {
 		const streams = this.order.map((id) => {
 			const section = this.sections.get(id);
 			return {
@@ -85,7 +85,7 @@ export class TeamWaitFeed {
 				lines: [...(section?.lines ?? [])],
 			};
 		});
-		const elapsed = Math.round((now - this.started) / 1000);
+		const elapsed = Math.floor((now - this.started) / 1000);
 		const shown = streams.slice(0, TeamWaitFeed.MAX_SECTIONS);
 		const parts = [
 			`waiting for ${streams.length} teammate(s) (${elapsed}s elapsed)`,
