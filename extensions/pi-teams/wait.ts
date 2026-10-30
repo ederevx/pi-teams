@@ -18,12 +18,18 @@ type SendFn = (
 	to: string, kind: string, text: string,
 ) => Promise<unknown>;
 
+/** Why one wait ended: a report, the direct message that woke it,
+ *  the bound, a queued user message, an abort, or deregistration. */
+export type WaitStopReason =
+	"result" | "message" | "timeout" | "yield" | "abort" | "closed";
+
 /** One wait's outcome: the reports aligned to the requested ids (null
- *  when an id never reported) and the direct message that ended the
- *  wait early, if any. */
+ *  when an id never reported), the direct message that ended the
+ *  wait early, if any, and why the wait ended. */
 export interface WaitOutcome {
 	results: Array<TeamMessage | null>;
 	interruptedBy: TeamMessage | null;
+	stoppedBy: WaitStopReason;
 }
 
 /** One agent's active team_wait polls and their stall watchdog. */
@@ -101,9 +107,14 @@ export class WaitController {
 			else pending.push(id);
 		}
 		let interruptedBy: TeamMessage | null = null;
+		let stoppedBy: WaitStopReason = "result";
 		// A buffered report already satisfies the first-result trigger.
 		const canWait = results.size === 0 && pending.length > 0
 			&& !this.isClosed() && !signal?.aborted && !shouldYield();
+		if (!canWait && results.size === 0) {
+			stoppedBy = signal?.aborted ? "abort"
+				: this.isClosed() ? "closed" : "yield";
+		}
 		if (canWait) {
 			await new Promise<void>((resolve) => {
 				const unwatchers: Array<() => void> = [];
@@ -115,12 +126,18 @@ export class WaitController {
 				let lastActivity = Date.now();
 				const nudged = new Set<string>();
 				const watching = new Set(pending);
+				// The bound, on a clock a wall-clock step cannot move. A
+				// timer delay Node cannot represent (over 2^31-1 ms)
+				// fires at once, so the timer rearms on the remainder.
+				const deadline = performance.now()
+					+ (timeoutMs > 0 ? timeoutMs : DEFAULT_WAIT_SECONDS * 1000);
 				const onActivity = (from: string): void => {
 					if (watching.has(from)) lastActivity = Date.now();
 				};
-				const finish = (): void => {
+				const finish = (reason: WaitStopReason): void => {
 					if (settled) return;
 					settled = true;
+					stoppedBy = reason;
 					this.activityHook = null;
 					this.messageHook = null;
 					if (timer) clearTimeout(timer);
@@ -129,10 +146,10 @@ export class WaitController {
 					for (const unwatch of unwatchers) unwatch();
 					resolve();
 				};
-				const onAbort = (): void => finish();
+				const onAbort = (): void => finish("abort");
 				const onMessage = (message: TeamMessage): void => {
 					interruptedBy = message;
-					finish();
+					finish("message");
 				};
 				this.activityHook = onActivity;
 				this.messageHook = onMessage;
@@ -140,38 +157,62 @@ export class WaitController {
 					const unwatch = this.inbox.watch(id, (message) => {
 						lastActivity = Date.now();
 						if (!message) {
-							finish();
+							finish("closed");
 							return;
 						}
 						results.set(id, message);
 						// First result ends the wait; the other ids'
 						// later reports stay buffered in the inbox.
-						finish();
+						finish("result");
 					});
 					unwatchers.push(unwatch);
 				}
 				// Resources precede the first stop check: an instant
 				// wait still releases them all.
-				const effective = timeoutMs > 0
-					? timeoutMs : DEFAULT_WAIT_SECONDS * 1000;
-				timer = setTimeout(finish, effective);
+				const armTimeout = (): void => {
+					const remaining = deadline - performance.now();
+					if (remaining <= 0) {
+						finish("timeout");
+						return;
+					}
+					// Node's maximum representable timer delay.
+					timer = setTimeout(armTimeout,
+						Math.min(remaining, 0x7fffffff));
+				};
+				armTimeout();
 				poll = setInterval(() => {
+					// Stop checks precede the tick's work: an overdue
+					// poll must not stream past the bound.
+					if (performance.now() >= deadline) {
+						finish("timeout");
+						return;
+					}
+					if (this.isClosed()) {
+						finish("closed");
+						return;
+					}
+					if (signal?.aborted) {
+						finish("abort");
+						return;
+					}
+					if (shouldYield()) {
+						finish("yield");
+						return;
+					}
 					this.nudgeStalled(
 						pending, stallMs, lastActivity, nudged);
 					onTick?.();
-					if (this.isClosed() || signal?.aborted || shouldYield()) {
-						finish();
-					}
 				}, WAIT_POLL_MS);
 				if (signal) {
 					signal.addEventListener("abort", onAbort, { once: true });
-					if (signal.aborted) finish();
+					if (signal.aborted) finish("abort");
 				}
 			});
 		}
 		return {
 			results: agentIds.map((id) => results.get(id) ?? null),
 			interruptedBy,
+			stoppedBy,
 		};
 	}
 }
