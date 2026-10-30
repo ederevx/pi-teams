@@ -247,10 +247,11 @@ export default async function (pi: ExtensionAPI) {
 				// the wait itself sends the continue-or-report steer, once
 				// per teammate, instead of blocking silently forever.
 				const stallMs = stallSeconds(params.stall) * 1000;
-				const { results, interruptedBy } = await app.waitForResults(
-					targetIds, bound * 1000, signal,
-					() => ctx.hasPendingMessages(), () => stream.tick(),
-					stallMs);
+				const { results, interruptedBy, stoppedBy } =
+					await app.waitForResults(
+						targetIds, bound * 1000, signal,
+						() => ctx.hasPendingMessages(), () => stream.tick(),
+						stallMs);
 				const reports = results.filter(
 					(message): message is TeamMessage => message !== null);
 				for (const report of reports) {
@@ -270,9 +271,14 @@ export default async function (pi: ExtensionAPI) {
 							`${interruptedBy.from}; the message follows. ` +
 							`Still waiting on ${remaining.join(", ")}; ` +
 							`re-call team_wait with those ids to block again.`
-						: `pi-teams: no result from ` +
+						: stoppedBy === "timeout"
+						? `pi-teams: no result from ` +
 							`${targetIds.join(", ")} within ${bound}s; ` +
-							`still running, and each will report as a message.`;
+							`still running, and each will report as a message.`
+						: `pi-teams: wait for ${targetIds.join(", ")} ended ` +
+							`early (${stoppedBy}); still waiting on ` +
+							`${remaining.join(", ")}; re-call team_wait with ` +
+							`those ids to block again.`;
 					return {
 						content: [{ type: "text", text }],
 						details: { ids: targetIds, reports: [], remaining,
