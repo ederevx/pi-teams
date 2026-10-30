@@ -224,7 +224,7 @@ export default async function (pi: ExtensionAPI) {
 			const bound = waitSeconds(params.timeout);
 			// Live wait view: one section per teammate whose transcript
 			// is readable here, fed from the wait's own tick so the
-				// stream can never outlive the wait.
+			// stream can never outlive the wait.
 			const startedAt = performance.now();
 			const feed = new TeamWaitFeed(targetIds, (snapshot) => {
 				try {
