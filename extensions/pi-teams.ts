@@ -224,7 +224,8 @@ export default async function (pi: ExtensionAPI) {
 			const bound = waitSeconds(params.timeout);
 			// Live wait view: one section per teammate whose transcript
 			// is readable here, fed from the wait's own tick so the
-			// stream can never outlive the wait.
+				// stream can never outlive the wait.
+			const startedAt = performance.now();
 			const feed = new TeamWaitFeed(targetIds, (snapshot) => {
 				try {
 					onUpdate?.({
@@ -247,11 +248,11 @@ export default async function (pi: ExtensionAPI) {
 				// the wait itself sends the continue-or-report steer, once
 				// per teammate, instead of blocking silently forever.
 				const stallMs = stallSeconds(params.stall) * 1000;
-				const { results, interruptedBy, stoppedBy } =
-					await app.waitForResults(
-						targetIds, bound * 1000, signal,
-						() => ctx.hasPendingMessages(), () => stream.tick(),
-						stallMs);
+			const { results, interruptedBy, stoppedBy } =
+				await app.waitForResults(
+					targetIds, bound * 1000, signal,
+					() => ctx.hasPendingMessages(), () => stream.tick(),
+					stallMs, startedAt);
 				const reports = results.filter(
 					(message): message is TeamMessage => message !== null);
 				for (const report of reports) {
