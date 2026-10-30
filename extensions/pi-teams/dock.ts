@@ -20,8 +20,6 @@ export async function openTeammatesDock(
 		notifyList(agents, ctx);
 		return;
 	}
-	// A presentation that fails must say why: pi's notify is a single
-	// status line, so a silent catch reads as a command that did nothing.
 	function reportFailure(error: unknown): void {
 		const reason = error instanceof Error ? error.message : String(error);
 		ctx.ui.notify(`pi-teams: teammates dock failed: ${reason}`, "error");

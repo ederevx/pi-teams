@@ -2597,9 +2597,10 @@ test("teammates dock: a failed presentation reports why", async () => {
 		},
 	};
 	await openTeammatesDock([], ctx);
-	assert.equal(notices.length, 1, "one notice, not a silent rejection");
-	assert.equal(notices[0].kind, "error");
-	assert.match(notices[0].message, /no dock here/, "the reason is carried");
+	assert.deepEqual(notices, [{
+		message: "pi-teams: teammates dock failed: no dock here",
+		kind: "error",
+	}]);
 });
 
 test("settings dock: a failed presentation reports why above the listing",
