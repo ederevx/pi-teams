@@ -235,7 +235,7 @@ export default async function (pi: ExtensionAPI) {
 				} catch {
 					// The host callback must never break the wait.
 				}
-			});
+			}, startedAt);
 			const stream = new TeamWaitStream(targetIds, app, feed);
 			// A waiting agent is not working: publish that for the
 			// whole wait (the fork stays exempt from idle GC), then
