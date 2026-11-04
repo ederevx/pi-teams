@@ -63,6 +63,7 @@ class ForkLifecycleTests(unittest.TestCase):
             self.root,
             ["hold", "--id", "ident-1", "--role", "fork",
              "--parent", "p-9", "--name", "ident-one"],
+            env={"TEAM_ID": "ident-1", "TEAM_SEND_TOKEN": "st-ident"},
         )
         try:
             self.assertTrue(
@@ -76,7 +77,8 @@ class ForkLifecycleTests(unittest.TestCase):
             self.assertEqual(entry["parent"], "p-9")
             self.assertEqual(entry["name"], "ident-one")
         finally:
-            run_team(self.root, ["terminate", "ident-1"])
+            run_team(self.root, ["terminate", "--id", "ident-1",
+                                 "--send-token", "st-ident", "ident-1"])
             holder.wait(timeout=5)
 
     def test_hold_surfaces_inbound_messages(self):
@@ -214,7 +216,10 @@ class ForkLifecycleTests(unittest.TestCase):
             wait_until(lambda: "fork-3" in self._ids(), timeout=3),
             "fork never registered",
         )
-        _, out, err = run_team(self.root, ["terminate", "fork-3"])
+        _, out, err = run_team(
+            self.root,
+            ["terminate", "--id", "parent-3",
+             "--send-token", "st-parent-3", "fork-3"])
         self.assertIn('"op": "ack"', out, err)
         self.assertTrue(
             wait_until(lambda: child.poll() is not None, timeout=6),

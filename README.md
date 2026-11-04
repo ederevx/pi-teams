@@ -4,9 +4,9 @@ Native cross-pi-agent communication for pi. Every pi session registers
 with a local broker and gains an endpoint other agents can reach
 directly; spawned teammates are persistent child sessions that reap
 themselves once idle. The extension surfaces the team at
-session start, and spawns, waits on, messages, attaches, and reaps
-teammates through agent tools — so multiple pi agents coordinate
-natively, without a shared filesystem as the channel.
+session start, and spawns, waits on, messages, and reaps teammates
+through agent tools — so multiple pi agents coordinate natively,
+without a shared filesystem as the channel.
 
 ## Install
 
@@ -44,16 +44,15 @@ one per `TEAM_ROOT`. See Deployment for a manual install.
   | `team_spawn` | Spawn a named, resumable teammate for one task |
   | `team_wait` | Block for reports (see `team_wait` below) |
   | `team_send` | Message an agent, local or on a linked peer |
-  | `team_attach` | Turn a live session into a teammate |
-  | `team_detach` | Return an attached session to a main agent |
-  | `team_kill` | Terminate an agent by id |
+  | `team_kill` | Terminate a spawned teammate by id |
   | `team_gc_reap` | Ack the broker's idle reap and shut down |
   | `team_ls` / `team_peer` | List agents, link peers |
   | `team_peek` | Read or grep a local agent's transcript |
 
-  Sending and waiting are member-only; a teammate may only message its
-  own team and asks its parent to attach outsiders. The broker enforces
-  this itself: message ops carry a per-session send token
+  Every registered session is reachable: `team_send` addresses any id,
+  local or peer-hosted, and nothing scopes a message to a team. The
+  broker still requires a message to speak for its sender: message and
+  terminate ops carry a per-session send token
   (`TEAM_SEND_TOKEN`, minted by the extension for its hold and each
   teammate), so a raw `team.py send` from a shell cannot speak for an
   agent — it is refused with `send-token`. Read-only diagnostics stay
@@ -130,8 +129,7 @@ itself, never a signal.
   counts too. A waiting fork is exempt from the idle reap.
 - **Reaping** drops the registration, not the conversation: a
   reaped teammate's transcript stays in `/resume`, so its work can be
-  resumed later, exactly as an attached session's does. The session
-  shuts itself down after the ack.
+  resumed later. The session shuts itself down after the ack.
 - **Busy-file GC** clears stale `.busy` state: a file whose agent is
   unregistered and untouched past `PI_TEAMS_BUSY_GRACE_HOURS`
   (default 2h) is removed; registered agents keep theirs.
@@ -143,25 +141,18 @@ itself, never a signal.
   and exits after the configured period without work activity once the
   on-disk source changes; the next start adopts the new code.
 
-### Attach
+### Reusing a live session
 
-Attach before you spawn when a live session already holds the
-context: `team_ls` lists each agent's name, cwd, and parent, and
-`team_peek` reads a target's transcript (`from=head` for the original
-task, `grep` for a topic, tail for where it stopped). Attaching hands
-over no task, so the chain is `team_attach` -> `team_send` the
-returned teammate id its task -> `team_wait`. `team_spawn` starts a
-blank session and is the fallback; `team_attach` refuses a target that
-already has a parent.
-
-`team_attach` re-registers a running session under the requester's
-fork id. An agent belongs to one team: a target that already has a
-parent is refused, and a teammate cannot attach. `team_detach` reverses
-it. A spawned teammate's conversation outlives its process and stays
-in `/resume`, just as an attached session's does. An **orphaned
-teammate** — its parent no longer live — is independent: the teammate
-marker in its transcript keeps it a member, it is no longer scoped to
-the dead parent's team, and `team_detach` makes it a plain team root.
+Reuse before you spawn when a live session already holds the context:
+`team_ls` lists each agent's name, cwd, and parent, and `team_peek`
+reads a target's transcript (`from=head` for the task, `grep` for a
+topic, tail for where it stopped). Address the session directly:
+`team_send` it the task and where to send the result (`kind=result`),
+then `team_wait`. Reuse changes nothing about the session — no id
+churn, no new parent, no re-registration — so the same session can be
+asked for work at any time, and `team_spawn` is the fallback when no
+live session fits. Nothing is reserved: a session may take other work
+meanwhile, so name the result destination in the task.
 
 ### Awareness
 
@@ -184,7 +175,10 @@ Two machines with SSH between them federate their brokers.
   waits by id.
 - **Messaging** — ids carry a host label (`<host>:fork-...`), so
   `team_send`, reports, and `team_kill` reach peer-hosted ids through
-  the same link; an undeliverable target reports back. A local target
+  the same link; an undeliverable target reports back. `team_kill`
+  ends a spawned fork only: a session a user started is refused with
+  `not-a-fork` before anything is evicted, and forks are the only role
+  the broker signals. A local target
   whose connection dropped recently parks the message in a durable
   mailbox instead: the broker delivers it when the target registers
   again, redeliveries carry the original envelope id, and parked
@@ -192,9 +186,8 @@ Two machines with SSH between them federate their brokers.
 - **Lifetime** — a remote-parented fork obeys the same idle reap as a
   local one, and its own host performs it; a departed parent no longer
   reaps it. A teammate whose parent disappears (a departed peer or a
-  dead parent agent) is orphaned and runs independently: it keeps its
-  membership and is not scoped to the dead team. Reaping never crosses
-  hosts.
+  dead parent agent) keeps running independently: messaging never
+  depended on that parent. Reaping never crosses hosts.
 - **Password-only hosts** — a non-interactive SSH failure fails closed
   with the one-line setup command to run manually
   (`sh .../peer-ssh-setup.sh user@host`); after that `team_peer add`
@@ -271,17 +264,16 @@ never the system `/tmp`. It chains:
 - **Extension tests** (`node --test tests/extension_test.mjs`) — the
   launch paths (ProcessRunner, `windowsHide`, windowless Windows
   broker, detached-only-when-needed), the spawn template and clean
-  context, the wait/steer/stall watchdog, inbox and pending-request
-  ownership, member gating and same-team scoping, attach/notify
-  flows, and peer-add failure guidance.
+  context, the wait/steer/stall watchdog, inbox ownership, the
+  obsolete-attach refusal, and peer-add failure guidance.
 - **Settings tests** (`settings_test.py`, plus the extension
   settings cases) — settings values honored, env overrides, defaults,
   zero semantics, and tolerance of a missing or invalid file.
 - **Broker protocol tests** (`broker_test.py`, `fork_test.py`,
-  `attach_test.py`, `setup_script_test.py`) — handshake and token
-  rejection, registry and relay, the idle reap request (once per
-  episode, reset by work), waiting-fork exemption, orphan sweeps,
-  fork survival across a parent disconnect, and two-broker federation
+  `setup_script_test.py`) — handshake and token rejection, registry and
+  relay, the idle reap request (once per episode, reset by work),
+  waiting-fork exemption, orphan sweeps, fork survival across a parent
+  disconnect, the non-fork terminate refusal, and two-broker federation
   with the remote-parent link.
 
 ## Deployment
@@ -296,6 +288,15 @@ extension into the pi agent home, and a byte manifest;
 `uninstall.sh` removes exactly that manifest. Writes are staged
 through same-directory temp files and moved atomically. Run from Git
 Bash on Windows. Restart pi sessions after installing.
+
+Upgrading from a release that had attachment: a session attached with
+the old extension keeps its fork id and parent, and this release ships
+no detach tool, so run `team_detach` in every attached session before
+installing and confirm the reported id is a plain main. A session that
+cannot detach is stopped and resumed, never rebuilt by hand. Upgrade
+each peer's broker as well: an older broker evicts whatever a terminate
+request names, without the fork check that refuses a session its user
+started.
 
 ## Attribution
 

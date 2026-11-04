@@ -26,10 +26,6 @@ BUSY_SUFFIX = ".busy"
 HOSTS_DIRNAME = "hosts"
 KEEPER_STATE_SUFFIX = ".keeper.json"
 KEEPER_SPEC_SUFFIX = ".spec.json"
-# The extension's spawn prompt marks a forked teammate session; the
-# broker tells teammate sessions from a user's own by it. Keep in sync
-# with taskPrompt() in extensions/pi-teams.ts.
-TEAMMATE_MARKER = "a teammate spawned by a parent pi session"
 
 
 class TeamRoot:

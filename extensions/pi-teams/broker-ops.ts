@@ -125,8 +125,31 @@ export class BrokerOps {
 		return { id: reply.id, session: reply.session || reply.id };
 	}
 
-	async terminate(agentId: string): Promise<void> {
-		await this.run(["terminate", agentId], 25000);
+	/** Terminates a spawned fork through the broker, which refuses any
+	 *  other registration: the requesting agent's id and credential ride
+	 *  along so termination speaks for its sender. A broker ack is the
+	 *  only success: a failed launch, a timeout, or output the parser
+	 *  cannot read would otherwise report a termination that never
+	 *  happened. */
+	async terminate(
+		id: string,
+		agentId: string,
+		sendToken?: string,
+	): Promise<void> {
+		const args = ["terminate", "--id", id];
+		if (sendToken) args.push("--send-token", sendToken);
+		args.push(agentId);
+		const result = await this.run(args, 25000);
+		const reply = this.parse(result.stdout);
+		if (reply.error) {
+			const detail = reply.detail ? `: ${reply.detail}` : "";
+			throw new Error(`${reply.error}${detail}`);
+		}
+		if (result.code !== 0 || reply.op !== "ack") {
+			const why = String(result.stderr || "").trim() ||
+				`exit ${result.code}`;
+			throw new Error(`terminate failed: ${why}`);
+		}
 	}
 
 	/** The voluntary reap: answers the broker's idle request with this

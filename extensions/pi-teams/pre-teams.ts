@@ -50,12 +50,6 @@ export class PreTeamsTool {
 					"already fits.",
 			},
 			{
-				name: "team_attach",
-				purpose: "make an existing live agent your teammate, " +
-					"keeping its context; prefer it over team_spawn when " +
-					"that session already works on the topic.",
-			},
-			{
 				name: "team_wait",
 				purpose: "block for the first teammate report; the rest " +
 					"keep running.",
@@ -63,7 +57,7 @@ export class PreTeamsTool {
 			{
 				name: "team_send",
 				purpose: "message a live agent, local or on a linked " +
-					"peer; gives an attached teammate its task.",
+					"peer; hands an existing session its task.",
 			},
 			{
 				name: "team_ls",
@@ -81,12 +75,9 @@ export class PreTeamsTool {
 				purpose: "link or unlink a peer host's broker over SSH.",
 			},
 			{
-				name: "team_detach",
-				purpose: "return an attached session to a plain main agent.",
-			},
-			{
 				name: "team_kill",
-				purpose: "terminate an agent by id.",
+				purpose: "terminate a spawned fork by id; a session a " +
+					"user started is refused.",
 			},
 			{
 				name: "team_gc_reap",
@@ -97,35 +88,30 @@ export class PreTeamsTool {
 		this.conventions = [
 			"Call pre_teams once per session before any team tool; its " +
 				"gate blocks the rest until you do.",
-			"Always try to attach first, before any spawn: run team_ls, " +
-				"then team_peek likely candidates - from=head shows the " +
-				"original task, grep finds the topic, tail shows where it " +
-				"stopped.",
-			"Attach the live session that fits the task's topic, repo, or " +
-				"files: team_attach keeps its context, while a spawn starts " +
-				"blank. Fall back to team_spawn only when no live session " +
-				"fits or every fit already has a parent (attach refuses " +
-				"those).",
-			"Attach chain: team_attach an id -> team_send the returned " +
-				"teammate id the task (attaching hands over no task) -> " +
-				"team_wait on that id.",
+			"Work a live session already holds is that session's: run " +
+				"team_ls, then team_peek likely candidates - from=head shows " +
+				"the task, grep finds the topic, tail shows where it " +
+				"stopped - and send the session that fits the task's topic, " +
+				"repo, or files.",
+			"Reuse chain: team_ls -> team_peek -> team_send the session " +
+				"its task and where to send the result (kind=result) -> " +
+				"team_wait on that id. Nothing is reserved: the session may " +
+				"take other work meanwhile, so name the destination.",
 			"Spawn chain: team_spawn one self-contained task -> " +
 				"team_wait, or keep working and take the report as a " +
-				"message.",
+				"message. Spawn only when no live session can take the work.",
 			"Re-call team_wait with details.remaining to keep blocking; " +
 				"an unwaited report still arrives as a message.",
 			"A teammate silent past the stall bound is nudged once per " +
 				"wait (PI_TEAMS_STALL, 0 disables).",
 			"The parent owns planning, integration, and final validation. " +
-				"A teammate messages only its own team and asks its parent " +
-				"to attach an outsider.",
-			"An orphaned teammate - its parent no longer live - is " +
-				"independent: it acts as its own team root, so it keeps " +
-				"messaging and may become a plain agent with team_detach.",
+				"Every registered session is addressable, local or on a " +
+				"linked peer.",
 			"Rebuild your own context after compaction or a resume with " +
 				"team_peek and no target: tail it, or grep a keyword.",
 			"team_peek reads local transcripts only; a peer-hosted " +
-				"agent can still be attached, judged by its team_ls name.",
+				"agent is still reachable by team_send, judged by its " +
+				"team_ls name.",
 			"Call team_gc_reap only when the broker asks or this session " +
 				"is done.",
 			"Work on another host stays in pi-teams: ssh is for moving " +
@@ -138,10 +124,9 @@ export class PreTeamsTool {
 			"Spawned teammates are persistent, resumable child sessions " +
 				"that inherit the current model and thinking level and " +
 				"reap themselves when idle.",
-			"Sending and waiting are member-only; the broker enforces it " +
-				"with a per-session send token.",
-			"A teammate's transcript marks it a member even after its " +
-				"launch env is lost; orphaned, it becomes its own team root.",
+			"Sending presents the session's own send token, so a message " +
+				"speaks for its sender; every registered agent is " +
+				"reachable, and only a spawned fork can be killed.",
 			"team_peek reads the transcript the broker registered for an " +
 				"agent id, never just the newest file; its #N lines map to " +
 				"the read tool.",

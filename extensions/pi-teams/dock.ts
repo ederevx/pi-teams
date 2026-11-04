@@ -2,7 +2,7 @@
  * The teammates dock: a settings-style overlay listing every live
  * pi-teams agent (role, last-active age) on a SelectList themed like
  * the host's pickers. Read-only by design: acting on a teammate stays
- * a tool call (team_send, team_attach, team_kill).
+ * a tool call (team_send, team_kill).
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
