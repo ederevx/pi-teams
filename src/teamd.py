@@ -16,7 +16,7 @@ import sys
 from peer_link import PeerLink
 from pi_invocation import PiInvocation
 from team_broker import TeamBroker
-from team_root import DEFAULT_ROOT, TEAMMATE_MARKER, TeamRoot
+from team_root import DEFAULT_ROOT, TeamRoot
 from wire import LineStream, dump_line
 
 # Existing importers name teamd for these; keep re-exporting them so the

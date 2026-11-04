@@ -39,7 +39,6 @@ class TeamClient:
         self.session = os.environ.get("TEAM_SESSION")
         self.owner_pid = os.environ.get("TEAM_OWNER_PID")
         self.busy_file = os.environ.get("TEAM_BUSY_FILE")
-        self.attached = os.environ.get("TEAM_ATTACHED") == "1"
         # The session-host provider marks the sessions it hosts; that
         # provider's idle policy owns their lifetime (an old broker
         # ignores the field).
@@ -78,14 +77,13 @@ class TeamClient:
             "session": self.session,
             "owner_pid": self.owner_pid,
             "busy_file": self.busy_file,
-            "attached": bool(self.attached),
             "hosted": self.hosted or "",
             "send_token": self.send_token or "",
         }
 
     def set_identity(self, agent_id=None, name=None, role=None, parent=None,
                      session=None, owner_pid=None, busy_file=None,
-                     attached=None, send_token=None):
+                     send_token=None):
         # Explicit identity from CLI args (pi.exec cannot pass env on
         # Windows, so identity travels as args).
         if agent_id:
@@ -104,8 +102,6 @@ class TeamClient:
             self.busy_file = busy_file
         if send_token:
             self.send_token = send_token
-        if attached is not None:
-            self.attached = bool(attached)
 
     # -- transport ---------------------------------------------------
 
@@ -245,7 +241,11 @@ class TeamClient:
     def terminate(self, agent_id, why="requested"):
         # A peer-terminate waits for the target host's broker to ack or
         # for the pending-relay window, so allow more than a round trip.
-        return self._peer_op("terminate", 20, to=agent_id, why=why)
+        # The requester's own credential is presented: termination speaks
+        # for an agent like send and spawn do.
+        return self._peer_op("terminate", 20, to=agent_id, why=why,
+                             **{"from": self.ensure_id()},
+                             send_token=self.send_token or "")
 
     def gc_reap(self):
         # The voluntary reap: the agent answers the broker's idle

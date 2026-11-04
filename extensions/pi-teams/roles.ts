@@ -13,19 +13,20 @@ const ROLE_TEXT = [
 		"pi-teams tool catalog, conventions, and feature summary.",
 	"",
 	"Boundaries:",
-	"- Report the outcome to your parent by running the report command " +
-		"in your task prompt; that is how your parent receives the result.",
+	"- Report the outcome to whoever asked for it by running the " +
+		"report command in your task prompt; that is how your requester " +
+		"receives the result.",
 	"- Message, wait for, and spawn teammates with the team tools; " +
-		"delegate bounded units and integrate their reports. A teammate " +
-		"may only message its own team and asks its parent to attach an " +
-		"outsider first.",
+		"delegate bounded units and integrate their reports. Every " +
+		"registered pi session is addressable, local or on a linked " +
+		"peer.",
 	"- Do not write memory, private or shared; put durable additions in " +
 		"your report instead. The parent owns planning, integration, and " +
 		"final validation.",
 	"- You are a spawned teammate: when your task settles and the " +
 		"broker asks your session to reap itself (the team_gc_reap " +
-		"tool), your transcript goes with it. Stay resumable while you " +
-		"live.",
+		"tool), it drops your registration and your conversation stays " +
+		"resumable.",
 ].join("\n");
 
 /** Passed inline via `--append-system-prompt`: a fixed constant far

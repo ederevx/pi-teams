@@ -394,8 +394,14 @@ class TeamBroker:
                         waiting=msg.get("waiting") is True)
             self._reply(conn, op="ack")
         elif op == "terminate":
-            self.terminate(msg.get("to"), msg.get("why") or "requested",
-                           conn)
+            requester = str(msg.get("from") or agent_id or "")
+            if not self._send_gate.check(requester,
+                                         msg.get("send_token")):
+                self._reply(conn, op="error", error="send-token",
+                            detail=SendGate.refused_reason())
+            else:
+                self.terminate(msg.get("to"),
+                               msg.get("why") or "requested", conn)
         elif op == "spawn":
             self._handle_spawn(conn, msg)
         elif op == "deregister":
@@ -499,7 +505,6 @@ class TeamBroker:
             "session": msg.get("session") or None,
             "owner_pid": msg.get("owner_pid") or None,
             "busy_file": msg.get("busy_file") or None,
-            "attached": bool(msg.get("attached")),
             "origin": self.host,
             "since_ts": time.time(),
             "last_seen": time.time(),
@@ -684,33 +689,53 @@ class TeamBroker:
         self._reply(sender_conn, op="error", error="undeliverable",
                     target=target)
 
-    def _evict(self, agent_id, why):
-        # Drop the endpoint and entry, tell the connection why, signal
-        # the fork process. The caller persists: terminate does, a
-        # sweep once per batch.
-        entry, conn = self._release(agent_id)
+    def _terminate(self, target, why):
+        """Evicts a spawned fork, or reports why it refused. The role
+        that is checked is the registration released: both happen in one
+        locked step, so a main that registered into the same id while the
+        terminate waited for the lock is refused, never evicted as the
+        fork the earlier request named. An absent id releases nothing and
+        still reports no error, which keeps a repeat kill idempotent.
+        Returns "" or the refusal error."""
+        with self._lock:
+            entry = self._registry.get(target)
+            if entry is not None and entry.get("role") != "fork":
+                return "not-a-fork"
+            entry, conn = self._release(target)
+        # Teardown runs outside the lock: the registry is the only state
+        # a concurrent registration must wait for.
         if conn is not None:
             self._write(conn, self._envelope(
-                "*", "terminate", {"id": agent_id, "why": why}))
+                "*", "terminate", {"id": target, "why": why}))
             try:
                 conn.close()
             except OSError:
                 pass
         self.root.remove_busy_file(entry)
         self._kill_owner(entry or {}, why)
-
-    def _terminate(self, agent_id, why):
-        self._evict(agent_id, why)
         self._persist_and_notify()
+        return ""
+
+    @staticmethod
+    def non_fork_detail(target):
+        # One wording for the refusal, quoted by the tools and the docs.
+        return ("%s is not a spawned fork; team_kill ends a spawned "
+                "teammate only, never a session its user started" % target)
 
     def terminate(self, target, why, conn=None):
-        """Evict a local agent, or ask its host's broker to evict it, and
-        answer the requester once. One entry point for local and peer."""
+        """Evict a local fork, or ask its host's broker to evict it, and
+        answer the requester once. One entry point for local and peer.
+        A registered target that is not a spawned fork is refused before
+        any eviction, here and on the host that owns it."""
         host = self._target_host(target)
         if host == self.host:
-            self._terminate(target, why)
+            error = self._terminate(target, why)
             if conn is not None:
-                self._reply(conn, op="ack")
+                if error:
+                    self._reply(conn, op="error", error=error,
+                                detail=self.non_fork_detail(target))
+                else:
+                    self._reply(conn, op="ack")
             return
         peer = self._peers.get(host)
         if peer is None or not peer.connected:
@@ -977,11 +1002,16 @@ class TeamBroker:
         action = msg.get("action")
         if action == "terminate":
             ok = False
+            error = ""
             target = msg.get("to")
             if self._parent_host(target) == self.host:
-                self._terminate(target, msg.get("why") or "requested")
-                ok = True
-            peer.send({"op": "peer-ack", "id": msg.get("id"), "ok": ok})
+                error = self._terminate(
+                    target, msg.get("why") or "requested")
+                ok = not error
+            reply = {"op": "peer-ack", "id": msg.get("id"), "ok": ok}
+            if error:
+                reply["error"] = error
+            peer.send(reply)
             return
         if action == "spawn":
             result = {}

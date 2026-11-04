@@ -77,7 +77,7 @@ def main():
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for module in ("broker_test", "fork_test", "attach_test",
+    for module in ("broker_test", "fork_test",
                    "settings_test", "setup_script_test", "install_test",
                    "pi_invocation_test", "session_host_test",
                    "self_host_test", "session_spawn_test"):

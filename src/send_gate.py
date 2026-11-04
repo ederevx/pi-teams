@@ -1,13 +1,12 @@
-"""Member gating for message ops, enforced in the broker.
+"""Token gating for the ops that speak for an agent.
 
 The registry trusts its clients for identity, so without this gate
-any same-user process could reach the endpoint and send as, or
-control, a registered agent. The gate mints one send token per
+any same-user process could reach the endpoint and send as, control,
+or terminate a registered agent. The gate mints one send token per
 registration, returned in the register ack; every gated op must
 present the token matching its asserted sender. Unauthenticated
-clients keep the read-only surface (ls, ping, peer-list) and the
-spawn/attach control kinds (their own request-id handshake), so raw
-CLI use stays useful for diagnostics but cannot speak for an agent.
+clients keep the read-only surface (ls, ping, peer-list), so raw CLI
+use stays useful for diagnostics but cannot speak for an agent.
 """
 
 

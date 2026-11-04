@@ -26,15 +26,10 @@ export interface TeamMessage {
 
 export type DeliverFn = (message: TeamMessage) => void;
 
-/** A spawned or attached teammate's id and session name. */
+/** A spawned teammate's id and session name. */
 export interface TeammateRef {
 	id: string;
 	session: string;
-}
-
-/** Mints a collision-resistant id for a request/response exchange. */
-export function requestId(prefix: string): string {
-	return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
 /** Mints a send token: the session credential for gated broker ops
@@ -59,7 +54,8 @@ export function spawnWindowMs(): number {
 export const STEER_NUDGE_TEXT =
 	"team_wait: you have not reported for a while and may look hung. " +
 	"If you are still working, continue; if you are done or stuck, " +
-	"report your result to your parent now.";
+	"report your result to this message's sender using team_send with " +
+	"kind=result.";
 
 /** Resolves the team_wait bound from the call, then settings (env or
  *  file), then the default. */

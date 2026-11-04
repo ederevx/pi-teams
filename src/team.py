@@ -38,14 +38,12 @@ class ClientCli:
         parser.add_argument("--session")
         parser.add_argument("--owner-pid")
         parser.add_argument("--busy-file")
-        parser.add_argument("--attached", action="store_true")
         parser.add_argument("--send-token")
 
     @staticmethod
     def apply_identity(client, args):
         client.set_identity(args.id, args.name, args.role, args.parent,
                             args.session, args.owner_pid, args.busy_file,
-                            getattr(args, "attached", None),
                             getattr(args, "send_token", None))
 
     def main(self, argv=None):
@@ -84,6 +82,7 @@ class ClientCli:
         p_spawn.add_argument("--thinking")
         p_spawn.add_argument("--parent")
         p_term = sub.add_parser("terminate")
+        self.add_identity_args(p_term)
         p_term.add_argument("to")
         p_term.add_argument("why", nargs="?", default="requested")
         p_peer = sub.add_parser("peer")
@@ -104,7 +103,8 @@ class ClientCli:
             # one self-provisioned teammate; no broker connection here.
             return SessionKeeper(args.root, args.key).run()
         client = TeamClient(args.root)
-        if args.command in ("register", "follow", "hold", "send", "reap"):
+        if args.command in ("register", "follow", "hold", "send", "reap",
+                            "terminate"):
             self.apply_identity(client, args)
         if args.command == "register":
             print(json.dumps(client.register()))

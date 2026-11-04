@@ -16,7 +16,7 @@ from harness import (TEAMD, make_root, read_endpoint, start_broker,
 from peer_tunnel import PeerTunnel, PeerUnreachable
 from team import TeamClient
 from team_root import TeamRoot
-from teamd import TEAMMATE_MARKER, PeerLink, TeamBroker
+from teamd import PeerLink, TeamBroker
 from wire import LineStream, dump_line
 
 IDLE_ROOMY = 30.0
@@ -139,6 +139,37 @@ class PeerTunnelTests(unittest.TestCase):
         self.assertIn("ssh is not installed", caught.exception.detail)
 
 
+class PausedLock:
+    """The broker's registry lock, paused in a marked thread the first
+    time it drops its outermost acquisition, so a test can place another
+    registration in the gap between that thread's locked step and the
+    work that follows it. Reentrant nesting is counted, so an inner
+    acquisition never triggers the pause."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.reached = threading.Event()
+        self.go = threading.Event()
+        self.paused = False
+        self.local = threading.local()
+
+    def __enter__(self):
+        self.inner.acquire()
+        self.local.depth = getattr(self.local, "depth", 0) + 1
+        return self
+
+    def __exit__(self, *exc):
+        self.local.depth -= 1
+        self.inner.release()
+        thread = threading.current_thread()
+        if (not self.local.depth and not self.paused
+                and getattr(thread, "pause_at_gap", False)):
+            self.paused = True
+            self.reached.set()
+            self.go.wait(timeout=5)
+        return False
+
+
 class BrokerProtocolTests(unittest.TestCase):
     def setUp(self):
         self.root = make_root()
@@ -193,13 +224,10 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertIn(reply.get("op"), ("ack", "error"), reply)
         return client
 
-    def _write_session(self, path, marker=True):
+    def _write_session(self, path):
         with open(path, "w") as fh:
             fh.write(json.dumps({"type": "session", "id": path,
                                  "cwd": self.root}) + "\n")
-            if marker:
-                fh.write(json.dumps({"type": "message", "role": "user",
-                                     "content": TEAMMATE_MARKER}) + "\n")
 
     def test_register_records_hosted(self):
         # The marker a provider host left on its child travels with the
@@ -231,7 +259,7 @@ class BrokerProtocolTests(unittest.TestCase):
         # byproduct of its registration: dropping the fork keeps it, so
         # the user can resume the work afterwards.
         path = os.path.join(self.sessions_root, "fork-a.jsonl")
-        self._write_session(path, marker=True)
+        self._write_session(path)
         client = TeamClient(self.root)
         client.id = "beta:fork-a"
         client.role = "fork"
@@ -249,7 +277,7 @@ class BrokerProtocolTests(unittest.TestCase):
         # Reaping ends the process, never the conversation: the
         # transcript stays for /resume after the owner exits.
         path = os.path.join(self.sessions_root, "reaped-fork.jsonl")
-        self._write_session(path, marker=True)
+        self._write_session(path)
         dummy = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"])
         self.addCleanup(dummy.wait)
@@ -271,7 +299,7 @@ class BrokerProtocolTests(unittest.TestCase):
 
     def test_main_session_file_is_not_removed(self):
         path = os.path.join(self.sessions_root, "main-a.jsonl")
-        self._write_session(path, marker=True)
+        self._write_session(path)
         client = TeamClient(self.root)
         client.id = "alpha:main-a"
         client.role = "main"
@@ -282,27 +310,11 @@ class BrokerProtocolTests(unittest.TestCase):
         self.assertTrue(os.path.exists(path),
                         "a main agent's session file must never be removed")
 
-    def test_attached_session_file_survives_deregister(self):
-        # An attached fork carries no spawn marker: it is the user's own
-        # transcript and must stay in /resume after the fork is reaped.
-        path = os.path.join(self.sessions_root, "attached.jsonl")
-        self._write_session(path, marker=False)
-        client = TeamClient(self.root)
-        client.id = "beta:attached"
-        client.role = "fork"
-        client.parent = "alpha:caller"
-        client.session = path
-        client.send_token = "st-3"
-        client.register()
-        client.deregister()
-        self.assertTrue(os.path.exists(path),
-                        "an attached session's transcript must not be removed")
-
     def test_aged_teammate_session_is_never_swept(self):
         # pi-daemon owns pi's session store; the broker never removes a
         # transcript, however old or abandoned.
         path = os.path.join(self.sessions_root, "orphan.jsonl")
-        self._write_session(path, marker=True)
+        self._write_session(path)
         old = time.time() - 3600
         os.utime(path, (old, old))
         time.sleep(0.6)
@@ -310,17 +322,19 @@ class BrokerProtocolTests(unittest.TestCase):
                         "an aged teammate session file was swept")
 
     def test_non_teammate_session_is_kept(self):
+        # A session no teammate registered is still a conversation: the
+        # broker sweeps busy files, never transcripts.
         path = os.path.join(self.sessions_root, "plain.jsonl")
-        self._write_session(path, marker=False)
+        self._write_session(path)
         old = time.time() - 3600
         os.utime(path, (old, old))
         time.sleep(0.6)
         self.assertTrue(os.path.exists(path),
-                        "a non-teammate session file must not be swept")
+                        "an unregistered session file must not be swept")
 
     def test_live_fork_session_survives_sweep(self):
         path = os.path.join(self.sessions_root, "live-fork.jsonl")
-        self._write_session(path, marker=True)
+        self._write_session(path)
         client = TeamClient(self.root)
         client.id = "beta:live-fork"
         client.role = "fork"
@@ -1033,13 +1047,12 @@ class BrokerProtocolTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_gc_reap_keeps_every_transcript(self):
-        # The voluntary reap drops the registration; both a spawned
-        # teammate's marked transcript and an attached session's
-        # unmarked transcript stay for /resume.
+        # The voluntary reap drops the registration; the conversation it
+        # leaves behind stays for /resume.
         spawned = os.path.join(self.sessions_root, "reaped-fork.jsonl")
-        self._write_session(spawned, marker=True)
+        self._write_session(spawned)
         attached = os.path.join(self.sessions_root, "reaped-attached.jsonl")
-        self._write_session(attached, marker=False)
+        self._write_session(attached)
         for agent_id, session, token in (
                 ("beta:reap-fork", spawned, "st-rf"),
                 ("beta:reap-attached", attached, "st-ra")):
@@ -1534,7 +1547,7 @@ class BrokerProtocolTests(unittest.TestCase):
         try:
             victim = TeamClient(root_b, heartbeat=None)
             victim.id = "beta:victim"
-            victim.role = "cli"
+            victim.role = "fork"
             victim.send_token = "st-30"
             victim.register()
             self.assertTrue(wait_until(
@@ -1558,6 +1571,102 @@ class BrokerProtocolTests(unittest.TestCase):
             thread_b.join(timeout=3)
             shutil.rmtree(root_a, ignore_errors=True)
             shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_terminate_refuses_a_main_locally(self):
+        # A session the user started must neither be signalled nor have
+        # its registration dropped by an operation advertised as
+        # termination, so the refusal lands before any eviction.
+        main = self._agent("main-1", role="main")
+        caller = self._agent("caller")
+        reply = caller.terminate("main-1")
+        self.assertEqual(reply.get("op"), "error", reply)
+        self.assertEqual(reply.get("error"), "not-a-fork")
+        self.assertIn("not a spawned fork", reply.get("detail", ""))
+        self.assertIn("main-1", self._ids_via(self.root))
+        caller.close()
+        main.close()
+
+    def test_terminate_refuses_a_main_on_its_host(self):
+        # The owning host enforces the same rule for a request that
+        # arrived over a peer link, so an old peer cannot kill a main.
+        root_a = make_root()
+        root_b = make_root()
+        broker_a, thread_a = self._start_broker(root_a, "alpha")
+        broker_b, thread_b = self._start_broker(root_b, "beta")
+        try:
+            victim = TeamClient(root_b, heartbeat=None)
+            victim.id = "beta:main-1"
+            victim.role = "main"
+            victim.send_token = "st-40"
+            victim.register()
+            self.assertTrue(wait_until(
+                lambda: "beta:main-1" in self._ids_via(root_b)))
+            broker_a.link_peer("beta", broker_b.root.read_endpoint())
+            self.assertTrue(wait_until(lambda: "alpha" in broker_b._peers))
+            caller = TeamClient(root_a, heartbeat=None)
+            caller.id = "alpha:caller"
+            caller.send_token = "st-41"
+            caller.register()
+            reply = caller.terminate("beta:main-1", "requested")
+            self.assertEqual(reply.get("op"), "error", reply)
+            self.assertEqual(reply.get("error"), "not-a-fork")
+            self.assertIn("beta:main-1", self._ids_via(root_b),
+                          "a peer terminate evicted a main")
+            caller.close()
+            victim.close()
+        finally:
+            broker_a.stop()
+            broker_b.stop()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+            shutil.rmtree(root_a, ignore_errors=True)
+            shutil.rmtree(root_b, ignore_errors=True)
+
+    def test_terminate_checks_the_role_it_releases(self):
+        # The role read and the release are one locked step: a main that
+        # registers into the id once that step is done keeps the id,
+        # where a release that only followed its own check would evict it.
+        target = "beta:swap"
+        fork = self._agent(target, role="fork", parent="checker")
+        paused = PausedLock(self.broker._lock)
+        self.broker._lock = paused
+        self.addCleanup(setattr, self.broker, "_lock", paused.inner)
+        replies = []
+
+        def run_terminate():
+            threading.current_thread().pause_at_gap = True
+            replies.append(self.broker._terminate(target, "requested"))
+
+        worker = threading.Thread(target=run_terminate)
+        worker.start()
+        self.assertTrue(paused.reached.wait(timeout=5),
+                        "the terminate never left its locked step")
+        # The fork's fate is already sealed, so a main may take the id
+        # now; the teardown that follows must leave it registered.
+        main = self._agent(target, role="main")
+        paused.go.set()
+        worker.join(timeout=5)
+        self.assertEqual(replies, [""], replies)
+        self.assertIn(target, self._ids_via(self.root),
+                      "a main registered after the check was evicted")
+        main.close()
+        fork.close()
+
+    def test_terminate_requires_the_callers_token(self):
+        # Termination now speaks for an agent like send and spawn do: an
+        # anonymous client cannot end a fork.
+        fork = self._agent("beta:fork-t", role="fork", parent="checker")
+        intruder = TeamClient(self.root)
+        intruder.id = "intruder"
+        reply = intruder.request(
+            "terminate", expected=("ack", "error"), to="beta:fork-t",
+            **{"from": "intruder"}, why="requested", send_token="st-wrong",
+        )
+        self.assertEqual(reply.get("op"), "error", reply)
+        self.assertEqual(reply.get("error"), "send-token")
+        self.assertIn("beta:fork-t", self._ids_via(self.root))
+        intruder.close()
+        fork.close()
 
     def test_mutual_add_keeps_one_healthy_link(self):
         # The smaller host adds first; the larger host then adds too. The
@@ -1630,7 +1739,7 @@ class BrokerProtocolTests(unittest.TestCase):
         # same owner pid and session file qualify the old entry as a
         # stale duplicate of the registering connection, which wins.
         session = os.path.join(self.sessions_root, "dup.jsonl")
-        self._write_session(session, marker=False)
+        self._write_session(session)
         first = self._agent("rog:pi-1-aaaa", owner_pid="777", session=session)
         second = self._agent("rog:pi-1-bbbb", owner_pid="777", session=session)
         self.assertEqual(

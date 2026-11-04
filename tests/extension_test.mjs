@@ -11,7 +11,8 @@
  *   - spawn asks the broker's spawn op, which owns the session
  *     contract for local and peer hosts; the extension launches no pi
  *     child for a teammate, and there is no peer main-agent relay;
- *   - attached sessions keep their own identity and report mechanics.
+ *   - every registered session is addressable: no membership gate and
+ *     no attachment, so team_send reaches any id, local or peer.
  *
  * Runs on Node's built-in test runner; the extension is imported with
  * Node's TypeScript stripping. No broker or pi process is started.
@@ -54,7 +55,7 @@ process.env.PYTHON = process.env.PYTHON || "python3";
 process.env.PI_SESSION_FILE = join(scratch, "session.jsonl");
 process.env.TEAM_ID = "parent-1";
 
-const { TeamAgent, ProcessRunner, PendingRequests,
+const { TeamAgent, ProcessRunner, BrokerOps,
 	WindowlessPython, windowlessCandidates, logTeamMessage, AgentDirectory,
 	ResultInbox, ChatPeek, ChatEntryRenderer, TranscriptTail, TeamWaitFeed,
 	TeamWaitStream, TeamWaitView } =
@@ -578,85 +579,9 @@ test("ResultInbox cancels every waiter and drops buffered results", () => {
 	assert.equal(inbox.take("z"), undefined);
 });
 
-test("requireSameTeam lets a root reach any agent", async () => {
-	const savedId = process.env.TEAM_ID;
-	delete process.env.TEAM_ID;
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	assert.equal(agent.hasParent(), false);
-	await assert.doesNotReject(() => agent.requireSameTeam("outsider"));
-});
 
-test("requireSameTeam is team-scoped for a teammate", async () => {
-	const { runner } = makeRunner((file, args) => {
-		if (args.includes("ls")) {
-			return Promise.resolve({ stdout: JSON.stringify({ agents: [
-				{ id: "root", name: "r", role: "main", pid: 1, parent: null,
-				  session: null, online: true },
-				{ id: "sibling", name: "s", role: "fork", pid: 2,
-				  parent: "root", session: null, online: true },
-				{ id: "outsider", name: "o", role: "main", pid: 3,
-				  parent: null, session: null, online: true },
-			] }), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	await agent.attachTo("root", "me");
-	await assert.doesNotReject(() => agent.requireSameTeam("sibling"));
-	await assert.rejects(() => agent.requireSameTeam("outsider"),
-		/outside your team/);
-	agent.detach();
-	agent.stopHold();
-});
 
-test("requireSameTeam frees an orphaned teammate to reach anyone", async () => {
-	const savedId = process.env.TEAM_ID;
-	const savedParent = process.env.TEAM_PARENT_ID;
-	process.env.TEAM_ID = "fork-orphan";
-	process.env.TEAM_PARENT_ID = "gone-parent";
-	const { runner } = makeRunner((file, args) => {
-		if (args.includes("ls")) {
-			return Promise.resolve({ stdout: JSON.stringify({ agents: [
-				{ id: "outsider", name: "o", role: "main", pid: 3,
-				  parent: null, session: null, online: true },
-			] }), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	else delete process.env.TEAM_ID;
-	if (savedParent !== undefined) process.env.TEAM_PARENT_ID = savedParent;
-	else delete process.env.TEAM_PARENT_ID;
-	agent.hold("/work");
-	assert.equal(agent.hasParent(), true);
-	assert.equal(await agent.isOrphaned(), true);
-	await assert.doesNotReject(() => agent.requireSameTeam("outsider"));
-	agent.detach();
-	agent.stopHold();
-});
 
-test("a teammate-marked transcript keeps its session a member", async () => {
-	const dir = mkdtempSync(join(scratch, "session-"));
-	const file = join(dir, "sess.jsonl");
-	writeFileSync(file, JSON.stringify({ type: "session" }) + "\n" +
-		JSON.stringify({ type: "message",
-			content: "a teammate spawned by a parent pi session" }) + "\n");
-	const savedId = process.env.TEAM_ID;
-	delete process.env.TEAM_ID;
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	else delete process.env.TEAM_ID;
-	agent.rememberSession(file);
-	assert.equal(agent.hasParent(), false);
-	assert.equal(await agent.isTeammate(), true);
-});
 
 test("a gc-reap request steers the agent to call the reap tool", async () => {
 	const delivered = [];
@@ -677,6 +602,85 @@ test("a gc-reap request steers the agent to call the reap tool", async () => {
 	assert.match(text, /team_gc_reap/);
 	assert.match(text, /idle/);
 	assert.match(text, /3h/);
+});
+
+test("an obsolete attach request is refused, its replies consumed",
+	async () => {
+		const runs = [];
+		const delivered = [];
+		const { runner } = makeRunner((_file, args) => {
+			runs.push(args);
+			return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
+		});
+		const agent = new TeamAgent(runner, (m) => delivered.push(m));
+		agent.deliverMessage(JSON.stringify({
+			op: "message", id: "a1", from: "alpha:main", to: "parent-1",
+			kind: "attach",
+			payload: JSON.stringify({ requestId: "attach-1", name: "x" }),
+			ts: 1,
+		}));
+		await new Promise((resolve) => setImmediate(resolve));
+		// Every registered session is reachable, so there is nothing to
+		// attach; the request id rides back so the old sender can settle.
+		const reply = runs.find((args) => args.includes("attach-error"));
+		assert.ok(reply, "an attach request was not answered");
+		assert.ok(reply.some((arg) => arg.includes("attach-1")),
+			"the request id was not echoed");
+		assert.equal(agent.id, "parent-1", "the request changed the id");
+		// A reply from an old sender is control traffic, not a task.
+		agent.deliverMessage(JSON.stringify({
+			op: "message", id: "a2", from: "alpha:main", to: "parent-1",
+			kind: "attach-ack",
+			payload: JSON.stringify({ requestId: "attach-2", id: "fork-1" }),
+			ts: 2,
+		}));
+		assert.equal(delivered.length, 0,
+			"attach traffic reached the agent");
+	});
+
+test("terminate reports a broker refusal", async () => {
+	const { runner } = makeRunner(() => Promise.resolve({
+		stdout: JSON.stringify({
+			op: "error", error: "not-a-fork",
+			detail: "beta:main is not a spawned fork",
+		}),
+		stderr: "", code: 0,
+	}));
+	await assert.rejects(
+		() => new BrokerOps(runner, "python3").terminate("me", "beta:main", "st-1"),
+		/not-a-fork: beta:main is not a spawned fork/);
+});
+
+test("terminate refuses to report success without an ack", async () => {
+	// A crashed or timed-out launch resolves with code 1 and no ack; a
+	// malformed reply parses to {}. Neither may read as a termination.
+	const failed = makeRunner(() => Promise.resolve({
+		stdout: "", stderr: "python3: not found", code: 1,
+	}));
+	await assert.rejects(
+		() => new BrokerOps(failed.runner, "python3").terminate("me", "fork-1"),
+		/terminate failed: python3: not found/);
+	const silent = makeRunner(() => Promise.resolve({
+		stdout: "{}\n", stderr: "", code: 0,
+	}));
+	await assert.rejects(
+		() => new BrokerOps(silent.runner, "python3").terminate("me", "fork-1"),
+		/terminate failed: exit 0/);
+});
+
+test("terminate presents its sender and accepts the ack", async () => {
+	const runCalls = [];
+	const { runner } = makeRunner((_file, args) => {
+		runCalls.push(args);
+		return Promise.resolve({
+			stdout: JSON.stringify({ op: "ack" }), stderr: "", code: 0,
+		});
+	});
+	await new BrokerOps(runner, "python3").terminate("me", "fork-9", "st-9");
+	const argv = runCalls[0];
+	assert.equal(argv[argv.indexOf("--id") + 1], "me");
+	assert.equal(argv[argv.indexOf("--send-token") + 1], "st-9");
+	assert.equal(argv[argv.length - 1], "fork-9");
 });
 
 test("an ordinary report is delivered without preemption", () => {
@@ -708,30 +712,7 @@ test("deliverMessage filters a redelivered envelope id", async () => {
 		delivered.map((m) => m.id), ["m1", "m2"]);
 });
 
-test("attach refuses a target that already has a parent", async () => {
-	const { runner } = makeRunner((file, args) => {
-		if (args.includes("ls")) {
-			return Promise.resolve({ stdout: JSON.stringify({ agents: [
-				{ id: "taken", name: "t", role: "fork", pid: 1,
-				  parent: "p", session: null, online: true },
-			] }), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	await assert.rejects(() => agent.attach("taken", "x"), /one team/);
-});
 
-test("attachTo refuses a second parent", async () => {
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	await agent.attachTo("root", "me");
-	await assert.rejects(() => agent.attachTo("other"), /one team/);
-	agent.detach();
-	agent.stopHold();
-});
 
 test("setState publishes busy, waiting, and idle to the busy file", () => {
 	mkdirSync(stateRoot, { recursive: true });
@@ -1027,279 +1008,21 @@ test("WindowlessPython resolves a probed twin only off Windows", () => {
 	assert.equal(none.resolve(), "python3");
 });
 
-test("PendingRequests resolves a waiter from its reply", async () => {
-	const pending = new PendingRequests();
-	const wait = pending.register("r1", 5000);
-	pending.settle({
-		from: "x", to: "me", kind: "spawn-ack",
-		payload: { requestId: "r1", id: "f1", session: "s" },
-	}, "spawn-ack");
-	assert.deepEqual(await wait, { id: "f1", session: "s" });
-});
-
-test("PendingRequests fails a waiter on a non-ack reply", async () => {
-	const pending = new PendingRequests();
-	const wait = pending.register("r2", 5000);
-	pending.settle({
-		from: "x", to: "me", kind: "spawn-error",
-		payload: { requestId: "r2" },
-	}, "spawn-ack");
-	assert.equal(await wait, null);
-});
-
-test("PendingRequests times out and cancels without leaking", async () => {
-	const pending = new PendingRequests();
-	assert.equal(await pending.register("r3", 10), null);
-	const waiting = pending.register("r4", 5000);
-	pending.cancelAll();
-	assert.equal(await waiting, null);
-	// A later register resolves at once after cancellation.
-	assert.equal(await pending.register("r5", 5000), null);
-});
 
 
-test("attachTo re-registers as a fork and notifies the parent", async () => {
-	const sends = [];
-	const { calls, runner } = makeRunner((file, args) => {
-		sends.push(args);
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	const before = agent.id;
-	const ref = await agent.attachTo("parent-9", "helper");
-	assert.notEqual(agent.id, before);
-	assert.ok(agent.id.includes(":fork-"), "id is not a fork id");
-	assert.equal(ref.session, "helper");
-	// The attach applies the fork identity to this process env, so the
-	// attached session's shell tools can run the report command.
-	assert.equal(process.env.TEAM_PARENT_ID, "parent-9");
-	assert.equal(process.env.TEAM_ROLE, "fork");
-	assert.ok(process.env.TEAM_ROOT, "TEAM_ROOT was not applied");
-	const hold = calls[calls.length - 1];
-	assert.equal(hold.options.env.TEAM_ID, agent.id);
-	assert.equal(hold.options.env.TEAM_ROLE, "fork");
-	assert.equal(hold.options.env.TEAM_PARENT_ID, "parent-9");
-	assert.equal(hold.options.env.TEAM_NAME, "helper");
-	const notice = sends.find((a) => a.includes("notice"));
-	assert.ok(notice && notice.includes("parent-9"),
-		"no attach notice was sent to the parent");
-	agent.detach();
-	agent.stopHold();
-});
 
-test("detach returns an attached agent to a main identity", async () => {
-	const { calls, runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	const attached = await agent.attachTo("parent-9", "helper");
-	const detached = agent.detach();
-	assert.notEqual(detached, attached.id);
-	const hold = calls[calls.length - 1];
-	assert.equal(hold.options.env.TEAM_ROLE, "main");
-	assert.equal(hold.options.env.TEAM_PARENT_ID, "");
-	agent.stopHold();
-});
 
-test("detach restores the process env attach overwrote", async () => {
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const savedName = process.env.TEAM_NAME;
-	process.env.TEAM_NAME = "mine";
-	const agent = new TeamAgent(runner, () => {});
-	try {
-		agent.hold("/work");
-		await agent.attachTo("parent-9", "helper");
-		agent.detach();
-		assert.equal(process.env.TEAM_NAME, "mine");
-		assert.equal(process.env.TEAM_PARENT_ID, undefined);
-	} finally {
-		if (savedName !== undefined) process.env.TEAM_NAME = savedName;
-		else delete process.env.TEAM_NAME;
-		agent.stopHold();
-	}
-});
 
-test("an inbound attach request converts this session and acks", async () => {
-	// A non-teammate session: clear the spawn identity the suite sets so
-	// the agent registers as main and may be attached.
-	const savedId = process.env.TEAM_ID;
-	delete process.env.TEAM_ID;
-	const sends = [];
-	const { calls, runner } = makeRunner((file, args) => {
-		sends.push(args);
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	onData(JSON.stringify({
-		from: "alpha:main", to: agent.id, kind: "attach",
-		payload: { requestId: "r1", name: "kid" },
-	}) + "\n");
-	await new Promise((r) => setTimeout(r, 20));
-	const ack = sends.find((a) => a.includes("attach-ack"));
-	assert.ok(ack, "no attach-ack was sent");
-	assert.ok(ack.includes("alpha:main"));
-	const hold = calls[calls.length - 1];
-	assert.equal(hold.options.env.TEAM_ROLE, "fork");
-	assert.equal(hold.options.env.TEAM_PARENT_ID, "alpha:main");
-	agent.detach();
-	agent.stopHold();
-});
 
-test("attach refuses when this session is already a teammate", async () => {
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const savedParent = process.env.TEAM_PARENT_ID;
-	process.env.TEAM_PARENT_ID = "root-1";
-	try {
-		const agent = new TeamAgent(runner, () => {});
-		await assert.rejects(() => agent.attach("beta:main"), /one team/);
-	} finally {
-		if (savedParent === undefined) delete process.env.TEAM_PARENT_ID;
-		else process.env.TEAM_PARENT_ID = savedParent;
-	}
-});
 
-test("an inbound attach request from a teammate is refused", async () => {
-	const sends = [];
-	const { calls, runner } = makeRunner((file, args) => {
-		if (args.includes("ls")) {
-			return Promise.resolve({ stdout: JSON.stringify({ agents: [
-				{ id: "alpha:fork-1", name: "f", role: "fork", pid: 1,
-				  parent: "alpha:root", session: null, online: true },
-			] }), stderr: "", code: 0 });
-		}
-		sends.push(args);
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	onData(JSON.stringify({
-		from: "alpha:fork-1", to: agent.id, kind: "attach",
-		payload: { requestId: "r1", name: "kid" },
-	}) + "\n");
-	await new Promise((r) => setTimeout(r, 20));
-	const error = sends.find((a) => a.includes("attach-error"));
-	assert.ok(error, "no attach-error was sent");
-	assert.ok(error.join(" ").includes("requester-is-teammate"),
-		"refusal did not say the requester is a teammate");
-	assert.ok(!sends.some((a) => a.includes("attach-ack")),
-		"a teammate's attach request was accepted");
-	agent.stopHold();
-});
 
-test("attach asks a target agent and returns its new fork id", async () => {
-	const sends = [];
-	const { calls, runner } = makeRunner((file, args) => {
-		sends.push(args);
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	const onData = calls[0]["stdout:data"];
-	const pending = agent.attach("beta:main", "kid");
-	await new Promise((r) => setTimeout(r, 20));
-	const sent = sends.find((a) => a.includes("attach"));
-	assert.ok(sent, "attach request was not sent");
-	const request = JSON.parse(sent[sent.length - 1]);
-	onData(JSON.stringify({
-		from: "beta:main", to: agent.id, kind: "attach-ack",
-		payload: { requestId: request.requestId, id: "beta:fork-1",
-			session: "kid" },
-	}) + "\n");
-	const ref = await pending;
-	assert.equal(ref.id, "beta:fork-1");
-	assert.equal(ref.session, "kid");
-	agent.stopHold();
-});
 
-test("deregister resolves a pending attach instead of hanging it", async () => {
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, () => {});
-	agent.hold("/work");
-	const pending = agent.attach("beta:main", "kid");
-	agent.deregister();
-	const ref = await pending;
-	assert.equal(ref, null);
-});
 
-test("member-only operations refuse a non-team session", async () => {
-	const savedId = process.env.TEAM_ID;
-	delete process.env.TEAM_ID;
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	assert.equal(await agent.isTeammate(), false);
-	await assert.rejects(() => agent.requireTeammate("team_send"),
-		/team member/);
-	await assert.rejects(() => agent.requireTeammate("team_wait"),
-		/team member/);
-});
 
-test("attaching makes a session a teammate that passes the gate", async () => {
-	const savedId = process.env.TEAM_ID;
-	delete process.env.TEAM_ID;
-	const { runner } = makeRunner(() =>
-		Promise.resolve({ stdout: "{}", stderr: "", code: 0 }));
-	const agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	agent.hold("/work");
-	assert.equal(await agent.isTeammate(), false);
-	await agent.attachTo("parent-9", "helper");
-	assert.equal(await agent.isTeammate(), true);
-	await assert.doesNotReject(() => agent.requireTeammate("team_send"));
-	agent.detach();
-	assert.equal(await agent.isTeammate(), false);
-	agent.stopHold();
-});
 
-test("spawning makes the spawner a teammate", async () => {
-	const savedId = process.env.TEAM_ID;
-	delete process.env.TEAM_ID;
-	const { runner } = makeRunner((file, args) => {
-		if (args.includes("spawn")) {
-			return Promise.resolve({ stdout: JSON.stringify({
-				ok: true, id: "kid-fork", session: "kid",
-			}), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	const agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	agent.hold("/work");
-	// The empty snapshot means only the spawn itself can grant membership.
-	assert.equal(await agent.isTeammate(), false);
-	const ref = await agent.spawn("", "kid", "do it");
-	assert.equal(ref.id, "kid-fork");
-	assert.equal(await agent.isTeammate(), true);
-	await assert.doesNotReject(() => agent.requireTeammate("team_send"));
-	agent.stopHold();
-});
 
-test("owning a registered teammate grants membership after reload", async () => {
-	const savedId = process.env.TEAM_ID;
-	delete process.env.TEAM_ID;
-	const holder = {};
-	const { runner } = makeRunner((file, args) => {
-		if (args.includes("ls")) {
-			return Promise.resolve({ stdout: JSON.stringify({ agents: [{
-				id: "x", name: "x", role: "fork", pid: 1,
-				parent: holder.agent.id, session: null, online: true,
-			}] }), stderr: "", code: 0 });
-		}
-		return Promise.resolve({ stdout: "{}", stderr: "", code: 0 });
-	});
-	holder.agent = new TeamAgent(runner, () => {});
-	if (savedId !== undefined) process.env.TEAM_ID = savedId;
-	assert.equal(await holder.agent.isTeammate(), true);
-});
+
+
 
 test("main identity derives from the session stem", () => {
 	const savedId = process.env.TEAM_ID;
@@ -1721,7 +1444,6 @@ test("team_wait returns a delivered report as formatted text", async () => {
 		const report = {
 			from: "kid", to: app.id, kind: "result", payload: "all done",
 		};
-		app.requireTeammate = async () => {};
 		app.setState = () => {};
 		app.setBusy = () => {};
 		app.waitForResults = async () => ({
@@ -1760,7 +1482,6 @@ test("team_wait reports a message that woke the wait", async () => {
 		const message = {
 			from: "kid", to: app.id, kind: "text", payload: "need input",
 		};
-		app.requireTeammate = async () => {};
 		app.setState = () => {};
 		app.setBusy = () => {};
 		app.waitForResults = async () => ({
@@ -1775,6 +1496,69 @@ test("team_wait reports a message that woke the wait", async () => {
 	} finally {
 		if (previous === undefined) delete globalThis.__piTeamsAgent;
 		else globalThis.__piTeamsAgent = previous;
+	}
+});
+
+/** Registers the extension against a stub pi and publishes its agent, so
+ *  a tool can be executed the way pi executes it. */
+async function registerTools() {
+	const tools = new Map();
+	const pi = {
+		appendEntry: () => {},
+		sendMessage: () => {},
+		on: () => {},
+		registerEntryRenderer: () => {},
+		registerCommand: () => {},
+		registerTool: (definition) => tools.set(definition.name, definition),
+	};
+	const previous = globalThis.__piTeamsAgent;
+	globalThis.__piTeamsAgent = undefined;
+	const { default: register } = await import("../extensions/pi-teams.ts");
+	await register(pi);
+	return {
+		tools,
+		app: globalThis.__piTeamsAgent,
+		restore: () => {
+			if (previous === undefined) delete globalThis.__piTeamsAgent;
+			else globalThis.__piTeamsAgent = previous;
+		},
+	};
+}
+
+test("team_send reaches an unrelated session", async () => {
+	// No membership gate stands between a plain main and any registered
+	// id: the tool hands the target, kind, and text to the agent.
+	const { tools, app, restore } = await registerTools();
+	try {
+		const sent = [];
+		app.send = async (to, kind, text) => {
+			sent.push({ to, kind, text });
+			return "ack";
+		};
+		const result = await tools.get("team_send").execute("call-1",
+			{ to: "outsider", text: "hi" }, undefined, undefined,
+			{ hasPendingMessages: () => false });
+		assert.deepEqual(sent, [{ to: "outsider", kind: "text", text: "hi" }]);
+		assert.match(result.content[0].text, /sent text to outsider: ack/);
+		assert.equal(result.details.reply, "ack");
+	} finally {
+		restore();
+	}
+});
+
+test("team_kill surfaces the broker's refusal instead of success", async () => {
+	const { tools, app, restore } = await registerTools();
+	try {
+		app.terminate = async () => {
+			throw new Error("not-a-fork: beta:main is not a spawned fork");
+		};
+		await assert.rejects(
+			() => tools.get("team_kill").execute("call-1",
+				{ target: "beta:main" }, undefined, undefined,
+				{ hasPendingMessages: () => false }),
+			/not-a-fork/);
+	} finally {
+		restore();
 	}
 });
 
@@ -1847,17 +1631,14 @@ test("pre_teams catalog covers every team tool, conventions, features", async ()
 	assert.match(text, /Features:/);
 	assert.match(text, /pre_teams/);
 	const names = [
-		"team_spawn", "team_attach", "team_wait", "team_send",
-		"team_ls", "team_peek", "team_peer", "team_detach",
-		"team_kill", "team_gc_reap",
+		"team_spawn", "team_wait", "team_send", "team_ls",
+		"team_peek", "team_peer", "team_kill", "team_gc_reap",
 	];
 	assert.deepEqual(result.details.tools, names);
 	const conventions = result.details.conventions.join("\n");
-	assert.match(conventions,
-		/Always try to attach first.*team_ls.*team_peek/s);
-	assert.match(conventions, /Fall back to team_spawn/);
-	assert.match(conventions, /Attach chain:.*team_send.*team_wait/s);
+	assert.match(conventions, /team_ls.*team_peek.*team_send/s);
 	assert.match(conventions, /Spawn chain:.*team_spawn.*team_wait/s);
+	assert.doesNotMatch(conventions, /team_attach|team_detach/);
 	for (const name of names) {
 		assert.match(text, new RegExp(`- ${name}: `),
 			`${name} has a one-line purpose in the catalog`);
@@ -2146,33 +1927,12 @@ test("team_ls shows name, parent, cwd, you, and peer", async () => {
 	}
 });
 
-test("attach marks the requester a team owner", async () => {
-	const { agent } = makeAgent();
-	agent.send = async (_to, _kind, payload) => {
-		const { requestId } = JSON.parse(payload);
-		agent.pending.settle({
-			from: "kid", to: agent.id, kind: "attach-ack",
-			payload: { requestId, id: "kid-fork", session: "kid" },
-		}, "attach-ack");
-		return "sent";
-	};
-	const ref = await agent.attach("kid");
-	assert.deepEqual(ref, { id: "kid-fork", session: "kid" });
-	// Without the owner flag this needs the target's hold to have
-	// re-registered already, which the ack does not guarantee.
-	assert.equal(await agent.isTeammate(), true);
-	agent.stopHold();
-});
 
-// -- live team_wait streaming -----------------------------------------
-
-/** One assistant transcript line, as pi writes it. */
 function assistantLine(text) {
 	return JSON.stringify({ type: "message", message: {
 		role: "assistant", content: [{ type: "text", text }] } });
 }
 
-/** An empty fixture transcript to append to. */
 function emptyTranscript(name) {
 	const path = join(sessionDir, name);
 	mkdirSync(sessionDir, { recursive: true });
@@ -2180,7 +1940,6 @@ function emptyTranscript(name) {
 	return path;
 }
 
-/** A structural render-slot stub: the view reuses one Text. */
 function renderSlot() {
 	return {};
 }
@@ -2455,7 +2214,6 @@ test("team_wait streams teammate activity and keeps its report text",
 		const report = {
 			from: "kid", to: app.id, kind: "result", payload: "all done",
 		};
-		app.requireTeammate = async () => {};
 		app.setState = () => {};
 		app.setBusy = () => {};
 		app.transcriptsOf = async (ids) => ids.map((id) => ({ id, path: transcript }));
