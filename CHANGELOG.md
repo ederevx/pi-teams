@@ -4,6 +4,22 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.55 - 2026-11-04
+
+- Every registered pi session is a teammate: `team_attach` and
+  `team_detach` are gone, and `team_send`, `team_wait`, and `team_kill`
+  no longer require membership or stop at a team boundary. A session
+  still running the old protocol has its request answered with
+  `attach-error`, and its replies are consumed as control traffic.
+- `team_kill` ends a spawned fork only: a registered session that is
+  not a fork is refused with `not-a-fork` before anything is evicted,
+  locally and on the host a peer request names, while an absent id
+  stays an idempotent no-op. Terminate now carries the caller's send
+  token like send and spawn do.
+- Adopting it: detach every attached session with the old extension
+  first, and upgrade a peer's broker before its host can refuse `kill`
+  on a session the user started (see README, Deployment).
+
 ## v0.4.54 - 2026-10-30
 
 - `team_wait` reads one monotonic start for every clock it prints, anchors the
