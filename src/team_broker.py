@@ -284,7 +284,7 @@ class TeamBroker:
                 peer = self._peers_by_conn.pop(conn, None)
             if peer is not None:
                 peer.drop()
-            self._drop_conn(agent_id)
+            self._drop_conn(agent_id, conn)
 
     def _messages(self, conn):
         # Yields one decoded JSON object per line until the peer closes,
@@ -406,7 +406,7 @@ class TeamBroker:
             self._handle_spawn(conn, msg)
         elif op == "deregister":
             if agent_id:
-                self._drop_entry(agent_id)
+                self._drop_entry(agent_id, conn)
             self._reply(conn, op="ack")
         elif op == "gc-reap":
             # A session's own agent answered the reaper's request by
@@ -418,6 +418,8 @@ class TeamBroker:
                 self._reply(conn, op="error", error="send-token",
                             detail=SendGate.refused_reason())
             else:
+                # The token names the registration rather than the
+                # connection: an idle session answers on a fresh one.
                 self._drop_entry(target)
                 self._reply(conn, op="ack")
         elif op == "shutdown":
@@ -588,13 +590,22 @@ class TeamBroker:
         if due:
             self.root.write_atomic(REGISTRY_NAME, data + "\n")
 
-    def _release(self, agent_id, dropped=False):
+    def _release(self, agent_id, dropped=False, *, expected_conn=None,
+                 expected_entry=None):
         """The one registration release path, for every drop: removes
         the entry, its connection, its gate credential, and any
         outstanding reap request. `dropped` records a connection loss
         (not an eviction), so sends during the hold-restart gap park.
-        Returns (entry, conn) for the caller's GC and teardown."""
+        `expected_conn` or `expected_entry` names what must still hold
+        the id, so a holder that lost it releases nothing. Returns
+        (entry, conn) for the caller's GC and teardown."""
         with self._lock:
+            if expected_conn is not None \
+                    and self._clients.get(agent_id) is not expected_conn:
+                return None, None
+            if expected_entry is not None \
+                    and self._registry.get(agent_id) is not expected_entry:
+                return None, None
             entry = self._registry.pop(agent_id, None)
             conn = self._clients.pop(agent_id, None)
             self._send_gate.drop(agent_id)
@@ -603,29 +614,30 @@ class TeamBroker:
         self.gc.forget_request(agent_id)
         return entry, conn
 
-    def _drop_entry(self, agent_id):
-        entry, conn = self._release(agent_id)
+    def _drop_entry(self, agent_id, conn=None, expected_entry=None):
+        entry, conn = self._release(agent_id, expected_conn=conn,
+                                    expected_entry=expected_entry)
         self.root.remove_busy_file(entry)
         self._persist_and_notify()
         return conn
 
-    def _drop_dead_agent(self, agent_id):
+    def _drop_dead_agent(self, agent_id, entry=None):
         # The reaper found a local entry whose owning process is gone
         # but whose connection lingers. Reuse the registration drop
         # path so the entry, its gate, and its busy/session files all
         # go, then close the orphaned connection so its shim stops
         # waiting on a dead hold.
-        conn = self._drop_entry(agent_id)
+        conn = self._drop_entry(agent_id, expected_entry=entry)
         if conn is not None:
             try:
                 conn.close()
             except OSError:
                 pass
 
-    def _drop_conn(self, agent_id):
+    def _drop_conn(self, agent_id, conn):
         if not agent_id:
             return
-        entry, _ = self._release(agent_id, dropped=True)
+        entry, _ = self._release(agent_id, dropped=True, expected_conn=conn)
         if entry is not None:
             self.root.remove_busy_file(entry)
             self._persist_and_notify()

@@ -1652,6 +1652,25 @@ class BrokerProtocolTests(unittest.TestCase):
         main.close()
         fork.close()
 
+    def test_a_replaced_registration_survives_its_old_connection_drop(self):
+        # A reader's teardown releases only the registration it still
+        # owns, so an id handed to a newer connection keeps its entry
+        # and its client when the connection it replaced closes.
+        target = "beta:replaced"
+        first = self._agent(target, role="fork", parent="checker")
+        old_conn = self.broker._clients[target]
+        second = self._agent(target, role="main")
+        self.broker._drop_conn(target, old_conn)
+        self.assertEqual(self.broker._registry.get(target, {}).get("role"),
+                         "main", "the old connection released its replacement")
+        self.assertIn(target, self._ids_via(self.root))
+        # The connection that does hold the id still releases it.
+        second.close()
+        self.assertTrue(wait_until(
+            lambda: target not in self._ids_via(self.root)),
+            "the owning connection's drop released nothing")
+        first.close()
+
     def test_terminate_requires_the_callers_token(self):
         # Termination now speaks for an agent like send and spawn do: an
         # anonymous client cannot end a fork.
