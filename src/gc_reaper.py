@@ -94,14 +94,15 @@ class GcReaper:
         # and a remote entry is never judged (its owner is elsewhere).
         with self.lock:
             dead = [
-                agent_id for agent_id, entry in list(self.registry.items())
+                (agent_id, entry)
+                for agent_id, entry in list(self.registry.items())
                 if entry.get("owner_pid")
                 and not entry.get("remote")
                 and entry.get("since_ts", 0) <= now - self.liveness_grace
                 and not self._owner_alive(entry)
             ]
-        for agent_id in dead:
-            self.drop_agent(agent_id)
+        for agent_id, entry in dead:
+            self.drop_agent(agent_id, entry)
 
     def _owner_alive(self, entry):
         # The root owns the pid/start-mark probe; a pid that cannot be
