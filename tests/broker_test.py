@@ -1671,6 +1671,37 @@ class BrokerProtocolTests(unittest.TestCase):
             "the owning connection's drop released nothing")
         first.close()
 
+    def test_a_replaced_registration_survives_a_late_deregister(self):
+        # A deregister names no connection, so the caller's own connection
+        # is what qualifies it: one that lost the id releases nothing.
+        target = "beta:late-deregister"
+        first = self._agent(target, role="fork", parent="checker")
+        old_conn = self.broker._clients[target]
+        second = self._agent(target, role="main")
+        self.broker._drop_entry(target, old_conn)
+        self.assertEqual(self.broker._registry.get(target, {}).get("role"),
+                         "main", "a late deregister released its replacement")
+        self.assertIn(target, self.broker._clients)
+        self.broker._drop_entry(target, self.broker._clients[target])
+        self.assertNotIn(target, self._ids_via(self.root))
+        second.close()
+        first.close()
+
+    def test_a_stale_reaper_entry_leaves_a_replacement_registration(self):
+        # The reaper judges a snapshot taken before it drops; an entry that
+        # was replaced in between is no longer the one it judged.
+        target = "beta:stale-reaper"
+        first = self._agent(target, role="fork", parent="checker")
+        judged = self.broker._registry[target]
+        second = self._agent(target, role="main")
+        self.broker._drop_dead_agent(target, judged)
+        self.assertEqual(self.broker._registry.get(target, {}).get("role"),
+                         "main", "a stale reaper entry dropped a replacement")
+        self.broker._drop_dead_agent(target, self.broker._registry[target])
+        self.assertNotIn(target, self._ids_via(self.root))
+        second.close()
+        first.close()
+
     def test_terminate_requires_the_callers_token(self):
         # Termination now speaks for an agent like send and spawn do: an
         # anonymous client cannot end a fork.
