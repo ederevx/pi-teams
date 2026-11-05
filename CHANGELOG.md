@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.56 - 2026-11-05
+
+- A registration is released only by the connection, or the reaper entry,
+  that still holds its id, so a terminate or a disconnect no longer evicts
+  the session that registered into the freed id.
+- A reaper judges the entry it snapshotted, so an id replaced while it ran
+  keeps its replacement.
+
 ## v0.4.55 - 2026-11-04
 
 - Every registered pi session is a teammate: `team_attach` and
