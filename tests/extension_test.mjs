@@ -2332,6 +2332,7 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"cat <<'E'; bash </dev/null\nssh host id\nE",
 		"cat <<'E'; bash\nssh host id\nE",
 		"bash -c 'make' <<'EOF'\nssh host id\nEOF",
+		"bash <<'EOF' 0</dev/null\nssh host id\nEOF",
 	]) {
 		"cat <<''\nssh host id\n\n",
 		assert.equal(await verdict(command), undefined,
@@ -2343,6 +2344,8 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"sh <<-EOF\n\tssh host id\n\tEOF",
 		"cat <<EOF\n$(ssh host id)\nEOF",
 		"cat <<'EOF' | bash\nssh host id\nEOF",
+		"  bash <<'EOF'\nssh host id\nEOF",
+		"bash <<'EOF' 3</dev/null\nssh host id\nEOF",
 		"bash </dev/null <<'EOF'\nssh host id\nEOF",
 		"bash <<''\nssh host id\n\n",
 		"bash <<'A'; cat </dev/null\nssh host id\nA",
