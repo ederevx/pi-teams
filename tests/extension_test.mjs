@@ -2422,6 +2422,7 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"bash 2>&1 <<'EOF'\nssh host id\nEOF",
 		"bash 3<<'EOF' <&\\\n3\nssh host id\nEOF",
 		"bash 3<<'EOF' <&\\\n 3\nssh host id\nEOF",
+		"bash 3<<'EOF' <&\"\\\n3\"\nssh host id\nEOF",
 		"bash 3<<'EOF' <& '3'\nssh host id\nEOF",
 		"bash 3<<'EOF' <&3-\nssh host id\nEOF",
 		"bash 3<<'EOF' <&03\nssh host id\nEOF",
