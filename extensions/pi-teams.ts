@@ -90,15 +90,27 @@ export default async function (pi: ExtensionAPI) {
 		name: "team_spawn",
 		label: "spawn teammate",
 		description:
-			"Spawn a persistent, resumable pi-teams teammate to do one " +
-			"self-contained task in its own session. Call pre_teams for " +
-			"the team tool catalog, conventions, and feature summary.",
+			"Spawn a persistent, resumable pi-teams teammate for one " +
+			"self-contained task when no suitable live session can take " +
+			"it. Route incoming work with a separate scope to its own " +
+			"session and explicit result destination. Call pre_teams for " +
+			"the scope rule, reuse order, tool catalog, and feature " +
+			"summary.",
 		promptGuidelines: [
-			"Before delegating, check team_ls and team_peek for a live " +
-				"session that already holds the task's context: message it " +
-				"the task and the result destination with team_send, then " +
-				"team_wait. Spawn only when no suitable live session can " +
-				"take the work.",
+			"Before delegating, check team_ls and team_peek: use " +
+				"team_send when a live session already owns the scope and " +
+				"can take the work; otherwise spawn. During an active task, " +
+				"route incoming work immediately if it requests a separate " +
+				"deliverable or requires a repo/file set or target system " +
+				"outside what the current deliverable requires. This " +
+				"includes team_send tasks, user prompts, and reports " +
+				"requesting new work; ordinary steps, follow-ups confined " +
+				"to the same files and system, and delegated reports alone " +
+				"do not qualify. An explicit replacement or cancellation " +
+				"changes the current task instead. Give separate work an " +
+				"explicit result destination, tell the requester the owning " +
+				"session id, and keep the current task on its scope. The " +
+				"parent retains planning, integration, and final validation.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "The task the teammate must do" }),

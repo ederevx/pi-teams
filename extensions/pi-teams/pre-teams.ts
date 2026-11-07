@@ -97,11 +97,24 @@ export class PreTeamsTool {
 				"its task and where to send the result (kind=result) -> " +
 				"team_wait on that id. Nothing is reserved: the session may " +
 				"take other work meanwhile, so name the destination.",
-			"Spawn chain: team_spawn one self-contained task -> " +
-				"team_wait, or keep working and take the report as a " +
-				"message. Spawn only when no live session can take the work.",
-			"Re-call team_wait with details.remaining to keep blocking; " +
-				"an unwaited report still arrives as a message.",
+			"During an active task, route incoming work separately if it " +
+				"requests a separate deliverable or requires a repo/file set " +
+				"or target system outside what the current deliverable " +
+				"requires. This applies to team_send tasks, user prompts, " +
+				"and reports that request new work. Another step toward the " +
+				"same deliverable, a follow-up confined to its existing files " +
+				"and system, or a report on delegated work is not a scope " +
+				"change. An explicit replacement or cancellation changes the " +
+				"current task instead.",
+			"Route separate work immediately: team_ls -> team_peek -> " +
+				"team_send to a live session that already owns that scope and " +
+				"can take it; otherwise team_spawn one self-contained task. " +
+				"Give it an explicit result destination, tell the requester " +
+				"the owning session id, and keep the current task on its " +
+				"scope. The parent retains planning, integration, and final " +
+				"validation. Use team_wait when needed; re-call it with " +
+				"details.remaining to keep blocking, or keep working and " +
+				"receive the report as a message.",
 			"A teammate silent past the stall bound is nudged once per " +
 				"wait (PI_TEAMS_STALL, 0 disables).",
 			"The parent owns planning, integration, and final validation. " +

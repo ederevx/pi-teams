@@ -73,6 +73,11 @@ one per `TEAM_ROOT`. See Deployment for a manual install.
   extension requests the spawn through the broker: the destination
   broker uses a session-host provider or a detached fallback, and the
   requesting pi does not own the child process.
+- Incoming work with a separate scope must be routed when received,
+  rather than folded into or queued behind the active task. Reuse a
+  suitable live session first; spawn only when none can take it. Each
+  separately routed task has an explicit result destination, and its
+  requester receives the owning session id.
 
 ### team_wait and the hang watchdog
 
@@ -153,6 +158,18 @@ churn, no new parent, no re-registration — so the same session can be
 asked for work at any time, and `team_spawn` is the fallback when no
 live session fits. Nothing is reserved: a session may take other work
 meanwhile, so name the result destination in the task.
+
+When work arrives during an active task, compare it with the current
+deliverable. A separate deliverable, or a repo/file set or target
+system outside what that deliverable requires, gets separate
+ownership immediately: reuse a live session that already owns that
+scope and can take it, otherwise spawn one. Specify the result
+destination and tell the requester the owning session id; keep the
+current task on its scope. Ordinary steps, follow-ups confined to the
+existing files and system, and reports alone do not trigger
+delegation. An explicit replacement or cancellation changes the
+current task instead. The parent retains planning, integration, and
+final validation.
 
 ### Awareness
 

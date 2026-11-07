@@ -16,6 +16,20 @@ const ROLE_TEXT = [
 	"- Report the outcome to whoever asked for it by running the " +
 		"report command in your task prompt; that is how your requester " +
 		"receives the result.",
+	"- While a task is active, route incoming work separately when it " +
+		"requests a separate deliverable or requires a repo/file set or " +
+		"target system outside what the current deliverable requires. " +
+		"This applies to team_send tasks, user prompts, and reports that " +
+		"request new work. Another step toward the same deliverable, a " +
+		"follow-up confined to its existing files and system, or a report " +
+		"on delegated work is not a scope change. An explicit replacement " +
+		"or cancellation changes the current task instead.",
+	"- Route separate work immediately: check team_ls and team_peek, " +
+		"then team_send it to a live session that already owns that scope " +
+		"and can take it; otherwise team_spawn a self-contained task. " +
+		"Specify its result destination, tell the requester the owning " +
+		"session id, and continue the current task within its scope. The " +
+		"parent retains planning, integration, and final validation.",
 	"- Message, wait for, and spawn teammates with the team tools; " +
 		"delegate bounded units and integrate their reports. Every " +
 		"registered pi session is addressable, local or on a linked " +

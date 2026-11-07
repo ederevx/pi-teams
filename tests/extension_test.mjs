@@ -1637,7 +1637,9 @@ test("pre_teams catalog covers every team tool, conventions, features", async ()
 	assert.deepEqual(result.details.tools, names);
 	const conventions = result.details.conventions.join("\n");
 	assert.match(conventions, /team_ls.*team_peek.*team_send/s);
-	assert.match(conventions, /Spawn chain:.*team_spawn.*team_wait/s);
+	assert.match(conventions, /route incoming work separately.*team_spawn.*team_wait/is);
+	assert.match(conventions, /separate deliverable.*An explicit replacement/is);
+	assert.match(conventions, /result destination.*owning session id/is);
 	assert.doesNotMatch(conventions, /team_attach|team_detach/);
 	for (const name of names) {
 		assert.match(text, new RegExp(`- ${name}: `),

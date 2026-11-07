@@ -4,6 +4,13 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.57 - 2026-11-06
+
+- Advertise immediate, reuse-first routing of incoming work with a
+  separate scope, including explicit result destinations and
+  ownership notifications, in the `pre_teams` catalogue, the teammate
+  role, and `team_spawn`.
+
 ## v0.4.56 - 2026-11-05
 
 - A registration is released only by the connection, or the reaper entry,
