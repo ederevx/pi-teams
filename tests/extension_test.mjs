@@ -2350,6 +2350,8 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"bash </dev/null <<'EOF'\nssh host id\nEOF",
 		"bash <<''\nssh host id\n\n",
 		"bash <<EOF\nprintf '%s' '$(ssh host id)'\nEOF",
+		"bash <<EOF\nprintf '%s' \"\\$(ssh host id)\"\nEOF",
+		"cat <<EOF\nlit \\\n$(ssh host id)\nEOF",
 		"bash <<'A'; cat </dev/null\nssh host id\nA",
 		"bash <<'A'; cat <<'B'\nssh host id\nA\nsafe\nB",
 		"bash <<'OUT'\nsh <<'IN'\nssh host id\nIN\nOUT",
