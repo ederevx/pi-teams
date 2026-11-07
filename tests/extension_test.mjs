@@ -2339,7 +2339,6 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"cat <<'A' | bash 3<&0 <<'B'\nssh host id\nA\nprintf safe\nB",
 		"bash 3<<'EOF' <& 3</dev/null\nssh host id\nEOF",
 		"bash<<<safe",
-		"cat <<<'$(ssh host id)'",
 		"bash <<'EOF' <<<safe\nssh host id\nEOF",
 		"bash <<<EOF",
 		"bash <<E\\\nOF\nsafe\nEOF",
@@ -2387,6 +2386,8 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"cat <<'E'; bash\nssh host id\nE",
 		"bash -c 'make' <<'EOF'\nssh host id\nEOF",
 		"bash <<'EOF' 0</dev/null\nssh host id\nEOF",
+		"cat <<<'$(ssh host id)'",
+		"cat <<<\"\\$(ssh host id)\"",
 	]) {
 		assert.equal(await verdict(command), undefined,
 			`the body is data: ${command}`);
@@ -2446,9 +2447,6 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"bash <<$'\\u0045OF'\nssh host id\nEOF",
 		"cat <<\"E\\OF\"\nsafe\nE\\OF\nssh host id",
 		"cat <<\"E\\\nOF\"\nsafe\nEOF\nssh host id",
-		"cat <<<'a\\'\"$(ssh host id)\"",
-		"cat <<<\"'$(ssh host id)'\"",
-		"cat <<<\"$(ssh host id)\"",
 		"bash<<<safe <<'EOF'\nssh host id\nEOF",
 		"bash <<<safe <<'EOF'\nssh host id\nEOF",
 		"bash <<< safe <<'EOF'\nssh host id\nEOF",
@@ -2479,6 +2477,10 @@ test("remote guard: a heredoc body is data unless a shell runs it", async () => 
 		"bash <<'A'; cat </dev/null\nssh host id\nA",
 		"bash <<'A'; cat <<'B'\nssh host id\nA\nsafe\nB",
 		"bash <<'OUT'\nsh <<'IN'\nssh host id\nIN\nOUT",
+		"cat <<<\"$(ssh host id)\"",
+		"cat <<<\"\\\\$(ssh host id)\"",
+		"cat <<<\"'$(ssh host id)'\"",
+		"cat <<<'a\\'\"$(ssh host id)\"",
 	]) {
 		assert.equal((await verdict(command))?.block, true,
 			`the shell runs the body: ${command}`);
