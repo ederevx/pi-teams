@@ -2317,6 +2317,36 @@ test("remote guard: keeps file transfer and pi management", async () => {
 	}
 });
 
+test("remote guard: a heredoc body is data unless a shell runs it", async () => {
+	const pi = guardPi();
+	const verdict = async (command) => {
+		const [result] = await pi.emit("tool_call",
+			{ toolName: "bash", input: { command } });
+		return result;
+	};
+	for (const command of [
+		"python - <<'PY'\npi = e.get('pi') if e else None\nPY",
+		"cat > notes.txt <<'EOF'\nssh host rm -rf /tmp/x\nEOF",
+		"cat <<'EOF'\n$(ssh host id)\nEOF",
+		"bash script.sh <<'EOF'\nssh host id\nEOF",
+		"bash -c 'make' <<'EOF'\nssh host id\nEOF",
+	]) {
+		assert.equal(await verdict(command), undefined,
+			`the body is data: ${command}`);
+	}
+	for (const command of [
+		"bash - <<'SH'\nssh host id\nSH",
+		"sudo bash <<'SH'\nssh host id\nSH",
+		"sh <<-EOF\n\tssh host id\n\tEOF",
+		"cat <<EOF\n$(ssh host id)\nEOF",
+		"cat <<'EOF' | bash\nssh host id\nEOF",
+		"bash <<'OUT'\nsh <<'IN'\nssh host id\nIN\nOUT",
+	]) {
+		assert.equal((await verdict(command))?.block, true,
+			`the shell runs the body: ${command}`);
+	}
+});
+
 test("remote guard: covers powershell and never foreign tools", async () => {
 	const pi = guardPi();
 	const [powershell] = await pi.emit("tool_call",
