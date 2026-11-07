@@ -4,6 +4,14 @@ Every release tag gets a section here, derived from the commits since
 the previous tag (`git log <prev-tag>..<tag>`), newest first. `git tag`
 maps each tag to its commit.
 
+## v0.4.58 - 2026-11-07
+
+- A heredoc body is data rather than command positions, so a local
+  script or file whose text mentions ssh, or starts a line with pi, is
+  no longer refused. A shell that runs its standard input still has its
+  body classified, and an unquoted body still contributes the
+  substitutions it executes.
+
 ## v0.4.57 - 2026-11-06
 
 - Advertise immediate, reuse-first routing of incoming work with a
